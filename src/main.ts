@@ -6,6 +6,7 @@ import { computeStateBuckets } from "./schedule/simulation";
 import { TaskTreeUI } from "./ui/taskTree";
 import { TimelineUI } from "./ui/timeline";
 import { updateInspector } from "./ui/inspector";
+import { renderDisciplineDonuts } from "./ui/disciplineDonuts";
 import type { ScheduleData, Task } from "./schedule/types";
 
 const IFC_URL = "/4D.ifc";
@@ -18,6 +19,7 @@ async function main() {
   const scheduleNameEl = document.getElementById("schedule-name")!;
   const currentDateEl = document.getElementById("current-date")!;
   const treeEl = document.getElementById("task-tree")!;
+  const disciplineDonutsEl = document.getElementById("discipline-donuts")!;
   const timelineEl = document.getElementById("timeline")!;
   const viewportEl = document.getElementById("viewport")!;
   const taskSearch = document.getElementById("task-search") as HTMLInputElement | null;
@@ -54,6 +56,11 @@ async function main() {
         ? 0
         : (scheduleRef.productGuidsByTask.get(selectedTask.id)?.length ?? selectedTask.productGuids.length);
     updateInspector(inspectorEls, selectedTask, lastDate, n);
+  };
+
+  const refreshDisciplineCharts = () => {
+    if (!scheduleRef) return;
+    renderDisciplineDonuts(disciplineDonutsEl, scheduleRef, lastDate);
   };
 
   btnShare?.addEventListener("click", async () => {
@@ -134,6 +141,7 @@ async function main() {
         currentDateEl.textContent = formatDateLabel(date);
         tree.update(date);
         refreshInspector();
+        refreshDisciplineCharts();
       },
     });
 
@@ -158,6 +166,7 @@ async function main() {
     tree.update(lastDate);
     currentDateEl.textContent = formatDateLabel(lastDate);
     refreshInspector();
+    refreshDisciplineCharts();
 
     overlay.classList.add("hidden");
   } catch (err) {

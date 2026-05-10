@@ -359,6 +359,101 @@ body {
   gap: 6px;
 }
 
+/* ---------- Disciplinas (gráfico rosca) ---------- */
+.discipline-donuts {
+  flex-shrink: 0;
+  padding: 4px 0 12px;
+  border-bottom: 1px solid var(--border);
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.discipline-donuts.is-empty {
+  padding: 8px 16px 12px;
+}
+
+.discipline-empty-msg {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.discipline-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-tertiary);
+  padding: 4px 16px 8px;
+}
+
+.discipline-donut-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 10px;
+  padding: 0 12px 8px;
+  justify-content: flex-start;
+}
+
+.donut-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  width: 76px;
+}
+
+.donut-ring {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.06);
+}
+
+.donut-hole {
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--bg-app);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+
+.donut-pct {
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  line-height: 1;
+}
+
+.donut-caption {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-align: center;
+  max-width: 76px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.donut-sub {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  text-align: center;
+  line-height: 1.2;
+  max-width: 76px;
+}
+
 .dot {
   width: 8px;
   height: 8px;

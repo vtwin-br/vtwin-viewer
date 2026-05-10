@@ -1,5 +1,6 @@
 import type { ScheduleData, Task, TaskState } from "../schedule/types";
 import { getTaskState } from "../schedule/simulation";
+import { displayTaskName, isInternalProjectCode } from "./taskLabels";
 
 export interface TaskTreeOptions {
   container: HTMLElement;
@@ -54,14 +55,14 @@ export class TaskTreeUI {
 
     const name = document.createElement("span");
     name.className = "name";
-    if (task.identification) {
+    if (task.identification && !isInternalProjectCode(task.identification)) {
       const ident = document.createElement("span");
       ident.className = "ident";
       ident.textContent = task.identification;
       name.appendChild(ident);
     }
-    name.appendChild(document.createTextNode(task.name));
-    name.title = `${task.identification ?? ""} ${task.name}\n` +
+    name.appendChild(document.createTextNode(displayTaskName(task)));
+    name.title = `${displayTaskName(task)}${task.identification ? ` (${task.identification})` : ""}\n` +
       (task.start ? `Inicio: ${fmtDate(task.start)}\n` : "") +
       (task.end ? `Fim:    ${fmtDate(task.end)}\n` : "") +
       `Produtos: ${task.productGuids.length}`;
@@ -133,6 +134,7 @@ export class TaskTreeUI {
       const selfMatch =
         !needle ||
         t.name.toLowerCase().includes(needle) ||
+        displayTaskName(t).toLowerCase().includes(needle) ||
         (t.identification?.toLowerCase().includes(needle) ?? false);
       let childMatch = false;
       for (const c of t.children) {
