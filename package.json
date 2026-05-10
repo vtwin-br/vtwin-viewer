@@ -1,0 +1,24 @@
+{
+  "name": "ifc-4d-viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Visualizador web 4D de IFC com cronograma nativo (IfcWorkSchedule / IfcTask) renderizado via That Open Components",
+  "scripts": {
+    "postinstall": "node scripts/setup-public.mjs",
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@thatopen/components": "~3.4.6",
+    "@thatopen/fragments": "~3.4.5",
+    "three": "0.184.0",
+    "web-ifc": "0.0.77"
+  },
+  "devDependencies": {
+    "@types/three": "0.184.0",
+    "typescript": "^5.4.2",
+    "vite": "^5.4.0"
+  }
+}

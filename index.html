@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%23f4f6f9'/><path d='M16 44 V20 L32 12 L48 20 V44 L32 52 Z' fill='none' stroke='%232563eb' stroke-width='3' stroke-linejoin='round'/></svg>" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Visualizador 4D — IFC</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="header" class="app-header">
+        <div class="header-left">
+          <div class="workspace-pill" title="Espaço de trabalho">
+            <span class="workspace-dot"></span>
+            <span class="workspace-label">IFC 4D</span>
+            <span class="workspace-chevron" aria-hidden="true"></span>
+          </div>
+          <nav class="breadcrumb" aria-label="Navegação">
+            <span class="bc-item">Projetos</span>
+            <span class="bc-sep" aria-hidden="true">/</span>
+            <span class="bc-item">Simulação 4D</span>
+            <span class="bc-sep" aria-hidden="true">/</span>
+            <span class="bc-item bc-current" id="file-name">4D.ifc</span>
+          </nav>
+        </div>
+        <div class="header-right">
+          <div class="date-chip" title="Data da simulação">
+            <span class="date-chip-label">Simulação</span>
+            <span id="current-date" class="date-chip-value">—</span>
+          </div>
+          <button type="button" class="btn-share" id="btn-share" title="Copiar link desta página">
+            <span id="btn-share-label">Compartilhar</span>
+            <span class="btn-share-chevron" aria-hidden="true"></span>
+          </button>
+        </div>
+      </header>
+
+      <div class="body-grid">
+        <nav class="rail" aria-label="Painéis">
+          <button type="button" class="rail-btn is-active" title="Cronograma" data-panel="schedule" disabled>
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
+              <path d="M4 6h16M4 12h10M4 18h14" />
+            </svg>
+          </button>
+          <button type="button" class="rail-btn" title="Modelo (em breve)" disabled>
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
+            </svg>
+          </button>
+          <button type="button" class="rail-btn" title="Comentários (em breve)" disabled>
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+            </svg>
+          </button>
+          <button type="button" class="rail-btn" title="Vistas (em breve)" disabled>
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+            </svg>
+          </button>
+        </nav>
+
+        <aside id="sidebar" class="panel panel-schedule">
+          <div class="panel-head">
+            <h2 class="panel-title">Cronograma</h2>
+            <p class="panel-sub" id="schedule-name">—</p>
+          </div>
+          <div class="panel-toolbar">
+            <label class="sr-only" for="task-search">Filtrar tarefas</label>
+            <input
+              type="search"
+              id="task-search"
+              class="search-input"
+              placeholder="Pesquisar tarefas…"
+              autocomplete="off"
+            />
+          </div>
+          <div class="legend legend-inline">
+            <span class="legend-item"><i class="dot dot-pending"></i>Pendente</span>
+            <span class="legend-item"><i class="dot dot-active"></i>Em execução</span>
+            <span class="legend-item"><i class="dot dot-done"></i>Concluído</span>
+          </div>
+          <div id="task-tree" class="task-tree"></div>
+        </aside>
+
+        <section class="center-column">
+          <div id="viewport-wrapper" class="viewport-shell">
+            <div class="viewport-toolbar" aria-hidden="false">
+              <span class="viewport-label">Vista do modelo</span>
+              <div class="viewport-actions">
+                <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo">⊡</button>
+              </div>
+            </div>
+            <div class="viewport-stage">
+              <div id="viewport" class="viewport-canvas"></div>
+              <div id="loader-overlay" class="loader-overlay">
+                <div class="spinner"></div>
+                <div id="loader-text" class="loader-text">Carregando…</div>
+              </div>
+            </div>
+            <footer id="timeline" class="timeline-dock"></footer>
+          </div>
+        </section>
+
+        <aside id="inspector" class="panel panel-inspector">
+          <div class="inspector-head">
+            <h2 class="panel-title">Selecionado</h2>
+            <span class="inspector-count" id="inspector-count">0</span>
+          </div>
+          <div id="inspector-empty" class="inspector-empty">
+            <p>Clique numa tarefa na árvore para ver o nome, datas e quantos elementos 3D estão associados.</p>
+          </div>
+          <div id="inspector-body" class="inspector-body is-hidden">
+            <dl class="prop-list">
+              <div class="prop-row">
+                <dt>Nome</dt>
+                <dd id="prop-name">—</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Identificação</dt>
+                <dd id="prop-ident">—</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Tipo</dt>
+                <dd id="prop-type">IfcTask</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Estado (data atual)</dt>
+                <dd id="prop-state">—</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Início agendado</dt>
+                <dd id="prop-start">—</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Fim agendado</dt>
+                <dd id="prop-end">—</dd>
+              </div>
+              <div class="prop-row">
+                <dt>Elementos 3D</dt>
+                <dd id="prop-products">—</dd>
+              </div>
+            </dl>
+          </div>
+        </aside>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
