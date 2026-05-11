@@ -7,6 +7,8 @@ import { TaskTreeUI } from "./ui/taskTree";
 import { TimelineUI } from "./ui/timeline";
 import { updateInspector } from "./ui/inspector";
 import { renderDisciplineDonuts } from "./ui/disciplineDonuts";
+import { GoogleEarthLayer, type AnchorLLA } from "./viewer/earthTiles";
+import { EarthPanel } from "./ui/earthPanel";
 import type { ScheduleData, Task } from "./schedule/types";
 
 const IFC_URL = "/4D.ifc";
@@ -26,6 +28,7 @@ async function main() {
   const btnShare = document.getElementById("btn-share");
   const btnShareLabel = document.getElementById("btn-share-label");
   const btnFit = document.getElementById("btn-fit");
+  const btnEarth = document.getElementById("btn-earth") as HTMLButtonElement | null;
 
   const inspectorEls = {
     empty: document.getElementById("inspector-empty")!,
@@ -130,6 +133,65 @@ async function main() {
 
     btnFit?.addEventListener("click", () => {
       void refitViewerCamera(viewer, "main");
+    });
+
+    // -- Camada Google Earth (Photorealistic 3D Tiles) -----------------------
+    // Ancora ficticia para os testes: Av. Paulista (Trianon-MASP), Sao Paulo.
+    // O heading roda o IFC para alinhar com a rua. A altitude eh aproximada
+    // ao nivel do passeio; ajusta-se finamente com Settings -> Anchor (futuro).
+    const FICTITIOUS_ANCHOR: AnchorLLA = {
+      lat: -23.5614,
+      lon: -46.6559,
+      altitude: 760,
+      heading: 0,
+    };
+    const apiKey = (import.meta.env?.VITE_GOOGLE_MAP_TILES_API_KEY as string | undefined) ?? "";
+    const earth = new GoogleEarthLayer(viewer.world, {
+      apiKey,
+      anchor: FICTITIOUS_ANCHOR,
+      // Default 0: nada de "prato" branco a esconder o terreno do Google.
+      // O slider no painel deixa o utilizador subir caso o IFC se misture com
+      // edificios reais por baixo.
+      hideRadiusMeters: 0,
+    });
+
+    const earthPanelRoot = document.getElementById("earth-panel");
+    const earthPanel = earthPanelRoot
+      ? new EarthPanel(earthPanelRoot, {
+          initial: { anchor: earth.getAnchor(), hideRadius: earth.getHideRadius() },
+          onChange: (state) => {
+            earth.setAnchor(state.anchor);
+            earth.setHideRadius(state.hideRadius);
+          },
+          onClose: () => {
+            void earth.setEnabled(false);
+            btnEarth?.classList.remove("is-active");
+            btnEarth?.setAttribute("aria-pressed", "false");
+            if (btnEarth) btnEarth.title = "Mostrar contexto Google Earth";
+          },
+        })
+      : null;
+
+    btnEarth?.addEventListener("click", async () => {
+      if (!apiKey) {
+        window.alert(
+          "Para ativar a camada Google Earth define a variavel VITE_GOOGLE_MAP_TILES_API_KEY " +
+            "(num arquivo .env na raiz) com a tua chave da Google Map Tiles API e reinicia o dev server.",
+        );
+        return;
+      }
+      const next = !earth.enabled;
+      try {
+        await earth.setEnabled(next);
+        btnEarth.classList.toggle("is-active", earth.enabled);
+        btnEarth.setAttribute("aria-pressed", earth.enabled ? "true" : "false");
+        btnEarth.title = earth.enabled ? "Ocultar contexto Google Earth" : "Mostrar contexto Google Earth";
+        if (earth.enabled) earthPanel?.show();
+        else earthPanel?.hide();
+      } catch (err) {
+        console.error("Falha a (des)ativar Google Earth:", err);
+        window.alert(`Nao foi possivel ativar a camada Google Earth: ${(err as Error).message}`);
+      }
     });
 
     new TimelineUI({

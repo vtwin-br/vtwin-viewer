@@ -5,3 +5,8 @@ dist/
 .DS_Store
 public/wasm/
 public/4D.ifc
+
+# Variaveis de ambiente (chaves de API, etc)
+.env
+.env.local
+.env.*.local

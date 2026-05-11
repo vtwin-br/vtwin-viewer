@@ -95,11 +95,115 @@
             <div class="viewport-toolbar" aria-hidden="false">
               <span class="viewport-label">Vista do modelo</span>
               <div class="viewport-actions">
+                <button
+                  type="button"
+                  class="icon-btn icon-btn-toggle"
+                  id="btn-earth"
+                  title="Mostrar contexto Google Earth"
+                  aria-pressed="false"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                    <circle cx="12" cy="12" r="9" />
+                    <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+                  </svg>
+                  <span class="icon-btn-label">Earth</span>
+                </button>
                 <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo">⊡</button>
               </div>
             </div>
             <div class="viewport-stage">
               <div id="viewport" class="viewport-canvas"></div>
+              <aside id="earth-panel" class="earth-panel is-hidden" aria-label="Posicionar modelo no globo">
+                <header class="earth-panel-head">
+                  <div class="earth-panel-title">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+                    </svg>
+                    <span>Posicionar no globo</span>
+                  </div>
+                  <button type="button" class="earth-panel-close" id="earth-panel-close" aria-label="Fechar">×</button>
+                </header>
+                <div class="earth-panel-body">
+                  <div class="ep-presets" role="group" aria-label="Locais sugeridos">
+                    <button type="button" class="ep-chip" data-lat="-23.5614" data-lon="-46.6559" data-alt="760">Av. Paulista</button>
+                    <button type="button" class="ep-chip" data-lat="-22.9519" data-lon="-43.2105" data-alt="0">Rio • Pão de Açúcar</button>
+                    <button type="button" class="ep-chip" data-lat="-15.7975" data-lon="-47.8919" data-alt="1100">Brasília</button>
+                  </div>
+
+                  <div class="ep-row">
+                    <label for="ep-paste">Colar do Google Maps</label>
+                    <input
+                      id="ep-paste"
+                      class="ep-text"
+                      type="text"
+                      placeholder="link do Maps ou -23.5614,-46.6559"
+                      autocomplete="off"
+                    />
+                  </div>
+
+                  <div class="ep-grid">
+                    <div class="ep-row">
+                      <label for="ep-lat">Latitude</label>
+                      <input id="ep-lat" class="ep-num" type="number" step="0.000001" />
+                    </div>
+                    <div class="ep-row">
+                      <label for="ep-lon">Longitude</label>
+                      <input id="ep-lon" class="ep-num" type="number" step="0.000001" />
+                    </div>
+                  </div>
+
+                  <div class="ep-row">
+                    <div class="ep-label-row">
+                      <label for="ep-alt-num">Altitude</label>
+                      <span class="ep-unit">m sobre o elipsoide</span>
+                    </div>
+                    <div class="ep-slider-row">
+                      <input id="ep-alt-range" class="ep-range" type="range" min="-50" max="3000" step="0.5" />
+                      <input id="ep-alt-num" class="ep-num ep-num-sm" type="number" step="0.1" />
+                    </div>
+                  </div>
+
+                  <div class="ep-row">
+                    <div class="ep-label-row">
+                      <label for="ep-heading-num">Rotação (heading)</label>
+                      <span class="ep-unit">° em torno do norte</span>
+                    </div>
+                    <div class="ep-slider-row">
+                      <input id="ep-heading-range" class="ep-range" type="range" min="0" max="360" step="0.5" />
+                      <input id="ep-heading-num" class="ep-num ep-num-sm" type="number" min="0" max="360" step="0.5" />
+                    </div>
+                  </div>
+
+                  <div class="ep-row">
+                    <div class="ep-label-row">
+                      <label for="ep-hide-num">Esconder tiles ao redor</label>
+                      <span class="ep-unit">raio em metros</span>
+                    </div>
+                    <div class="ep-slider-row">
+                      <input id="ep-hide-range" class="ep-range" type="range" min="0" max="300" step="5" />
+                      <input id="ep-hide-num" class="ep-num ep-num-sm" type="number" min="0" max="500" step="1" />
+                    </div>
+                  </div>
+
+                  <div class="ep-nudge" role="group" aria-label="Empurrar finamente">
+                    <span class="ep-nudge-label">Ajuste fino</span>
+                    <div class="ep-nudge-grid">
+                      <button type="button" class="ep-nudge-btn" data-dir="N" title="1 m para Norte">↑</button>
+                      <button type="button" class="ep-nudge-btn" data-dir="W" title="1 m para Oeste">←</button>
+                      <button type="button" class="ep-nudge-btn" data-dir="E" title="1 m para Leste">→</button>
+                      <button type="button" class="ep-nudge-btn" data-dir="S" title="1 m para Sul">↓</button>
+                      <button type="button" class="ep-nudge-btn" data-dir="U" title="0,5 m para cima">+ alt</button>
+                      <button type="button" class="ep-nudge-btn" data-dir="D" title="0,5 m para baixo">− alt</button>
+                    </div>
+                  </div>
+
+                  <div class="ep-actions">
+                    <button type="button" id="ep-copy" class="ep-btn ep-btn-ghost">Copiar coordenadas</button>
+                    <a id="ep-open-maps" class="ep-btn ep-btn-ghost" target="_blank" rel="noopener">Abrir no Maps</a>
+                  </div>
+                </div>
+              </aside>
               <div id="loader-overlay" class="loader-overlay">
                 <div class="spinner"></div>
                 <div id="loader-text" class="loader-text">Carregando…</div>

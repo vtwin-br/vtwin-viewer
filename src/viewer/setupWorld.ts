@@ -27,13 +27,28 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
   >();
 
   world.scene = new OBC.SimpleScene(components);
-  world.renderer = new OBC.SimpleRenderer(components, container);
+  world.renderer = new OBC.SimpleRenderer(components, container, {
+    // Necessario para coexistir com tiles globais (Google Photorealistic 3D Tiles)
+    // sem perder precisao de profundidade no IFC (que esta perto da camara).
+    logarithmicDepthBuffer: true,
+    antialias: true,
+  });
   world.camera = new OBC.OrthoPerspectiveCamera(components);
   world.scene.setup();
   world.scene.three.background = new THREE.Color(0xf0f2f6);
   world.renderer.showLogo = false;
 
   components.init();
+
+  // Aumenta o far plane das cameras (perspectiva e ortografica) para suportar
+  // a malha global do Google. O log depth buffer cuida da precisao perto.
+  const cam = world.camera as OBC.OrthoPerspectiveCamera;
+  cam.threePersp.far = 1e7;
+  cam.threePersp.near = 0.1;
+  cam.threePersp.updateProjectionMatrix();
+  cam.threeOrtho.far = 1e7;
+  cam.threeOrtho.near = -1e7;
+  cam.threeOrtho.updateProjectionMatrix();
 
   // Grid para referencia espacial
   const grids = components.get(OBC.Grids);
