@@ -20,6 +20,9 @@ export interface SimulationStateBuckets {
  * Se um produto pertence a varias tasks, prevalece nesta ordem:
  * active > pending > done
  * (uma task ainda em execucao "trava" o produto em amarelo).
+ *
+ * Produtos só ligados a tarefas SEM data não entram na simulação 4D:
+ * ficam sempre visíveis (contexto do modelo).
  */
 export function computeStateBuckets(
   schedule: ScheduleData,
@@ -36,19 +39,17 @@ export function computeStateBuckets(
   const done = new Set<string>();
 
   for (const [guid, tasks] of leafByGuid) {
+    const timed = tasks.filter((task) => task.start && task.end);
+    if (timed.length === 0) continue;
+
     let state: TaskState = "done";
     let anyActive = false;
     let anyPending = false;
     let anyDone = false;
 
-    for (const task of tasks) {
-      const s = task.start ? task.start.getTime() : undefined;
-      const e = task.end ? task.end.getTime() : undefined;
-      if (s == null || e == null) {
-        // sem tempo: assume sempre concluido (parte estrutural do edificio)
-        anyDone = true;
-        continue;
-      }
+    for (const task of timed) {
+      const s = task.start!.getTime();
+      const e = task.end!.getTime();
       if (t < s) anyPending = true;
       else if (t <= e) anyActive = true;
       else anyDone = true;

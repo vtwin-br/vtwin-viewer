@@ -25,6 +25,10 @@ export interface EarthTilesOptions {
    * evitar sobreposicao com o IFC. 0 = mostra tudo. Recomendado 30-200 m.
    */
   hideRadiusMeters?: number;
+  /** Chamado quando o terreno do Google é amostrado (altura elipsoide, m). */
+  onTerrainSnap?: (ellipsoidMeters: number) => void;
+  /** Chamado se a malha não der um ponto de chão credível. */
+  onTerrainSnapFail?: () => void;
 }
 
 /**
@@ -40,6 +44,17 @@ export class GoogleEarthLayer {
   private localFrameInv = new THREE.Matrix4();
   private updateUnsub: (() => void) | null = null;
   private clipBox: THREE.Mesh | null = null;
+  private clipCenter = new THREE.Vector3(0, 0.05, 0);
+  private snapPending = false;
+  private snapUntil = 0;
+  private snapStarted = 0;
+  private loadModelUnsub: (() => void) | null = null;
+  private readonly raycaster = new THREE.Raycaster();
+  private readonly rayOrigin = new THREE.Vector3();
+  private readonly rayDir = new THREE.Vector3(0, -1, 0);
+  private readonly ecefHit = new THREE.Vector3();
+  private readonly cartHit = { lat: 0, lon: 0, height: 0 };
+  private snapErrorTarget: number | null = null;
   private sky: Sky | null = null;
   private prevBackground: THREE.Color | THREE.Texture | null = null;
   private _enabled = false;
@@ -68,15 +83,67 @@ export class GoogleEarthLayer {
     else this.detach();
   }
 
-  /** Reposiciona o anchor sem destruir a camada. */
-  setAnchor(anchor: AnchorLLA): void {
+  /** Reposiciona o anchor. Por omissão volta a assentar os tiles no terreno. */
+  setAnchor(anchor: AnchorLLA, opts?: { snap?: boolean }): void {
+    const prev = this.opts.anchor;
+    const moved =
+      Math.abs(prev.lat - anchor.lat) > 1e-8 || Math.abs(prev.lon - anchor.lon) > 1e-8;
     this.opts.anchor = anchor;
     if (this.tiles) this.applyAnchorTransform();
+    if (opts?.snap ?? moved) this.requestTerrainSnap();
+  }
+
+  /** Assenta o chão do Google em Y=0 (origem do IFC), sem mexer no modelo. */
+  requestTerrainSnap(): void {
+    this.snapPending = true;
+    this.snapStarted = performance.now();
+    this.snapUntil = this.snapStarted + 45000;
+    if (this.tiles && this.snapErrorTarget == null) {
+      this.snapErrorTarget = this.tiles.errorTarget;
+      this.tiles.errorTarget = Math.min(this.tiles.errorTarget, 12);
+    }
+    this.tryTerrainSnap();
   }
 
   setHideRadius(meters: number): void {
     this.opts.hideRadiusMeters = meters;
     this.refreshClipBox();
+  }
+
+  /** Reposiciona o disco de oclusão (segue o modelo quando ele é arrastado). */
+  setClipCenter(x: number, y: number, z: number): void {
+    this.clipCenter.set(x, y + 0.05, z);
+    if (this.clipBox) this.clipBox.position.copy(this.clipCenter);
+  }
+
+  /** Grupo dos Photorealistic 3D Tiles (colisão em 1ª pessoa). */
+  getTilesGroup(): THREE.Object3D | null {
+    return this.tiles?.group ?? null;
+  }
+
+  /**
+   * Raycast na malha do Google. Ignora o disco de oclusão do IFC.
+   * `far` em metros no referencial local (Y-up).
+   */
+  raycast(origin: THREE.Vector3, dir: THREE.Vector3, far = 80): THREE.Intersection | null {
+    if (!this.tiles) return null;
+    const ndir = dir.lengthSq() > 0 ? dir.clone().normalize() : dir;
+    this.raycaster.near = 0;
+    this.raycaster.far = far;
+    this.raycaster.set(origin, ndir);
+    const found = this.raycaster.intersectObject(this.tiles.group, true);
+    for (const h of found) {
+      if (h.object === this.clipBox) continue;
+      if (!Number.isFinite(h.distance) || h.distance > far) continue;
+      return h;
+    }
+    return null;
+  }
+
+  /** Mais detalhe nos tiles quando se anda (melhor hitbox no chão). */
+  setWalkQuality(on: boolean): void {
+    if (!this.tiles) return;
+    this.tiles.errorTarget = on ? 16 : 32;
   }
 
   // -------------------------------------------------------------------------
@@ -121,6 +188,16 @@ export class GoogleEarthLayer {
     this.applyAnchorTransform();
     this.refreshClipBox();
 
+    const onLoadModel = () => {
+      if (!this.snapPending) return;
+      this.snapUntil = Math.min(this.snapUntil + 6000, this.snapStarted + 90000);
+      this.tryTerrainSnap();
+    };
+    tiles.addEventListener("load-model", onLoadModel);
+    this.loadModelUnsub = () => tiles.removeEventListener("load-model", onLoadModel);
+
+    this.requestTerrainSnap();
+
     // Update por frame. Mantemos a camera ativa do TilesRenderer sincronizada com
     // a do viewer (perspectiva <-> ortografica), pois o OrthoPerspectiveCamera
     // troca a referencia interna sem emitir evento.
@@ -135,6 +212,7 @@ export class GoogleEarthLayer {
       }
       this.tiles.setResolutionFromRenderer(c, renderer);
       this.tiles.update();
+      if (this.snapPending) this.tryTerrainSnap();
     };
     this.world.renderer!.onBeforeUpdate.add(updateFn);
     this.updateUnsub = () => this.world.renderer!.onBeforeUpdate.remove(updateFn);
@@ -146,6 +224,10 @@ export class GoogleEarthLayer {
     if (!this.tiles) return;
     this.updateUnsub?.();
     this.updateUnsub = null;
+    this.loadModelUnsub?.();
+    this.loadModelUnsub = null;
+    this.snapPending = false;
+    this.restoreSnapErrorTarget();
 
     this.world.scene.three.remove(this.tiles.group);
     if (this.clipBox) {
@@ -238,8 +320,91 @@ export class GoogleEarthLayer {
     this.tiles.group.matrixAutoUpdate = false;
     this.tiles.group.matrix.copy(this.localFrameInv);
     this.tiles.group.matrixWorldNeedsUpdate = true;
+    this.tiles.group.updateMatrixWorld(true);
 
     this.refreshClipBox();
+  }
+
+  private finishSnap(ok: boolean): void {
+    this.snapPending = false;
+    this.restoreSnapErrorTarget();
+    if (ok) this.opts.onTerrainSnap?.(this.opts.anchor.altitude);
+    else this.opts.onTerrainSnapFail?.();
+  }
+
+  private restoreSnapErrorTarget(): void {
+    if (this.tiles && this.snapErrorTarget != null) {
+      this.tiles.errorTarget = this.snapErrorTarget;
+    }
+    this.snapErrorTarget = null;
+  }
+
+  /**
+   * Amostra a malha fotorrealista e coloca o frame ENU à cota do chão
+   * (Y=0). Ignora tiles grosseiros do globo (acordes de milhares de metros).
+   */
+  private tryTerrainSnap(): boolean {
+    if (!this.tiles) return false;
+    if (performance.now() > this.snapUntil) {
+      this.finishSnap(false);
+      return false;
+    }
+    const height = this.sampleTerrainEllipsoidHeight();
+    if (height == null) return false;
+    if (Math.abs(height - this.opts.anchor.altitude) < 0.2) {
+      this.finishSnap(true);
+      return true;
+    }
+    this.opts.anchor = { ...this.opts.anchor, altitude: height };
+    this.applyAnchorTransform();
+    return false;
+  }
+
+  /**
+   * Altura elipsoide (m) do chão Google sob o modelo.
+   * Descarta intersecções cujo height cartográfico está fora do relevo terrestre
+   * — o primeiro LOD do Google é um globo de poucos triângulos, com o “chão”
+   * a ~10–20 km abaixo do plano tangente.
+   */
+  private sampleTerrainEllipsoidHeight(): number | null {
+    if (!this.tiles) return null;
+    this.tiles.group.updateMatrixWorld(true);
+    const cam = (this.world.camera as OBC.OrthoPerspectiveCamera).three;
+    this.raycaster.camera = cam;
+    this.raycaster.firstHitOnly = true;
+    this.raycaster.near = 0;
+    this.raycaster.far = 400000;
+    const heights: number[] = [];
+    const xs = [0, 12, -12, 0, 0];
+    const zs = [0, 0, 0, 12, -12];
+    const ys = [this.clipCenter.y + 4000, this.clipCenter.y + 30000, 120000];
+    for (const y0 of ys) {
+      for (let i = 0; i < xs.length; i++) {
+        this.rayOrigin.set(this.clipCenter.x + xs[i], y0, this.clipCenter.z + zs[i]);
+        this.raycaster.set(this.rayOrigin, this.rayDir);
+        const found = this.raycaster.intersectObject(this.tiles.group, true);
+        for (const hit of found) {
+          if (hit.object === this.clipBox) continue;
+          const h = this.hitToEllipsoidHeight(hit.point);
+          if (h != null) heights.push(h);
+        }
+      }
+      if (heights.length) break;
+    }
+    if (heights.length === 0) return null;
+    heights.sort((a, b) => a - b);
+    return heights[Math.floor(heights.length / 2)];
+  }
+
+  private hitToEllipsoidHeight(worldPoint: THREE.Vector3): number | null {
+    if (!this.tiles) return null;
+    this.ecefHit.copy(worldPoint).applyMatrix4(this.tiles.group.matrixWorldInverse);
+    this.tiles.ellipsoid.getPositionToCartographic(this.ecefHit, this.cartHit);
+    const h = this.cartHit.height;
+    if (!Number.isFinite(h)) return null;
+    // Mar Morto ~−430 m; Everest ~8850 m. Fora disto é LOD grosseiro / erro.
+    if (h < -500 || h > 9000) return null;
+    return h;
   }
 
   /**
@@ -277,9 +442,7 @@ export class GoogleEarthLayer {
       this.world.scene.three.add(this.clipBox);
     }
     this.clipBox.scale.setScalar(r);
-    // Eleva 5 cm para ficar visivelmente sobre o terreno do tile, sem briga
-    // de z-fighting. Com log depth + offset, isto eh imperceptivel.
-    this.clipBox.position.set(0, 0.05, 0);
+    this.clipBox.position.copy(this.clipCenter);
   }
 }
 

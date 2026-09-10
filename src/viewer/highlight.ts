@@ -25,12 +25,11 @@ function selectionMaterial(): FRAGS.MaterialDefinition {
 }
 
 /**
- * Aplica os estados (pending/active/done) no FragmentsModel:
- *   - active   -> highlight amarelo
- *   - pending  -> oculto (setVisible false)
- *   - done     -> visivel, sem highlight (cor original)
- *
- * Trabalha com lotes para minimizar chamadas no worker do fragments.
+ * Visibilidade 4D:
+ *   - Pré-play / início parado: mostra o modelo inteiro.
+ *   - Play, pause a meio ou fim: só produtos COM início e fim.
+ *     pending oculto, active amarelo, done cor original.
+ *     Sem data fica oculto.
  */
 export class ScheduleHighlighter {
   private model: FRAGS.FragmentsModel;
@@ -41,15 +40,14 @@ export class ScheduleHighlighter {
   private guidToLocal = new Map<string, number>();
   /** Cache localId -> GUID. */
   private localToGuid = new Map<number, string>();
+  private allGeomIds: number[] = [];
+  private readyDone = false;
+  /** Localids atualmente ocultos. */
+  private currentHidden = new Set<number>();
   /** Localids de cada estado atualmente aplicado, para desfazer rapidamente. */
   private currentActive = new Set<number>();
-  private currentPending = new Set<number>();
   /** LocalIds atualmente "selecionados" pelo usuario via UI. */
   private currentSelection = new Set<number>();
-  /** LocalIds que participam da simulação (têm tarefa associada no IFC). */
-  private scheduledLocalIds = new Set<number>();
-  /** Já escondemos geometria sem cronograma (IfcSpace, etc.). */
-  private nonScheduledHidden = false;
 
   constructor(
     model: FRAGS.FragmentsModel,
@@ -61,83 +59,92 @@ export class ScheduleHighlighter {
     this.allGuids = [...new Set(allGuids)];
   }
 
-  /** Resolve GUIDs -> localIds no modelo (uma unica vez). */
+  /** Resolve GUIDs -> localIds e lista a geometria do modelo. */
   async ready(): Promise<void> {
-    if (this.guidToLocal.size > 0) return;
-    const localIds = await this.model.getLocalIdsByGuids(this.allGuids);
-    for (let i = 0; i < this.allGuids.length; i++) {
-      const guid = this.allGuids[i];
-      const local = localIds[i];
-      if (typeof local === "number") {
-        this.guidToLocal.set(guid, local);
-        this.localToGuid.set(local, guid);
-        this.scheduledLocalIds.add(local);
+    if (this.readyDone) return;
+    this.readyDone = true;
+    if (this.allGuids.length > 0) {
+      const localIds = await this.model.getLocalIdsByGuids(this.allGuids);
+      for (let i = 0; i < this.allGuids.length; i++) {
+        const guid = this.allGuids[i];
+        const local = localIds[i];
+        if (typeof local === "number") {
+          this.guidToLocal.set(guid, local);
+          this.localToGuid.set(local, guid);
+        }
       }
     }
-    await this.hideGeometryWithoutSchedule();
+    this.allGeomIds = await this.model.getItemsIdsWithGeometry();
   }
 
   /**
-   * Esconde tudo o que tem geometria no Fragments mas não está ligado a nenhuma
-   * tarefa do cronograma (ex.: IfcSpace, zonas, mobiliário sem IfcRelAssignsToProduct).
-   * Assim, no dia 0 só o “vazio” aparece até as tarefas liberarem elementos.
+   * @param previewAll true no início, sem play — modelo completo visível.
    */
-  private async hideGeometryWithoutSchedule(): Promise<void> {
-    if (this.nonScheduledHidden) return;
-    this.nonScheduledHidden = true;
-
-    const allGeom = await this.model.getItemsIdsWithGeometry();
-    const scheduled = this.scheduledLocalIds;
-
-    let toHide: number[];
-    if (scheduled.size === 0) {
-      toHide = allGeom;
-    } else {
-      toHide = allGeom.filter((id) => !scheduled.has(id));
-    }
-
-    const chunk = 4000;
-    for (let i = 0; i < toHide.length; i += chunk) {
-      await this.model.setVisible(toHide.slice(i, i + chunk), false);
-    }
-    await this.fragments.core.update(true);
-  }
-
-  /** Aplica os estados do simulador no modelo. */
-  async apply(buckets: SimulationStateBuckets): Promise<void> {
+  async apply(
+    buckets: SimulationStateBuckets,
+    opts: { previewAll: boolean } = { previewAll: false },
+  ): Promise<void> {
     await this.ready();
 
-    const nextActive = new Set(this.guidsToLocals(buckets.active));
-    const nextPending = new Set(this.guidsToLocals(buckets.pending));
+    if (opts.previewAll) {
+      await this.showFullModel();
+      return;
+    }
 
-    // 1) Reseta o que saiu do estado "active"
+    const nextActive = new Set(this.guidsToLocals(buckets.active));
+    const nextDone = new Set(this.guidsToLocals(buckets.done));
+    const nextVisible = new Set<number>([...nextActive, ...nextDone]);
+
+    const nextHidden = new Set<number>();
+    for (const id of this.allGeomIds) {
+      if (!nextVisible.has(id)) nextHidden.add(id);
+    }
+
     const activeToReset = diff(this.currentActive, nextActive);
     if (activeToReset.length > 0) {
       await this.model.resetHighlight(activeToReset);
     }
-
-    // 2) Aplica highlight amarelo no que entrou em "active"
     const activeToAdd = diff(nextActive, this.currentActive);
     if (activeToAdd.length > 0) {
       await this.model.highlight(activeToAdd, activeMaterial());
     }
 
-    // 3) Visibilidade: pending fica oculto, restante visivel
-    const toHide = diff(nextPending, this.currentPending);
-    const toShow = diff(this.currentPending, nextPending);
-    if (toHide.length > 0) await this.model.setVisible(toHide, false);
-    if (toShow.length > 0) await this.model.setVisible(toShow, true);
+    const toHide = diff(nextHidden, this.currentHidden);
+    const toShow = diff(this.currentHidden, nextHidden);
+    if (toHide.length > 0) await this.setVisibleMany(toHide, false);
+    if (toShow.length > 0) await this.setVisibleMany(toShow, true);
 
     this.currentActive = nextActive;
-    this.currentPending = nextPending;
+    this.currentHidden = nextHidden;
 
-    // Reaplica selecao do usuario por cima (caso tenha sido sobreposta)
     if (this.currentSelection.size > 0) {
       const selArr = [...this.currentSelection];
       await this.model.highlight(selArr, selectionMaterial());
     }
 
     await this.fragments.core.update(true);
+  }
+
+  private async showFullModel(): Promise<void> {
+    if (this.currentActive.size > 0) {
+      await this.model.resetHighlight([...this.currentActive]);
+      this.currentActive.clear();
+    }
+    if (this.currentHidden.size > 0) {
+      await this.setVisibleMany([...this.currentHidden], true);
+      this.currentHidden.clear();
+    }
+    if (this.currentSelection.size > 0) {
+      await this.model.highlight([...this.currentSelection], selectionMaterial());
+    }
+    await this.fragments.core.update(true);
+  }
+
+  private async setVisibleMany(ids: number[], visible: boolean): Promise<void> {
+    const chunk = 4000;
+    for (let i = 0; i < ids.length; i += chunk) {
+      await this.model.setVisible(ids.slice(i, i + chunk), visible);
+    }
   }
 
   /** Destaca em azul os produtos de uma task. Substitui a selecao anterior. */
@@ -176,6 +183,35 @@ export class ScheduleHighlighter {
       await this.model.highlight(stillActive, activeMaterial());
     }
     await this.fragments.core.update(true);
+  }
+
+  /**
+   * Raycast no clique do rato. Devolve o GlobalId do produto atingido,
+   * ou null se o clique não acertar geometria do cronograma.
+   */
+  async pickGuid(
+    camera: THREE.Camera,
+    event: PointerEvent | MouseEvent,
+    dom: HTMLElement,
+  ): Promise<string | null> {
+    await this.ready();
+    const mouse = new THREE.Vector2(event.clientX, event.clientY);
+    const result = await this.model.raycast({
+      camera: camera as THREE.PerspectiveCamera | THREE.OrthographicCamera,
+      mouse,
+      dom: dom as HTMLCanvasElement,
+    });
+    if (!result) return null;
+    const known = this.localToGuid.get(result.localId);
+    if (known) return known;
+    const getter = this.model as unknown as {
+      getGuidsByLocalIds?: (ids: number[]) => Promise<(string | null | undefined)[]>;
+    };
+    if (typeof getter.getGuidsByLocalIds === "function") {
+      const guids = await getter.getGuidsByLocalIds([result.localId]);
+      return guids?.[0] ?? null;
+    }
+    return null;
   }
 
   private guidsToLocals(guids: Iterable<string>): number[] {

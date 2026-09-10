@@ -1,9 +1,6 @@
 import type { ScheduleData, Task } from "../schedule/types";
 import { getTaskState } from "../schedule/simulation";
-import { displayTaskName, isInternalProjectCode } from "./taskLabels";
-
-/** Cores alinhadas à legenda do painel (pendente / execução / concluído). */
-const COL = { pending: "#94a3b8", active: "#d97706", done: "#059669" };
+import { displayTaskName } from "./taskLabels";
 
 /**
  * Tarefa-pai da fase de obra (disciplinas como filhos).
@@ -28,13 +25,12 @@ function findConstructionPhaseRoot(schedule: ScheduleData): Task | undefined {
   return undefined;
 }
 
-function findDisciplineGroups(schedule: ScheduleData): Task[] {
+export function findDisciplineGroups(schedule: ScheduleData): Task[] {
   const construction = findConstructionPhaseRoot(schedule);
   if (construction != null && construction.children.length > 0) {
     return construction.children;
   }
 
-  // Fallback: filhos de tarefa com nome exatamente "Construction" ou "Obra" (evita falso positivo em títulos longos)
   const out: Task[] = [];
   const seen = new Set<number>();
   const collectFromObraLike = (t: Task) => {
@@ -52,7 +48,6 @@ function findDisciplineGroups(schedule: ScheduleData): Task[] {
   for (const r of schedule.roots) collectFromObraLike(r);
   if (out.length > 0) return out;
 
-  // Último recurso: nós com código de fase  *.n (apenas para mapear dados; rótulos vêm do Name)
   const byCode: Task[] = [];
   const collect = (t: Task) => {
     const id = t.identification ?? "";
@@ -63,7 +58,7 @@ function findDisciplineGroups(schedule: ScheduleData): Task[] {
   return byCode;
 }
 
-function countLeafStates(task: Task, currentDate: Date): { pending: number; active: number; done: number } {
+export function countLeafStates(task: Task, currentDate: Date): { pending: number; active: number; done: number } {
   let pending = 0;
   let active = 0;
   let done = 0;
@@ -82,43 +77,8 @@ function countLeafStates(task: Task, currentDate: Date): { pending: number; acti
   return { pending, active, done };
 }
 
-function disciplineCaption(task: Task): string {
-  const n = displayTaskName(task);
-  return n.length > 24 ? n.slice(0, 22) + "…" : n;
-}
-
-function conicBackground(p: number, a: number, d: number): string {
-  const t = p + a + d;
-  if (t === 0) {
-    return `conic-gradient(${COL.pending} 0turn 1turn)`;
-  }
-  const dTurn = d / t;
-  const aTurn = a / t;
-  const pTurn = p / t;
-  let x = 0;
-  const stops: string[] = [];
-  if (d > 0) {
-    stops.push(`${COL.done} ${x}turn ${(x += dTurn)}turn`);
-  }
-  if (a > 0) {
-    stops.push(`${COL.active} ${x}turn ${(x += aTurn)}turn`);
-  }
-  if (p > 0) {
-    stops.push(`${COL.pending} ${x}turn 1turn`);
-  }
-  if (stops.length === 0) {
-    return `conic-gradient(${COL.pending} 0turn 1turn)`;
-  }
-  return `conic-gradient(${stops.join(", ")})`;
-}
-
-function pct(n: number, total: number): string {
-  if (total <= 0) return "0";
-  return Math.round((100 * n) / total) + "%";
-}
-
 /**
- * Atualiza o bloco de roscas por disciplina na data da simulação.
+ * Atualiza o bloco de progresso por disciplina na data da simulação.
  */
 export function renderDisciplineDonuts(
   container: HTMLElement,
@@ -133,7 +93,7 @@ export function renderDisciplineDonuts(
     const p = document.createElement("p");
     p.className = "discipline-empty-msg";
     p.textContent =
-      "Não foi encontrada uma fase de obra com subtarefas por disciplina. Verifique se o IFC tem uma tarefa de obra (ex.: Construction / Obra) com filhos.";
+      "Não foi encontrada uma fase de obra com subtarefas por disciplina.";
     container.appendChild(p);
     return;
   }
@@ -141,50 +101,58 @@ export function renderDisciplineDonuts(
   container.classList.remove("is-empty");
   const title = document.createElement("div");
   title.className = "discipline-section-title";
-  title.textContent = "Disciplinas da obra";
+  title.textContent = "Disciplinas";
   container.appendChild(title);
 
-  const grid = document.createElement("div");
-  grid.className = "discipline-donut-grid";
+  const list = document.createElement("div");
+  list.className = "discipline-list";
 
   for (const disc of groups) {
     const { pending, active, done } = countLeafStates(disc, currentDate);
     const total = pending + active + done;
-
-    const card = document.createElement("div");
-    card.className = "donut-card";
-    const fullName = displayTaskName(disc);
-    card.title = `${fullName}\nConcluído: ${done} · Em execução: ${active} · Pendente: ${pending}`;
-
-    const ring = document.createElement("div");
-    ring.className = "donut-ring";
-    ring.style.background = conicBackground(pending, active, done);
-
-    const hole = document.createElement("div");
-    hole.className = "donut-hole";
-    const pctEl = document.createElement("span");
-    pctEl.className = "donut-pct";
     const donePct = total > 0 ? Math.round((100 * done) / total) : 0;
+    const fullName = displayTaskName(disc);
+
+    const row = document.createElement("div");
+    row.className = "disc-row";
+    row.title = `${fullName}\nConcluído: ${done} · Em execução: ${active} · Pendente: ${pending}`;
+
+    const head = document.createElement("div");
+    head.className = "disc-head";
+    const name = document.createElement("span");
+    name.className = "disc-name";
+    name.textContent = fullName;
+    const pctEl = document.createElement("span");
+    pctEl.className = "disc-pct";
     pctEl.textContent = `${donePct}%`;
-    hole.appendChild(pctEl);
-    ring.appendChild(hole);
+    head.append(name, pctEl);
 
-    const cap = document.createElement("div");
-    cap.className = "donut-caption";
-    cap.textContent = disciplineCaption(disc);
+    const track = document.createElement("div");
+    track.className = "disc-track";
+    track.setAttribute("role", "img");
+    track.setAttribute(
+      "aria-label",
+      `${fullName}: ${donePct}% concluído`,
+    );
 
-    const sub = document.createElement("div");
-    sub.className = "donut-sub";
-    sub.textContent =
-      total > 0
-        ? `${pct(done, total)} · ${pct(active, total)} · ${pct(pending, total)}`
-        : "—";
+    const addSeg = (cls: string, n: number) => {
+      if (n <= 0) return;
+      const seg = document.createElement("span");
+      seg.className = `disc-seg ${cls}`;
+      seg.style.flex = String(n);
+      track.appendChild(seg);
+    };
+    if (total === 0) {
+      addSeg("disc-seg-pending", 1);
+    } else {
+      addSeg("disc-seg-done", done);
+      addSeg("disc-seg-active", active);
+      addSeg("disc-seg-pending", pending);
+    }
 
-    card.appendChild(ring);
-    card.appendChild(cap);
-    card.appendChild(sub);
-    grid.appendChild(card);
+    row.append(head, track);
+    list.appendChild(row);
   }
 
-  container.appendChild(grid);
+  container.appendChild(list);
 }

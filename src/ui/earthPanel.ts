@@ -1,23 +1,25 @@
 import type { AnchorLLA } from "../viewer/earthTiles";
+import { emptyExtraTransform, type ModelExtraTransform } from "../ifc/georef";
+import type { GizmoMode } from "../viewer/modelGizmo";
 
 export interface EarthPanelState {
   anchor: AnchorLLA;
   hideRadius: number;
+  transform: ModelExtraTransform;
 }
 
 export interface EarthPanelOptions {
   initial: EarthPanelState;
-  /** Chamado em cada alteracao do utilizador. */
   onChange: (state: EarthPanelState) => void;
-  /** Chamado quando o utilizador fecha o painel (botao X). */
-  onClose: () => void;
+  onTransformChange: (t: ModelExtraTransform) => void;
+  onModeChange: (mode: GizmoMode) => void;
+  onSnapTerrain: () => void;
+  /** Só oculta o painel; a camada Earth continua ligada. */
+  onDismiss: () => void;
 }
 
 /**
- * Painel flutuante para reposicionar o IFC sobre a malha do Google Earth.
- * Conceito: o IFC fica fixo na origem da cena (preserva precisao numerica) e
- * o que se move eh a *ancora geografica* — equivalente, e mais semantico para
- * exportar amanha como `IfcMapConversion`.
+ * Painel para âncora geográfica (IfcSite / Maps) e gizmo do modelo (IfcSite.ObjectPlacement).
  */
 export class EarthPanel {
   private root: HTMLElement;
@@ -25,19 +27,25 @@ export class EarthPanel {
   private state: EarthPanelState;
   private suppressEvents = false;
 
-  // refs
+  private elSource: HTMLElement;
   private elPaste: HTMLInputElement;
   private elLat: HTMLInputElement;
   private elLon: HTMLInputElement;
-  private elAltRange: HTMLInputElement;
-  private elAltNum: HTMLInputElement;
-  private elHeadingRange: HTMLInputElement;
-  private elHeadingNum: HTMLInputElement;
+  private elTerrain: HTMLElement;
+  private elSnap: HTMLButtonElement;
+  private elX: HTMLInputElement;
+  private elY: HTMLInputElement;
+  private elZ: HTMLInputElement;
+  private elYawRange: HTMLInputElement;
+  private elYawNum: HTMLInputElement;
   private elHideRange: HTMLInputElement;
   private elHideNum: HTMLInputElement;
   private elClose: HTMLButtonElement;
   private elCopy: HTMLButtonElement;
   private elOpenMaps: HTMLAnchorElement;
+  private elModeMove: HTMLButtonElement;
+  private elModeRotate: HTMLButtonElement;
+  private elReset: HTMLButtonElement;
 
   constructor(root: HTMLElement, opts: EarthPanelOptions) {
     this.root = root;
@@ -45,21 +53,29 @@ export class EarthPanel {
     this.state = {
       anchor: { ...opts.initial.anchor },
       hideRadius: opts.initial.hideRadius,
+      transform: { ...opts.initial.transform },
     };
 
     const $ = <T extends HTMLElement>(id: string) => root.querySelector(`#${id}`) as T;
+    this.elSource = $("ep-source");
     this.elPaste = $("ep-paste");
     this.elLat = $("ep-lat");
     this.elLon = $("ep-lon");
-    this.elAltRange = $("ep-alt-range");
-    this.elAltNum = $("ep-alt-num");
-    this.elHeadingRange = $("ep-heading-range");
-    this.elHeadingNum = $("ep-heading-num");
+    this.elTerrain = $("ep-terrain");
+    this.elSnap = $("ep-snap");
+    this.elX = $("ep-x");
+    this.elY = $("ep-y");
+    this.elZ = $("ep-z");
+    this.elYawRange = $("ep-yaw-range");
+    this.elYawNum = $("ep-yaw-num");
     this.elHideRange = $("ep-hide-range");
     this.elHideNum = $("ep-hide-num");
     this.elClose = $("earth-panel-close");
     this.elCopy = $("ep-copy");
     this.elOpenMaps = $("ep-open-maps");
+    this.elModeMove = $("ep-mode-move");
+    this.elModeRotate = $("ep-mode-rotate");
+    this.elReset = $("ep-reset-xform");
 
     this.bind();
     this.syncToInputs();
@@ -77,48 +93,82 @@ export class EarthPanel {
     return !this.root.classList.contains("is-hidden");
   }
 
-  /** Reescreve o estado (util quando vem de fora, ex.: parser do IFC). */
   setState(state: EarthPanelState): void {
-    this.state = { anchor: { ...state.anchor }, hideRadius: state.hideRadius };
+    this.state = {
+      anchor: { ...state.anchor },
+      hideRadius: state.hideRadius,
+      transform: { ...state.transform },
+    };
     this.syncToInputs();
+  }
+
+  setSource(text: string): void {
+    this.elSource.textContent = text;
+  }
+
+  setTransform(t: ModelExtraTransform): void {
+    this.state.transform = { ...t };
+    this.syncTransformInputs();
+  }
+
+  setTerrainHeight(meters: number | null, status?: string): void {
+    if (meters == null) {
+      this.elTerrain.textContent = status ?? "a amostrar…";
+      return;
+    }
+    this.elTerrain.textContent = `${roundTo(meters, 1).toLocaleString("pt-BR")} m no elipsoide`;
+    this.state.anchor.altitude = meters;
+  }
+
+  setMode(mode: GizmoMode): void {
+    this.elModeMove.classList.toggle("is-active", mode === "translate");
+    this.elModeRotate.classList.toggle("is-active", mode === "rotate");
   }
 
   // ---------------------------------------------------------------------
 
   private bind(): void {
-    this.elClose.addEventListener("click", () => this.opts.onClose());
+    this.elClose.addEventListener("click", () => {
+      this.hide();
+      this.opts.onDismiss();
+    });
 
     // Lat/Lon — texto livre
     this.elLat.addEventListener("change", () => this.commitLatLon(this.elLat.valueAsNumber, undefined));
     this.elLon.addEventListener("change", () => this.commitLatLon(undefined, this.elLon.valueAsNumber));
+    this.elSnap.addEventListener("click", () => this.opts.onSnapTerrain());
 
-    // Altitude
-    const onAlt = (v: number) => this.commit({ ...this.state, anchor: { ...this.state.anchor, altitude: v } });
-    this.elAltRange.addEventListener("input", () => {
-      this.elAltNum.value = this.elAltRange.value;
-      onAlt(this.elAltRange.valueAsNumber);
-    });
-    this.elAltNum.addEventListener("change", () => {
-      const v = clampNum(this.elAltNum.valueAsNumber, -500, 9000, this.state.anchor.altitude);
-      this.elAltRange.value = String(clampNum(v, +this.elAltRange.min, +this.elAltRange.max, v));
-      this.elAltNum.value = String(v);
-      onAlt(v);
-    });
-
-    // Heading (UI em graus, estado em radianos)
-    const onHeadingDeg = (deg: number) => {
-      const rad = (deg * Math.PI) / 180;
-      this.commit({ ...this.state, anchor: { ...this.state.anchor, heading: rad } });
+    // Transformação do modelo (gizmo)
+    const onAxis = (key: "x" | "y" | "z", el: HTMLInputElement) => {
+      const v = Number.isFinite(el.valueAsNumber) ? el.valueAsNumber : this.state.transform[key];
+      this.commitTransform({ ...this.state.transform, [key]: v });
     };
-    this.elHeadingRange.addEventListener("input", () => {
-      this.elHeadingNum.value = this.elHeadingRange.value;
-      onHeadingDeg(this.elHeadingRange.valueAsNumber);
+    this.elX.addEventListener("change", () => onAxis("x", this.elX));
+    this.elY.addEventListener("change", () => onAxis("y", this.elY));
+    this.elZ.addEventListener("change", () => onAxis("z", this.elZ));
+    const onYawDeg = (deg: number) => {
+      this.commitTransform({ ...this.state.transform, yaw: (wrapSignedDeg(deg) * Math.PI) / 180 });
+    };
+    this.elYawRange.addEventListener("input", () => {
+      this.elYawNum.value = this.elYawRange.value;
+      onYawDeg(this.elYawRange.valueAsNumber);
     });
-    this.elHeadingNum.addEventListener("change", () => {
-      const v = wrapDeg(this.elHeadingNum.valueAsNumber);
-      this.elHeadingNum.value = String(v);
-      this.elHeadingRange.value = String(v);
-      onHeadingDeg(v);
+    this.elYawNum.addEventListener("change", () => {
+      const v = wrapSignedDeg(this.elYawNum.valueAsNumber);
+      this.elYawNum.value = String(v);
+      this.elYawRange.value = String(v);
+      onYawDeg(v);
+    });
+    this.elModeMove.addEventListener("click", () => {
+      this.setMode("translate");
+      this.opts.onModeChange("translate");
+    });
+    this.elModeRotate.addEventListener("click", () => {
+      this.setMode("rotate");
+      this.opts.onModeChange("rotate");
+    });
+    this.elReset.addEventListener("click", () => {
+      this.commitTransform(emptyExtraTransform());
     });
 
     // Hide radius
@@ -147,7 +197,6 @@ export class EarthPanel {
       btn.addEventListener("click", () => {
         const lat = parseFloat(btn.dataset.lat ?? "");
         const lon = parseFloat(btn.dataset.lon ?? "");
-        const alt = parseFloat(btn.dataset.alt ?? "");
         if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
         this.commit({
           ...this.state,
@@ -155,15 +204,9 @@ export class EarthPanel {
             ...this.state.anchor,
             lat,
             lon,
-            altitude: Number.isFinite(alt) ? alt : this.state.anchor.altitude,
           },
         });
       });
-    });
-
-    // Nudge fino: movimento de 1 m em N/S/E/W e 0,5 m em U/D
-    this.root.querySelectorAll<HTMLButtonElement>(".ep-nudge-btn").forEach((btn) => {
-      btn.addEventListener("click", () => this.nudge(btn.dataset.dir ?? ""));
     });
 
     // Copiar coordenadas
@@ -198,58 +241,36 @@ export class EarthPanel {
     if (!this.suppressEvents) this.opts.onChange(this.state);
   }
 
+  private commitTransform(t: ModelExtraTransform): void {
+    this.state.transform = { ...t };
+    this.syncTransformInputs();
+    if (!this.suppressEvents) this.opts.onTransformChange(this.state.transform);
+  }
+
   private syncToInputs(): void {
     this.suppressEvents = true;
     try {
       const { anchor, hideRadius } = this.state;
       this.elLat.value = anchor.lat.toFixed(6);
       this.elLon.value = anchor.lon.toFixed(6);
-      const alt = roundTo(anchor.altitude, 1);
-      this.elAltNum.value = String(alt);
-      this.elAltRange.value = String(clampNum(alt, +this.elAltRange.min, +this.elAltRange.max, alt));
-      const headingDeg = wrapDeg(((anchor.heading ?? 0) * 180) / Math.PI);
-      this.elHeadingNum.value = String(roundTo(headingDeg, 1));
-      this.elHeadingRange.value = String(roundTo(headingDeg, 1));
+      this.setTerrainHeight(Number.isFinite(anchor.altitude) ? anchor.altitude : null);
       this.elHideNum.value = String(roundTo(hideRadius, 0));
       this.elHideRange.value = String(Math.min(roundTo(hideRadius, 0), +this.elHideRange.max));
       this.elOpenMaps.href = `https://www.google.com/maps/@${anchor.lat},${anchor.lon},19z`;
+      this.syncTransformInputs();
     } finally {
       this.suppressEvents = false;
     }
   }
 
-  private nudge(dir: string): void {
-    const a = { ...this.state.anchor };
-    // 1 grau de latitude ~ 111320 m. 1 grau de longitude varia com o cosseno.
-    const M_PER_DEG_LAT = 111320;
-    const m_per_deg_lon = M_PER_DEG_LAT * Math.cos((a.lat * Math.PI) / 180);
-    const stepM = 1; // 1 m horizontal
-    const altStep = 0.5; // 0,5 m vertical
-    switch (dir) {
-      case "N":
-        a.lat += stepM / M_PER_DEG_LAT;
-        break;
-      case "S":
-        a.lat -= stepM / M_PER_DEG_LAT;
-        break;
-      case "E":
-        a.lon += stepM / m_per_deg_lon;
-        break;
-      case "W":
-        a.lon -= stepM / m_per_deg_lon;
-        break;
-      case "U":
-        a.altitude += altStep;
-        break;
-      case "D":
-        a.altitude -= altStep;
-        break;
-      default:
-        return;
-    }
-    a.lat = clampNum(a.lat, -90, 90, a.lat);
-    a.lon = wrapLon(a.lon);
-    this.commit({ ...this.state, anchor: a });
+  private syncTransformInputs(): void {
+    const t = this.state.transform;
+    this.elX.value = String(roundTo(t.x, 3));
+    this.elY.value = String(roundTo(t.y, 3));
+    this.elZ.value = String(roundTo(t.z, 3));
+    const yawDeg = wrapSignedDeg((t.yaw * 180) / Math.PI);
+    this.elYawNum.value = String(roundTo(yawDeg, 1));
+    this.elYawRange.value = String(roundTo(yawDeg, 1));
   }
 }
 
@@ -269,9 +290,11 @@ function wrapLon(v: number): number {
   return x;
 }
 
-function wrapDeg(v: number): number {
+function wrapSignedDeg(v: number): number {
   if (!Number.isFinite(v)) return 0;
-  return ((v % 360) + 360) % 360;
+  let x = ((((v + 180) % 360) + 360) % 360) - 180;
+  if (x === -180) x = 180;
+  return x;
 }
 
 function roundTo(v: number, decimals: number): number {

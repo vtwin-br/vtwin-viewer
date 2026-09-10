@@ -5,114 +5,225 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap"
       rel="stylesheet"
     />
-    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='12' fill='%23f4f6f9'/><path d='M16 44 V20 L32 12 L48 20 V44 L32 52 Z' fill='none' stroke='%232563eb' stroke-width='3' stroke-linejoin='round'/></svg>" />
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' rx='14' fill='%23161616'/><path d='M16 44 V22 L32 14 L48 22 V44 L32 52 Z' fill='none' stroke='%23ffffff' stroke-width='2.6' stroke-linejoin='round'/><path d='M16 22 L32 30 L48 22 M32 30 V52' stroke='%2382A7FF' stroke-width='2.2' stroke-linejoin='round'/></svg>"
+    />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Visualizador 4D — IFC</title>
+    <title>Vista 4D — IFC</title>
   </head>
   <body>
     <div id="app">
       <header id="header" class="app-header">
         <div class="header-left">
-          <div class="workspace-pill" title="Espaço de trabalho">
-            <span class="workspace-dot"></span>
-            <span class="workspace-label">IFC 4D</span>
-            <span class="workspace-chevron" aria-hidden="true"></span>
+          <div class="brand" aria-label="Vista 4D">
+            <span class="brand-mark" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M4 16.5V8.2L12 4l8 4.2v8.3L12 21z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+                <path d="M4 8.2L12 12.5 20 8.2M12 12.5V21" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" opacity="0.55"/>
+              </svg>
+            </span>
+            <span class="brand-text">Vista 4D</span>
           </div>
-          <nav class="breadcrumb" aria-label="Navegação">
-            <span class="bc-item">Projetos</span>
-            <span class="bc-sep" aria-hidden="true">/</span>
-            <span class="bc-item">Simulação 4D</span>
-            <span class="bc-sep" aria-hidden="true">/</span>
-            <span class="bc-item bc-current" id="file-name">4D.ifc</span>
-          </nav>
+          <button type="button" class="header-project" id="btn-open-ifc" title="Importar arquivo IFC">
+            <span class="file-ext">IFC</span>
+            <span id="file-name" class="file-name">Importar IFC…</span>
+          </button>
         </div>
+
+        <div class="header-center" aria-live="polite">
+          <span class="sim-kicker">Simulação</span>
+          <span id="current-date" class="sim-date">—</span>
+          <span id="cost-5d" class="sim-cost" title="Realizado / orçamento (IfcCostItem)">—</span>
+        </div>
+
         <div class="header-right">
-          <div class="date-chip" title="Data da simulação">
-            <span class="date-chip-label">Simulação</span>
-            <span id="current-date" class="date-chip-value">—</span>
-          </div>
-          <button type="button" class="btn-share" id="btn-share" title="Copiar link desta página">
+          <input type="file" id="ifc-file-input" class="sr-only" accept=".ifc,.IFC" />
+          <button type="button" class="btn-secondary" id="btn-import" title="Importar um arquivo IFC">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M12 16V4" stroke-linecap="round" />
+              <path d="M8 8l4-4 4 4" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M5 19h14" stroke-linecap="round" />
+            </svg>
+            <span id="btn-import-label">Importar IFC</span>
+          </button>
+          <button
+            type="button"
+            class="btn-secondary"
+            id="btn-export"
+            title="Descarregar o IFC com as propriedades alteradas (Ctrl+S)"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M12 4v10" stroke-linecap="round" />
+              <path d="M8 11l4 4 4-4" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M5 19h14" stroke-linecap="round" />
+            </svg>
+            <span id="btn-export-label">Exportar IFC</span>
+          </button>
+          <button type="button" class="btn-secondary" id="btn-share" title="Copiar o endereço desta página">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <circle cx="18" cy="5" r="2.4" />
+              <circle cx="6" cy="12" r="2.4" />
+              <circle cx="18" cy="19" r="2.4" />
+              <path d="M8.2 13.2l7.6 4.2M15.8 6.6l-7.6 4.2" />
+            </svg>
             <span id="btn-share-label">Compartilhar</span>
-            <span class="btn-share-chevron" aria-hidden="true"></span>
           </button>
         </div>
       </header>
 
       <div class="body-grid">
         <nav class="rail" aria-label="Painéis">
-          <button type="button" class="rail-btn is-active" title="Cronograma" data-panel="schedule" disabled>
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" aria-hidden="true">
-              <path d="M4 6h16M4 12h10M4 18h14" />
+          <button
+            type="button"
+            class="rail-btn is-active"
+            id="toggle-schedule"
+            title="Cronograma (B)"
+            aria-pressed="true"
+            aria-controls="sidebar"
+          >
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+              <path d="M5 7h14M5 12h9M5 17h12" stroke-linecap="round" />
             </svg>
           </button>
-          <button type="button" class="rail-btn" title="Modelo (em breve)" disabled>
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5" />
-            </svg>
-          </button>
-          <button type="button" class="rail-btn" title="Comentários (em breve)" disabled>
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
-            </svg>
-          </button>
-          <button type="button" class="rail-btn" title="Vistas (em breve)" disabled>
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M12 2v2m0 16v2M4.93 4.93l1.41 1.41m11.32 11.32l1.41 1.41M2 12h2m16 0h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+          <button
+            type="button"
+            class="rail-btn is-active"
+            id="toggle-inspector"
+            title="Propriedades (I)"
+            aria-pressed="true"
+            aria-controls="inspector"
+          >
+            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+              <rect x="5" y="4" width="14" height="16" rx="2" />
+              <path d="M8 9h8M8 13h5" stroke-linecap="round" />
             </svg>
           </button>
         </nav>
 
         <aside id="sidebar" class="panel panel-schedule">
           <div class="panel-head">
-            <h2 class="panel-title">Cronograma</h2>
+            <div class="panel-head-row">
+              <h2 class="panel-title">Cronograma</h2>
+              <span class="panel-badge" id="schedule-count" title="Tarefas-folha">—</span>
+            </div>
             <p class="panel-sub" id="schedule-name">—</p>
           </div>
+
           <div class="panel-toolbar">
             <label class="sr-only" for="task-search">Filtrar tarefas</label>
-            <input
-              type="search"
-              id="task-search"
-              class="search-input"
-              placeholder="Pesquisar tarefas…"
-              autocomplete="off"
-            />
+            <div class="search-field">
+              <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <circle cx="11" cy="11" r="6.5" />
+                <path d="M16 16l4 4" stroke-linecap="round" />
+              </svg>
+              <input
+                type="search"
+                id="task-search"
+                class="search-input"
+                placeholder="Filtrar tarefas"
+                autocomplete="off"
+              />
+            </div>
           </div>
-          <div class="legend legend-inline">
+
+          <div class="legend legend-inline" aria-label="Legenda de estado">
             <span class="legend-item"><i class="dot dot-pending"></i>Pendente</span>
             <span class="legend-item"><i class="dot dot-active"></i>Em execução</span>
             <span class="legend-item"><i class="dot dot-done"></i>Concluído</span>
           </div>
-          <div id="discipline-donuts" class="discipline-donuts" aria-label="Disciplinas da obra"></div>
+
           <div id="task-tree" class="task-tree"></div>
+          <div
+            class="split-handle split-handle-end"
+            id="split-schedule"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura do cronograma"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
         </aside>
 
         <section class="center-column">
           <div id="viewport-wrapper" class="viewport-shell">
-            <div class="viewport-toolbar" aria-hidden="false">
-              <span class="viewport-label">Vista do modelo</span>
-              <div class="viewport-actions">
-                <button
-                  type="button"
-                  class="icon-btn icon-btn-toggle"
-                  id="btn-earth"
-                  title="Mostrar contexto Google Earth"
-                  aria-pressed="false"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                    <circle cx="12" cy="12" r="9" />
-                    <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
-                  </svg>
-                  <span class="icon-btn-label">Earth</span>
-                </button>
-                <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo">⊡</button>
-              </div>
-            </div>
             <div class="viewport-stage">
+              <div class="viewport-hud" aria-hidden="false">
+                <span class="hud-chip">Modelo 3D</span>
+                <div class="viewport-actions">
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-toggle is-active"
+                    id="btn-hud-cost"
+                    title="Mostrar gráfico 5D"
+                    aria-pressed="true"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <path d="M5 19V9M10 19V5M15 19v-7M20 19V8" stroke-linecap="round"/>
+                    </svg>
+                    <span class="icon-btn-label">5D</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-toggle"
+                    id="btn-earth"
+                    title="Mostrar contexto Google Earth"
+                    aria-pressed="false"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="12" cy="12" r="9" />
+                      <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
+                    </svg>
+                    <span class="icon-btn-label">Terreno</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-toggle"
+                    id="btn-earth-settings"
+                    title="Parâmetros do terreno"
+                    aria-pressed="false"
+                    hidden
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="12" cy="12" r="3" />
+                      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 01-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z" />
+                    </svg>
+                    <span class="icon-btn-label">Posição</span>
+                  </button>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-toggle"
+                    id="btn-walk"
+                    title="Andar em 1ª pessoa (V)"
+                    aria-pressed="false"
+                    disabled
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="12" cy="6.2" r="2.1" />
+                      <path d="M12 8.6v5.2M12 13.8l-3.2 5.2M12 13.8l3.2 5.2M8.6 11.2h6.8" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                    <span class="icon-btn-label">Andar</span>
+                  </button>
+                  <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo (F)">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" stroke-linecap="round" stroke-linejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+
               <div id="viewport" class="viewport-canvas"></div>
+              <div id="walk-overlay" class="walk-overlay" hidden>
+                <div class="walk-crosshair" aria-hidden="true"></div>
+                <p class="walk-hint" id="walk-hint">WASD / setas andar · Shift correr · Esc solta o rato · V sai</p>
+              </div>
+              <div id="sim-hud" class="sim-hud is-idle"></div>
+
               <aside id="earth-panel" class="earth-panel is-hidden" aria-label="Posicionar modelo no globo">
                 <header class="earth-panel-head">
                   <div class="earth-panel-title">
@@ -120,83 +231,106 @@
                       <circle cx="12" cy="12" r="9" />
                       <path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18" />
                     </svg>
-                    <span>Posicionar no globo</span>
+                    <div>
+                      <span>Posição no globo</span>
+                      <small id="ep-source">Lê origem e orientação do IFC</small>
+                    </div>
                   </div>
-                  <button type="button" class="earth-panel-close" id="earth-panel-close" aria-label="Fechar">×</button>
+                  <button type="button" class="earth-panel-close" id="earth-panel-close" aria-label="Ocultar painel" title="Ocultar painel — o terreno continua visível">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                      <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
+                    </svg>
+                  </button>
                 </header>
                 <div class="earth-panel-body">
-                  <div class="ep-presets" role="group" aria-label="Locais sugeridos">
-                    <button type="button" class="ep-chip" data-lat="-23.5614" data-lon="-46.6559" data-alt="760">Av. Paulista</button>
-                    <button type="button" class="ep-chip" data-lat="-22.9519" data-lon="-43.2105" data-alt="0">Rio • Pão de Açúcar</button>
-                    <button type="button" class="ep-chip" data-lat="-15.7975" data-lon="-47.8919" data-alt="1100">Brasília</button>
-                  </div>
+                  <section class="ep-section">
+                    <h3 class="ep-section-title">Locais sugeridos</h3>
+                    <div class="ep-presets" role="group" aria-label="Locais sugeridos">
+                      <button type="button" class="ep-chip" data-lat="-23.5614" data-lon="-46.6559" data-alt="760">Av. Paulista</button>
+                      <button type="button" class="ep-chip" data-lat="-22.9519" data-lon="-43.2105" data-alt="0">Pão de Açúcar</button>
+                      <button type="button" class="ep-chip" data-lat="-15.7975" data-lon="-47.8919" data-alt="1100">Brasília</button>
+                    </div>
+                  </section>
 
-                  <div class="ep-row">
-                    <label for="ep-paste">Colar do Google Maps</label>
-                    <input
-                      id="ep-paste"
-                      class="ep-text"
-                      type="text"
-                      placeholder="link do Maps ou -23.5614,-46.6559"
-                      autocomplete="off"
-                    />
-                  </div>
-
-                  <div class="ep-grid">
+                  <section class="ep-section">
                     <div class="ep-row">
-                      <label for="ep-lat">Latitude</label>
-                      <input id="ep-lat" class="ep-num" type="number" step="0.000001" />
+                      <label for="ep-paste">Colar do Google Maps</label>
+                      <input
+                        id="ep-paste"
+                        class="ep-text"
+                        type="text"
+                        placeholder="Link do Maps ou −23.5614, −46.6559"
+                        autocomplete="off"
+                      />
+                    </div>
+                    <div class="ep-grid">
+                      <div class="ep-row">
+                        <label for="ep-lat">Latitude</label>
+                        <input id="ep-lat" class="ep-num" type="number" step="0.000001" />
+                      </div>
+                      <div class="ep-row">
+                        <label for="ep-lon">Longitude</label>
+                        <input id="ep-lon" class="ep-num" type="number" step="0.000001" />
+                      </div>
+                    </div>
+                  </section>
+
+                  <section class="ep-section">
+                    <h3 class="ep-section-title">Mover e rotacionar</h3>
+                    <p class="ep-hint">Arraste o gizmo no modelo. O eixo Y é só um ajuste fino (metros). Valores de quilómetros significam que o terreno Google ainda não assentou — usa <strong>Assentar</strong>.</p>
+                    <div class="ep-mode" role="group" aria-label="Modo do gizmo">
+                      <button type="button" class="ep-mode-btn is-active" id="ep-mode-move" data-mode="translate">Mover</button>
+                      <button type="button" class="ep-mode-btn" id="ep-mode-rotate" data-mode="rotate">Rotacionar</button>
+                      <button type="button" class="ep-mode-btn ep-mode-reset" id="ep-reset-xform">Zerar</button>
+                    </div>
+                    <div class="ep-grid ep-grid-3">
+                      <div class="ep-row">
+                        <label for="ep-x">X</label>
+                        <input id="ep-x" class="ep-num" type="number" step="0.1" />
+                      </div>
+                      <div class="ep-row">
+                        <label for="ep-y">Y (cima)</label>
+                        <input id="ep-y" class="ep-num" type="number" step="0.1" />
+                      </div>
+                      <div class="ep-row">
+                        <label for="ep-z">Z</label>
+                        <input id="ep-z" class="ep-num" type="number" step="0.1" />
+                      </div>
                     </div>
                     <div class="ep-row">
-                      <label for="ep-lon">Longitude</label>
-                      <input id="ep-lon" class="ep-num" type="number" step="0.000001" />
+                      <div class="ep-label-row">
+                        <label for="ep-yaw-num">Rotação</label>
+                        <span class="ep-unit">graus em torno do vertical</span>
+                      </div>
+                      <div class="ep-slider-row">
+                        <input id="ep-yaw-range" class="ep-range" type="range" min="-180" max="180" step="0.5" />
+                        <input id="ep-yaw-num" class="ep-num ep-num-sm" type="number" step="0.5" />
+                      </div>
                     </div>
-                  </div>
+                  </section>
 
-                  <div class="ep-row">
-                    <div class="ep-label-row">
-                      <label for="ep-alt-num">Altitude</label>
-                      <span class="ep-unit">m sobre o elipsoide</span>
+                  <section class="ep-section">
+                    <div class="ep-row">
+                      <div class="ep-label-row">
+                        <label>Terreno Google</label>
+                        <span class="ep-unit">assenta o chão em Y=0</span>
+                      </div>
+                      <div class="ep-terrain-row">
+                        <span id="ep-terrain" class="ep-terrain-val">a amostrar…</span>
+                        <button type="button" id="ep-snap" class="ep-btn ep-btn-ghost">Assentar</button>
+                      </div>
                     </div>
-                    <div class="ep-slider-row">
-                      <input id="ep-alt-range" class="ep-range" type="range" min="-50" max="3000" step="0.5" />
-                      <input id="ep-alt-num" class="ep-num ep-num-sm" type="number" step="0.1" />
+                    <div class="ep-row">
+                      <div class="ep-label-row">
+                        <label for="ep-hide-num">Ocultar tiles</label>
+                        <span class="ep-unit">raio em metros</span>
+                      </div>
+                      <div class="ep-slider-row">
+                        <input id="ep-hide-range" class="ep-range" type="range" min="0" max="300" step="5" />
+                        <input id="ep-hide-num" class="ep-num ep-num-sm" type="number" min="0" max="500" step="1" />
+                      </div>
                     </div>
-                  </div>
-
-                  <div class="ep-row">
-                    <div class="ep-label-row">
-                      <label for="ep-heading-num">Rotação (heading)</label>
-                      <span class="ep-unit">° em torno do norte</span>
-                    </div>
-                    <div class="ep-slider-row">
-                      <input id="ep-heading-range" class="ep-range" type="range" min="0" max="360" step="0.5" />
-                      <input id="ep-heading-num" class="ep-num ep-num-sm" type="number" min="0" max="360" step="0.5" />
-                    </div>
-                  </div>
-
-                  <div class="ep-row">
-                    <div class="ep-label-row">
-                      <label for="ep-hide-num">Esconder tiles ao redor</label>
-                      <span class="ep-unit">raio em metros</span>
-                    </div>
-                    <div class="ep-slider-row">
-                      <input id="ep-hide-range" class="ep-range" type="range" min="0" max="300" step="5" />
-                      <input id="ep-hide-num" class="ep-num ep-num-sm" type="number" min="0" max="500" step="1" />
-                    </div>
-                  </div>
-
-                  <div class="ep-nudge" role="group" aria-label="Empurrar finamente">
-                    <span class="ep-nudge-label">Ajuste fino</span>
-                    <div class="ep-nudge-grid">
-                      <button type="button" class="ep-nudge-btn" data-dir="N" title="1 m para Norte">↑</button>
-                      <button type="button" class="ep-nudge-btn" data-dir="W" title="1 m para Oeste">←</button>
-                      <button type="button" class="ep-nudge-btn" data-dir="E" title="1 m para Leste">→</button>
-                      <button type="button" class="ep-nudge-btn" data-dir="S" title="1 m para Sul">↓</button>
-                      <button type="button" class="ep-nudge-btn" data-dir="U" title="0,5 m para cima">+ alt</button>
-                      <button type="button" class="ep-nudge-btn" data-dir="D" title="0,5 m para baixo">− alt</button>
-                    </div>
-                  </div>
+                  </section>
 
                   <div class="ep-actions">
                     <button type="button" id="ep-copy" class="ep-btn ep-btn-ghost">Copiar coordenadas</button>
@@ -204,54 +338,102 @@
                   </div>
                 </div>
               </aside>
-              <div id="loader-overlay" class="loader-overlay">
-                <div class="spinner"></div>
-                <div id="loader-text" class="loader-text">Carregando…</div>
+
+              <div id="import-overlay" class="import-overlay">
+                <div class="import-card">
+                  <div class="import-visual" aria-hidden="true">
+                    <svg viewBox="0 0 64 64" fill="none">
+                      <rect x="12" y="14" width="40" height="36" rx="8" stroke="currentColor" stroke-width="1.8"/>
+                      <path d="M32 24v16M24 32l8-8 8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                  </div>
+                  <h3>Importar IFC</h3>
+                  <p>Arraste um arquivo <strong>.ifc</strong> para cá ou escolha no computador. O cronograma nativo (IfcTask) é lido automaticamente.</p>
+                  <button type="button" class="btn-primary" id="btn-import-pick">Escolher arquivo</button>
+                </div>
+              </div>
+
+              <div id="loader-overlay" class="loader-overlay hidden">
+                <div class="loader-card">
+                  <div class="spinner" aria-hidden="true"></div>
+                  <div id="loader-text" class="loader-text">Preparando o visualizador…</div>
+                  <p class="loader-hint" id="loader-hint">O modelo e o cronograma entram em seguida.</p>
+                </div>
               </div>
             </div>
-            <footer id="timeline" class="timeline-dock"></footer>
+
+            <footer id="timeline" class="timeline-dock is-idle" aria-disabled="true"></footer>
           </div>
         </section>
 
         <aside id="inspector" class="panel panel-inspector">
+          <div
+            class="split-handle split-handle-start"
+            id="split-inspector"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura das propriedades"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
           <div class="inspector-head">
-            <h2 class="panel-title">Selecionado</h2>
-            <span class="inspector-count" id="inspector-count">0</span>
+            <h2 class="panel-title">Tarefa</h2>
+            <span class="inspector-count" id="inspector-count" title="Elementos 3D associados">0</span>
           </div>
           <div id="inspector-empty" class="inspector-empty">
-            <p>Clique numa tarefa na árvore para ver o nome, datas e quantos elementos 3D estão associados.</p>
+            <div class="empty-visual" aria-hidden="true">
+              <svg viewBox="0 0 64 64" fill="none">
+                <rect x="10" y="12" width="44" height="40" rx="8" stroke="currentColor" stroke-width="1.6" opacity="0.35"/>
+                <path d="M20 24h24M20 32h16M20 40h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.45"/>
+                <circle cx="46" cy="42" r="8" fill="#fff" stroke="currentColor" stroke-width="1.6"/>
+                <path d="M46 38.5v4.2l3 1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+              </svg>
+            </div>
+            <h3>Edite as propriedades aqui</h3>
+              <p>Clique numa tarefa do cronograma (ou num elemento 3D) para editar nome, datas e custo 5D. Também pode arrastar a barra do Gantt.</p>
           </div>
           <div id="inspector-body" class="inspector-body is-hidden">
-            <dl class="prop-list">
-              <div class="prop-row">
-                <dt>Nome</dt>
-                <dd id="prop-name">—</dd>
+            <div id="prop-state" class="insp-status">—</div>
+            <form id="inspector-form" class="insp-form" autocomplete="off">
+              <label class="insp-field">
+                <span>Nome</span>
+                <input id="prop-name" type="text" spellcheck="false" />
+              </label>
+              <label class="insp-field">
+                <span>Identificação</span>
+                <input id="prop-ident" type="text" spellcheck="false" placeholder="Opcional" />
+              </label>
+              <div class="insp-dates">
+                <label class="insp-field">
+                  <span>Início</span>
+                  <input id="prop-start" type="date" />
+                </label>
+                <label class="insp-field">
+                  <span>Fim</span>
+                  <input id="prop-end" type="date" />
+                </label>
               </div>
-              <div class="prop-row">
-                <dt>Identificação</dt>
-                <dd id="prop-ident">—</dd>
-              </div>
-              <div class="prop-row">
-                <dt>Tipo</dt>
-                <dd id="prop-type">IfcTask</dd>
-              </div>
-              <div class="prop-row">
-                <dt>Estado (data atual)</dt>
-                <dd id="prop-state">—</dd>
-              </div>
-              <div class="prop-row">
-                <dt>Início agendado</dt>
-                <dd id="prop-start">—</dd>
-              </div>
-              <div class="prop-row">
-                <dt>Fim agendado</dt>
-                <dd id="prop-end">—</dd>
-              </div>
-              <div class="prop-row">
-                <dt>Elementos 3D</dt>
-                <dd id="prop-products">—</dd>
-              </div>
-            </dl>
+              <label class="insp-field">
+                <span>Custo 5D</span>
+                <input id="prop-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="IfcCostValue" />
+              </label>
+              <p id="prop-date-error" class="insp-error is-hidden" role="alert"></p>
+              <dl class="prop-list">
+                <div class="prop-row">
+                  <dt>Duração</dt>
+                  <dd id="prop-duration">—</dd>
+                </div>
+                <div class="prop-row is-hidden" id="prop-cost-roll-row">
+                  <dt>Custo com subtarefas</dt>
+                  <dd id="prop-cost-roll">—</dd>
+                </div>
+                <div class="prop-row">
+                  <dt>Elementos 3D</dt>
+                  <dd id="prop-products">—</dd>
+                </div>
+              </dl>
+              <p class="insp-hint">O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue (não no IfcTask). Exporte para gravar o arquivo.</p>
+            </form>
           </div>
         </aside>
       </div>

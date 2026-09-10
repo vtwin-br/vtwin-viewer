@@ -125,6 +125,32 @@ export async function loadIfc(
   return { model };
 }
 
+/** Remove o modelo IFC atual para permitir importar outro ficheiro. */
+export async function unloadIfc(handles: ViewerHandles, modelId = "main"): Promise<void> {
+  const { fragments, world } = handles;
+  const model = fragments.list.get(modelId);
+  if (!model) return;
+  try {
+    world.scene.three.remove(model.object);
+  } catch {
+    // já não estava na cena
+  }
+  const disposable = model as { dispose?: () => Promise<void> | void };
+  if (typeof disposable.dispose === "function") {
+    try {
+      await disposable.dispose();
+    } catch (err) {
+      console.warn("Falha ao libertar o modelo IFC anterior:", err);
+    }
+  }
+  fragments.list.delete(modelId);
+  try {
+    await fragments.core.update(true);
+  } catch {
+    // worker pode já ter libertado o modelo
+  }
+}
+
 /** Recentra a câmara no modelo (botão “Enquadrar”). */
 export async function refitViewerCamera(handles: ViewerHandles, modelId = "main"): Promise<void> {
   const model = handles.fragments.list.get(modelId);
