@@ -49,10 +49,13 @@
             </span>
             <span class="brand-text">Vista 4D</span>
           </div>
-          <button type="button" class="header-project" id="btn-open-ifc" title="Importar arquivo IFC">
+          <div class="header-project-wrap">
+          <button type="button" class="header-project" id="btn-open-ifc" title="Importar arquivo IFC" aria-haspopup="true" aria-expanded="false" aria-controls="model-popover">
             <span class="file-ext">IFC</span>
             <span id="file-name" class="file-name">Importar IFC…</span>
           </button>
+          <div id="model-popover" class="model-popover" hidden></div>
+          </div>
         </div>
 
         <div class="header-center" aria-live="polite">
@@ -62,7 +65,7 @@
         </div>
 
         <div class="header-right">
-          <input type="file" id="ifc-file-input" class="sr-only" accept=".ifc,.IFC" />
+          <input type="file" id="ifc-file-input" class="sr-only" accept=".ifc,.IFC" multiple />
           <input
             type="file"
             id="plan-file-input"
@@ -126,6 +129,7 @@
                 </svg>
               </button>
             </div>
+            <p class="panel-mode" title="A edição de tarefas fica no Planejamento de projeto">Somente visualização</p>
             <p class="panel-sub" id="schedule-name">—</p>
           </div>
 
@@ -165,21 +169,20 @@
         </aside>
 
         <section class="center-column">
+          <section id="module-placeholder" class="module-placeholder" hidden aria-live="polite"></section>
           <section id="project-workspace" class="project-workspace" aria-label="Planejamento de projeto"></section>
+          <div
+            class="split-handle split-handle-grid"
+            id="split-gantt-view"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura do Gantt"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
           <div id="viewport-wrapper" class="viewport-shell">
             <div class="viewport-stage">
-              <div class="viewport-hud" aria-hidden="false">
-                <button
-                  type="button"
-                  class="icon-btn btn-reveal-schedule"
-                  id="btn-reveal-schedule"
-                  title="Mostrar cronograma (B)"
-                  aria-label="Mostrar cronograma"
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-                    <path d="M4 6h16M4 12h10M4 18h13" stroke-linecap="round"/>
-                  </svg>
-                </button>
+                <div class="viewport-hud" aria-hidden="false">
                 <div class="viewport-toolbar" role="toolbar" aria-label="Visualização">
                   <button
                     type="button"
@@ -243,7 +246,7 @@
                       type="button"
                       class="icon-btn icon-btn-toggle"
                       id="btn-box-select"
-                      title="Caixa de seleção (Shift+arrastar)"
+                      title="Caixa de seleção: esquerda→direita só o que está dentro; direita→esquerda o que a caixa toca (Shift+arrastar)"
                       aria-label="Caixa de seleção"
                       aria-pressed="false"
                     >
@@ -284,8 +287,18 @@
                 <p class="walk-hint" id="walk-hint">WASD / setas andar · Shift correr · Esc solta o rato · V sai</p>
               </div>
               <div id="sim-hud" class="sim-hud is-idle"></div>
+              <aside id="model-layers" class="model-layers" hidden data-compact="1" aria-label="Modelos IFC visíveis"></aside>
 
               <aside id="earth-panel" class="earth-panel is-hidden" aria-label="Posicionar modelo no globo">
+                <div
+                  class="split-handle split-handle-start"
+                  id="split-earth"
+                  role="separator"
+                  aria-orientation="vertical"
+                  aria-label="Largura do painel de posição"
+                  title="Arraste para redimensionar. Duplo clique restaura."
+                  tabindex="0"
+                ></div>
                 <header class="earth-panel-head">
                   <div class="earth-panel-title">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
@@ -338,10 +351,10 @@
 
                   <section class="ep-section">
                     <h3 class="ep-section-title">Mover e rotacionar</h3>
-                    <p class="ep-hint">Arraste o gizmo no modelo. O eixo Y é só um ajuste fino (metros). Valores de quilómetros significam que o terreno Google ainda não assentou — usa <strong>Assentar</strong> e depois <strong>Exportar IFC</strong> para gravar a cota nativa (IfcSite.RefElevation).</p>
+                    <p class="ep-hint">Clica em <strong>Mover</strong> ou <strong>Rotacionar</strong> para mostrar o gizmo (volta a clicar para o esconder). O eixo Y é só um ajuste fino. Valores de quilómetros significam que o terreno ainda não assentou — usa <strong>Assentar</strong> e <strong>Exportar IFC</strong>.</p>
                     <div class="ep-mode" role="group" aria-label="Modo do gizmo">
-                      <button type="button" class="ep-mode-btn is-active" id="ep-mode-move" data-mode="translate">Mover</button>
-                      <button type="button" class="ep-mode-btn" id="ep-mode-rotate" data-mode="rotate">Rotacionar</button>
+                      <button type="button" class="ep-mode-btn" id="ep-mode-move" data-mode="translate" aria-pressed="false">Mover</button>
+                      <button type="button" class="ep-mode-btn" id="ep-mode-rotate" data-mode="rotate" aria-pressed="false">Rotacionar</button>
                       <button type="button" class="ep-mode-btn ep-mode-reset" id="ep-reset-xform">Zerar</button>
                     </div>
                     <div class="ep-grid ep-grid-3">
@@ -398,6 +411,15 @@
                     <a id="ep-open-maps" class="ep-btn ep-btn-ghost" target="_blank" rel="noopener">Abrir no Maps</a>
                   </div>
                 </div>
+                <div
+                  class="split-handle split-handle-row split-handle-y-end"
+                  id="split-earth-h"
+                  role="separator"
+                  aria-orientation="horizontal"
+                  aria-label="Altura do painel de posição"
+                  title="Arraste para redimensionar. Duplo clique restaura."
+                  tabindex="0"
+                ></div>
               </aside>
 
               <div id="import-overlay" class="import-overlay">
@@ -409,7 +431,7 @@
                     </svg>
                   </div>
                   <h3>Importar IFC</h3>
-                  <p>Arraste um arquivo <strong>.ifc</strong> para cá ou escolha no computador. O cronograma nativo (IfcTask) é lido automaticamente.</p>
+                  <p>Arraste um ou mais arquivos <strong>.ifc</strong> para cá. Pode juntar vários modelos na mesma vista e ligar ou desligar cada um.</p>
                   <button type="button" class="btn-primary" id="btn-import-pick">Escolher arquivo</button>
                 </div>
               </div>
@@ -423,14 +445,46 @@
               </div>
             </div>
 
-            <footer id="timeline" class="timeline-dock is-idle" aria-disabled="true"></footer>
+            <div class="timeline-slot" id="timeline-slot">
+              <div
+                class="split-handle split-handle-row"
+                id="split-timeline"
+                role="separator"
+                aria-orientation="horizontal"
+                aria-label="Altura da linha do tempo"
+                title="Arraste para redimensionar. Duplo clique restaura."
+                tabindex="0"
+              ></div>
+              <footer id="timeline" class="timeline-dock is-idle" aria-disabled="true"></footer>
+            </div>
           </div>
+          <div
+            class="split-handle split-handle-grid"
+            id="split-view-sets"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura da árvore IFC"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
           <aside id="model-sets" class="model-sets" hidden aria-label="Árvore IFC e conjuntos 4D">
             <header class="model-sets-head">
               <div>
                 <h2>Modelo IFC</h2>
                 <p id="model-sets-count">0 selecionados</p>
               </div>
+              <button
+                type="button"
+                class="panel-collapse"
+                id="toggle-model-sets"
+                title="Ocultar árvore IFC"
+                aria-label="Ocultar árvore IFC"
+                aria-controls="model-sets"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="M10 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
             </header>
             <div class="model-sets-tabs" role="tablist">
               <button type="button" class="is-active" data-ms-tab="tree" role="tab" aria-selected="true">Árvore</button>
@@ -449,9 +503,18 @@
               <div id="selection-sets" class="selection-sets"></div>
             </div>
           </aside>
+          <div id="layout-restore" class="layout-restore" hidden>
+            <button type="button" class="layout-chip" data-restore="schedule" hidden>Cronograma</button>
+            <button type="button" class="layout-chip" data-restore="inspector" hidden>Propriedades</button>
+            <button type="button" class="layout-chip" data-restore="timeline" hidden>Linha do tempo</button>
+            <button type="button" class="layout-chip" data-restore="gantt" hidden>Gantt</button>
+            <button type="button" class="layout-chip" data-restore="sets" hidden>Árvore IFC</button>
+            <button type="button" class="layout-chip" data-restore="hud" hidden>Gráfico 5D</button>
+            <button type="button" class="layout-chip" data-restore="earth" hidden>Posição</button>
+          </div>
         </section>
 
-        <aside id="inspector" class="panel panel-inspector">
+        <aside id="inspector" class="panel panel-inspector is-readonly">
           <div
             class="split-handle split-handle-start"
             id="split-inspector"
@@ -487,22 +550,22 @@
               </svg>
             </div>
             <h3>Nenhuma tarefa selecionada</h3>
-            <p>Selecione uma tarefa no cronograma ou um elemento 3D para ver e editar as propriedades.</p>
+            <p id="inspector-empty-copy">Selecione uma tarefa no cronograma ou um elemento 3D para ver as propriedades.</p>
           </div>
           <div id="inspector-body" class="inspector-body is-hidden">
             <div class="insp-hero">
               <div id="prop-state" class="insp-status">—</div>
             </div>
-            <form id="inspector-form" class="insp-form" autocomplete="off">
+            <form id="inspector-form" class="insp-form" autocomplete="off" aria-readonly="true">
               <section class="insp-section">
                 <h3 class="insp-section-title">Informações gerais</h3>
                 <label class="insp-field">
                   <span>Nome</span>
-                  <input id="prop-name" type="text" spellcheck="false" />
+                  <input id="prop-name" type="text" spellcheck="false" readonly tabindex="-1" />
                 </label>
                 <label class="insp-field">
                   <span>Identificação</span>
-                  <input id="prop-ident" type="text" spellcheck="false" placeholder="Opcional" />
+                  <input id="prop-ident" type="text" spellcheck="false" readonly tabindex="-1" />
                 </label>
               </section>
               <section class="insp-section">
@@ -510,11 +573,11 @@
                 <div class="insp-dates">
                   <label class="insp-field">
                     <span>Início</span>
-                    <input id="prop-start" type="date" />
+                    <input id="prop-start" type="date" readonly disabled tabindex="-1" />
                   </label>
                   <label class="insp-field">
                     <span>Fim</span>
-                    <input id="prop-end" type="date" />
+                    <input id="prop-end" type="date" readonly disabled tabindex="-1" />
                   </label>
                 </div>
                 <div class="insp-readonly">
@@ -526,7 +589,7 @@
                 <h3 class="insp-section-title">Custos</h3>
                 <label class="insp-field">
                   <span>Custo 5D</span>
-                  <input id="prop-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="IfcCostValue" />
+                  <input id="prop-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="IfcCostValue" readonly disabled tabindex="-1" />
                 </label>
                 <div class="insp-readonly is-hidden" id="prop-cost-roll-row">
                   <span class="insp-label">Custo com subtarefas</span>
@@ -541,7 +604,7 @@
                 </div>
               </section>
               <p id="prop-date-error" class="insp-error is-hidden" role="alert"></p>
-              <p class="insp-hint">O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue. Exporte o IFC para persistir.</p>
+              <p id="insp-hint" class="insp-hint">O Cronograma 4D é o resultado da simulação. A edição de dados fica no Planejamento de projeto.</p>
             </form>
           </div>
         </aside>

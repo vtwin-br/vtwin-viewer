@@ -47,8 +47,16 @@ export function ownAndGroupGuids(schedule: ScheduleData, t: Task): string[] {
   return [...set];
 }
 
+/** Cache interno de `computeStateBuckets` — invalidar quando mudam produtos/conjuntos. */
+export const LEAF_BY_GUID_CACHE = "__leafByGuid__";
+
+export function invalidateLeafByGuidCache(schedule: ScheduleData): void {
+  delete (schedule as unknown as Record<string, unknown>)[LEAF_BY_GUID_CACHE];
+}
+
 /** Recalcula GUIDs agregados (tarefa + conjuntos + descendentes) após ligar/desligar produtos. */
 export function recomputeProductGuidsByTask(schedule: ScheduleData): void {
+  invalidateLeafByGuidCache(schedule);
   const walk = (t: Task): string[] => {
     const set = new Set<string>(ownAndGroupGuids(schedule, t));
     for (const c of t.children) {

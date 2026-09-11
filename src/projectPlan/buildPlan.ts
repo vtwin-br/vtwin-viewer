@@ -115,6 +115,102 @@ export function descendantCount(tasks: PlanTask[], index: number): number {
   return n;
 }
 
+/** Índices das tarefas selecionadas que não são descendentes de outra selecionada. */
+export function selectionRootIndices(tasks: PlanTask[], selectedIds: Set<string>): number[] {
+  const indices: number[] = [];
+  for (let i = 0; i < tasks.length; i++) {
+    if (selectedIds.has(tasks[i].id)) indices.push(i);
+  }
+  return indices.filter((i) => !indices.some((j) => j < i && i <= j + descendantCount(tasks, j)));
+}
+
+export function canIndent(tasks: PlanTask[], index: number): boolean {
+  if (index <= 0) return false;
+  return tasks[index].outlineLevel <= tasks[index - 1].outlineLevel;
+}
+
+export function canOutdent(tasks: PlanTask[], index: number): boolean {
+  return tasks[index].outlineLevel > 1;
+}
+
+/** Rebaixa a seleção (e subtarefas) um nível. Devolve os índices das raízes movidas. */
+export function indentTasks(tasks: PlanTask[], selectedIds: Set<string>): number[] {
+  const moved: number[] = [];
+  for (const i of selectionRootIndices(tasks, selectedIds)) {
+    if (!canIndent(tasks, i)) continue;
+    const n = descendantCount(tasks, i);
+    for (let k = i; k <= i + n; k++) tasks[k].outlineLevel += 1;
+    moved.push(i);
+  }
+  markSummaries(tasks);
+  return moved;
+}
+
+/** Sobe a seleção (e subtarefas) um nível. Devolve os índices das raízes movidas. */
+export function outdentTasks(tasks: PlanTask[], selectedIds: Set<string>): number[] {
+  const roots = selectionRootIndices(tasks, selectedIds);
+  const moved: number[] = [];
+  for (let r = roots.length - 1; r >= 0; r--) {
+    const i = roots[r];
+    if (!canOutdent(tasks, i)) continue;
+    const n = descendantCount(tasks, i);
+    for (let k = i; k <= i + n; k++) {
+      tasks[k].outlineLevel = Math.max(1, tasks[k].outlineLevel - 1);
+    }
+    moved.push(i);
+  }
+  moved.sort((a, b) => a - b);
+  markSummaries(tasks);
+  return moved;
+}
+
+export function outlineParentIndex(tasks: PlanTask[], index: number): number {
+  const level = tasks[index].outlineLevel;
+  for (let i = index - 1; i >= 0; i--) {
+    if (tasks[i].outlineLevel < level) return i;
+  }
+  return -1;
+}
+
+export function outlinePrevSiblingIndex(tasks: PlanTask[], index: number): number {
+  const level = tasks[index].outlineLevel;
+  for (let i = index - 1; i >= 0; i--) {
+    if (tasks[i].outlineLevel < level) return -1;
+    if (tasks[i].outlineLevel === level) return i;
+  }
+  return -1;
+}
+
+function wbsPrefix(tasks: PlanTask[]): string {
+  for (const t of tasks) {
+    const w = t.wbs?.trim();
+    if (!w) continue;
+    const m = w.match(/^([^\d]+)/);
+    if (m?.[1] && m[1].length < w.length) return m[1];
+  }
+  return "";
+}
+
+/** Recalcula Identification / WBS a partir da hierarquia. Devolve id → novo código. */
+export function rebuildWbs(tasks: PlanTask[]): Map<string, string> {
+  const prefix = wbsPrefix(tasks);
+  const stack: number[] = [];
+  const changed = new Map<string, string>();
+  for (const t of tasks) {
+    const level = Math.max(1, Math.floor(t.outlineLevel) || 1);
+    t.outlineLevel = level;
+    while (stack.length > level) stack.pop();
+    while (stack.length < level) stack.push(0);
+    stack[level - 1] += 1;
+    const next = `${prefix}${stack.join(".")}`;
+    if (t.wbs !== next) {
+      t.wbs = next;
+      changed.set(t.id, next);
+    }
+  }
+  return changed;
+}
+
 export function insertTaskAfter(plan: ProjectPlan, afterId: string | null): PlanTask {
   const task: PlanTask = {
     id: uid(),

@@ -3,7 +3,7 @@ import type { IfcGeoref } from "../ifc/georef";
 export type TaskState = "pending" | "active" | "done";
 
 export interface Task {
-  /** ExpressID do IfcTask no IFC. */
+  /** ExpressID do IfcTask no IFC, ou id federado na vista com vários modelos. */
   id: number;
   /** GlobalId do IfcTask. */
   globalId: string;
@@ -21,6 +21,10 @@ export interface Task {
   isMilestone?: boolean;
   /** Tipo de predecessor (PredefinedType). */
   predefinedType?: string;
+  /** ExpressID da IfcTask pai (IfcRelNests). Ausente nas raízes do IfcWorkSchedule. */
+  parentId?: number;
+  /** IfcRelNests em que esta tarefa é RelatingObject (filhos). */
+  nestsRelId?: number;
   /** Subtarefas (via IfcRelNests). */
   children: Task[];
   /** ExpressIDs de IfcProduct associados (via IfcRelAssignsToProduct / ToProcess). */
@@ -42,6 +46,12 @@ export interface Task {
   costIsBreakdown?: boolean;
   /** Predecessores (IfcRelSequence). */
   predecessors: Array<{ taskId: number; type: "FS" | "SS" | "FF" | "SF" }>;
+  /** Modelo de origem na vista federada (vários IFC). */
+  sourceModelId?: string;
+  /** Nome do ficheiro IFC de origem (vista federada). */
+  sourceFileName?: string;
+  /** Pasta visual do ficheiro — não é uma IfcTask. */
+  isFederationRoot?: boolean;
 }
 
 /** ObjectType gravado nos IfcGroup criados por esta app (selection sets 4D). */
@@ -60,6 +70,8 @@ export interface SelectionGroup {
   taskIds: number[];
   /** ExpressID de IfcRelAssignsToGroup, se já existir no ficheiro. */
   assignRelId?: number;
+  sourceModelId?: string;
+  sourceFileName?: string;
 }
 
 /** Documento externo ou interno associado via IfcRelAssociatesDocument. */
@@ -71,6 +83,18 @@ export interface IfcAssociatedDocument {
 }
 
 export interface ScheduleData {
+  /** ExpressID do IfcProject. */
+  projectId?: number;
+  /** ExpressID da IfcWorkPlan, se existir. */
+  workPlanId?: number;
+  /** ExpressID da IfcWorkSchedule, se existir. */
+  workScheduleId?: number;
+  /** IfcRelDeclares do projeto que inclui o plano/cronograma. */
+  declaresRelId?: number;
+  /** IfcRelAggregates IfcWorkPlan → IfcWorkSchedule. */
+  aggregatesRelId?: number;
+  /** IfcRelAssignsToControl IfcWorkSchedule → tarefas raiz. */
+  scheduleControlRelId?: number;
   /** Nome da IfcWorkSchedule. */
   name: string;
   /** Nome da IfcWorkPlan, se existir. */

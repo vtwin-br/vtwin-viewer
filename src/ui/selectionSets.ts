@@ -14,6 +14,7 @@ export class SelectionSetsList {
   private opts: SelectionSetsOptions;
   private selectedId: number | null = null;
   private taskId: number | null = null;
+  private hitIds = new Set<number>();
 
   constructor(root: HTMLElement, opts: SelectionSetsOptions) {
     this.root = root;
@@ -34,7 +35,23 @@ export class SelectionSetsList {
     this.taskId = id;
   }
 
+  private lastGroups: SelectionGroup[] = [];
+
+  /** Destaca conjuntos que contêm algum GUID da seleção 3D. */
+  markHits(guids: Iterable<string>, groups: SelectionGroup[]): void {
+    const list = groups.length ? groups : this.lastGroups;
+    const want = new Set(guids);
+    this.hitIds = new Set(list.filter((g) => g.productGuids.some((id) => want.has(id))).map((g) => g.id));
+    this.render(list);
+    this.root.querySelector<HTMLElement>(".ms-set.is-hit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  hasHits(): boolean {
+    return this.hitIds.size > 0;
+  }
+
   render(groups: SelectionGroup[]): void {
+    this.lastGroups = groups;
     if (!groups.length) {
       this.root.innerHTML = `<p class="ms-empty">Nenhum conjunto. Selecione elementos no modelo ou na árvore e clique em «Novo conjunto».</p>`;
       return;
@@ -42,12 +59,15 @@ export class SelectionSetsList {
     this.root.innerHTML = groups
       .map((g) => {
         const selected = g.id === this.selectedId ? " is-selected" : "";
+        const hit = this.hitIds.has(g.id) ? " is-hit" : "";
         const linked = this.taskId != null && g.taskIds.includes(this.taskId);
-        return `<article class="ms-set${selected}" data-id="${g.id}">
+        return `<article class="ms-set${selected}${hit}" data-id="${g.id}">
           <button type="button" class="ms-set-main" data-act="select">
             <strong>${escapeHtml(g.name)}</strong>
             <span>${g.productGuids.length} elemento${g.productGuids.length === 1 ? "" : "s"}</span>
+            ${g.sourceFileName ? `<em>${escapeHtml(g.sourceFileName.replace(/\.ifc$/i, ""))}</em>` : ""}
             ${linked ? `<em>ligado à tarefa</em>` : ""}
+            ${hit ? `<em>contém a seleção</em>` : ""}
           </button>
           <input class="ms-set-name" data-act="rename" value="${escapeAttr(g.name)}" aria-label="Nome do conjunto" />
           <div class="ms-set-actions">

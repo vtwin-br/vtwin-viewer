@@ -2,17 +2,11 @@ import {
   APP_MODULES,
   DEFAULT_WORKSPACE,
   findTool,
+  isWorkspaceId,
+  workspaceShell,
   type WorkspaceId,
 } from "../app/catalog";
-
-const ICONS: Record<string, string> = {
-  planning: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="5" y="5" width="14" height="16" rx="2"/><path d="M8 4v3M16 4v3M8 11h8M8 15h5" stroke-linecap="round"/></svg>`,
-  schedule4d: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 16.5V8.2L12 4l8 4.2v8.3L12 21z" stroke-linejoin="round"/><path d="M4 8.2L12 12.5 20 8.2M12 12.5V21" opacity="0.55" stroke-linejoin="round"/></svg>`,
-  projectPlan: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M4 6h16M4 12h10M4 18h13" stroke-linecap="round"/><path d="M14 10h6v4h-6z" opacity="0.7"/></svg>`,
-  inspector: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 9h8M8 13h5" stroke-linecap="round"/></svg>`,
-  collapse: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-  expand: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M10 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
-};
+import { navIcon } from "./navIcons";
 
 const LS_WORKSPACE = "vista4d.workspace";
 const LS_NAV = "vista4d.navCollapsed";
@@ -56,13 +50,13 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
       <div class="module-nav-top">
         <span class="module-nav-kicker">Módulos</span>
         <button type="button" class="module-nav-collapse" id="module-nav-collapse" title="${collapsed ? "Expandir menu" : "Recolher menu"}" aria-label="${collapsed ? "Expandir menu" : "Recolher menu"}">
-          ${collapsed ? ICONS.expand : ICONS.collapse}
+          ${collapsed ? navIcon("expand") : navIcon("collapse")}
         </button>
       </div>
       <div class="module-nav-scroll"></div>
       <div class="module-nav-footer">
         <button type="button" class="module-footer-btn" id="toggle-inspector" title="Propriedades (I)" data-tooltip="Propriedades" aria-pressed="false" aria-controls="inspector">
-          ${ICONS.inspector}
+          ${navIcon("inspector")}
           <span>Propriedades</span>
         </button>
       </div>
@@ -70,6 +64,27 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
 
     const scroll = root.querySelector(".module-nav-scroll")!;
     for (const mod of APP_MODULES) {
+      if (mod.tools.length === 1) {
+        const tool = mod.tools[0];
+        const on = tool.workspace === workspace;
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = `module-leaf${on ? " is-active" : ""}`;
+        btn.dataset.tool = tool.id;
+        if (on) btn.setAttribute("aria-current", "page");
+        btn.title = mod.label;
+        btn.setAttribute("data-tooltip", escapeAttr(mod.label));
+        btn.setAttribute("aria-label", mod.label);
+        btn.innerHTML = `
+          <span class="module-icon">${navIcon(mod.icon)}</span>
+          <span class="module-leaf-copy">
+            <span class="module-leaf-name">${escapeHtml(mod.label)}</span>
+          </span>
+        `;
+        scroll.appendChild(btn);
+        continue;
+      }
+
       const open = groupsOpen[mod.id] !== false;
       const current = mod.tools.some((t) => t.workspace === workspace);
       const section = document.createElement("section");
@@ -77,13 +92,13 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
       section.dataset.module = mod.id;
       section.innerHTML = `
         <button type="button" class="module-group-btn" aria-expanded="${open}" title="${escapeAttr(mod.label)}" data-tooltip="${escapeAttr(mod.label)}">
-          <span class="module-icon">${ICONS[mod.icon] ?? ""}</span>
+          <span class="module-icon">${navIcon(mod.icon)}</span>
           <span class="module-group-copy">
             <span class="module-group-label">${escapeHtml(mod.label)}</span>
           </span>
-          <span class="module-chevron" aria-hidden="true">${ICONS.expand}</span>
+          <span class="module-chevron" aria-hidden="true">${navIcon("expand")}</span>
         </button>
-        <div class="module-tools" role="list" ${open || collapsed ? "" : "hidden"}></div>
+        <div class="module-tools" role="list" ${open ? "" : "hidden"}></div>
       `;
       const toolsEl = section.querySelector(".module-tools")!;
       for (const tool of mod.tools) {
@@ -97,7 +112,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
         btn.setAttribute("data-tooltip", tool.label);
         btn.setAttribute("aria-label", tool.label);
         btn.innerHTML = `
-          <span class="module-icon">${ICONS[tool.icon] ?? ""}</span>
+          <span class="module-icon">${navIcon(tool.icon)}</span>
           <span class="module-tool-copy">
             <span class="module-tool-name">${escapeHtml(tool.label)}</span>
           </span>
@@ -115,13 +130,9 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     });
 
     root.querySelectorAll(".module-group-btn").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        if (root.classList.contains("is-collapsed")) {
-          setCollapsed(false);
-          render();
-          refreshInspectorToggle();
-          return;
-        }
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
         const section = btn.closest(".module-group");
         const id = section?.getAttribute("data-module");
         if (!section || !id) return;
@@ -135,7 +146,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
       });
     });
 
-    root.querySelectorAll<HTMLButtonElement>(".module-tool").forEach((btn) => {
+    root.querySelectorAll<HTMLButtonElement>(".module-tool, .module-leaf").forEach((btn) => {
       btn.addEventListener("click", () => {
         const tool = findTool(btn.dataset.tool || "");
         if (!tool) return;
@@ -159,7 +170,13 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
   };
 
   const applyWorkspaceAttr = () => {
-    document.querySelector(".body-grid")?.setAttribute("data-workspace", workspace);
+    const grid = document.querySelector(".body-grid");
+    const app = document.getElementById("app");
+    const shell = workspaceShell(workspace);
+    grid?.setAttribute("data-workspace", workspace);
+    grid?.setAttribute("data-shell", shell);
+    app?.setAttribute("data-workspace", workspace);
+    app?.setAttribute("data-shell", shell);
   };
 
   const setWorkspace = (id: WorkspaceId, extra?: { silent?: boolean }) => {
@@ -167,7 +184,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     workspace = id;
     writeWorkspace(id);
     applyWorkspaceAttr();
-    root.querySelectorAll<HTMLButtonElement>(".module-tool").forEach((btn) => {
+    root.querySelectorAll<HTMLButtonElement>(".module-tool, .module-leaf").forEach((btn) => {
       const tool = findTool(btn.dataset.tool || "");
       const on = tool?.workspace === id;
       btn.classList.toggle("is-active", on);
@@ -211,7 +228,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
 function readWorkspace(): WorkspaceId {
   try {
     const v = localStorage.getItem(LS_WORKSPACE);
-    if (v === "schedule-4d" || v === "project-plan") return v;
+    if (isWorkspaceId(v)) return v;
   } catch {
     /* ignore */
   }

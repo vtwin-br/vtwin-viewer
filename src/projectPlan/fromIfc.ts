@@ -2,6 +2,7 @@ import { diffDays } from "./dates";
 import { finalizePlan, uid } from "./buildPlan";
 import type { PlanTask, ProjectPlan } from "./types";
 import type { ScheduleData, Task } from "../schedule/types";
+import type { OutlineRowInput } from "../ifc/scheduleWrite";
 
 /** Converte o IfcWorkSchedule nativo numa lista plana tipo Project, já ligada aos produtos 3D. */
 export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): ProjectPlan {
@@ -11,7 +12,7 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
       const duration =
         t.start && t.end ? Math.max(0, diffDays(t.start, t.end)) : t.isMilestone ? 0 : undefined;
       tasks.push({
-        id: `ifc-${t.id}`,
+        id: t.isFederationRoot ? `ifc-file-${t.sourceModelId ?? t.id}` : `ifc-${t.id}`,
         name: t.name,
         outlineLevel: level,
         wbs: t.identification,
@@ -50,7 +51,7 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
       : "Associado ao IFC (IfcRelAssociatesDocument)",
   }));
 
-  const name = [schedule.workPlanName, schedule.name].filter(Boolean).join(" · ") || "Cronograma IFC";
+  const name = schedule.name || schedule.workPlanName || "Cronograma IFC";
   return finalizePlan({
     id: uid("plan"),
     name,
@@ -59,4 +60,26 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
     sourceLabel: ifcFileName,
     sourceKind: "ifc",
   });
+}
+
+/** Lista plana do Gantt → linhas para gravar como IfcTask nativas. */
+export function planToOutlineRows(plan: ProjectPlan): OutlineRowInput[] {
+  const indexById = new Map(plan.tasks.map((t, i) => [t.id, i]));
+  return plan.tasks.map((t) => ({
+    name: t.name,
+    identification: t.wbs,
+    start: t.start,
+    end: t.end,
+    outlineLevel: t.outlineLevel,
+    isMilestone: t.isMilestone,
+    predecessorIndexes: t.predecessors.flatMap((p) => {
+      let index = indexById.get(p.id);
+      if (index == null && /^\d+$/.test(p.id)) {
+        const n = Number(p.id);
+        if (n >= 1 && n <= plan.tasks.length) index = n - 1;
+      }
+      if (index == null || index < 0) return [];
+      return [{ index, type: p.type }];
+    }),
+  }));
 }

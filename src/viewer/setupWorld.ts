@@ -114,15 +114,36 @@ export async function loadIfc(
     },
   });
 
-  const model = fragments.list.get(modelId);
-  if (!model) throw new Error("Falha ao carregar IFC: modelo nao apareceu em fragments.list");
+  return finishLoadedModel(handles, modelId, world, fragments);
+}
 
-  // Aguarda o primeiro frame do worker computar a bounding box
+/** Carrega um .frag já convertido — sem tessellation web-ifc. */
+export async function loadFragments(
+  handles: ViewerHandles,
+  buffer: Uint8Array | ArrayBuffer,
+  modelId = "main",
+): Promise<LoadedModel> {
+  const { fragments, world } = handles;
+  await fragments.core.load(buffer, { modelId, raw: false });
+  return finishLoadedModel(handles, modelId, world, fragments);
+}
+
+export async function exportFragmentsBuffer(model: FRAGS.FragmentsModel): Promise<Uint8Array> {
+  const buf = await model.getBuffer(false);
+  if (buf instanceof Uint8Array) return buf;
+  return new Uint8Array(buf);
+}
+
+async function finishLoadedModel(
+  handles: ViewerHandles,
+  modelId: string,
+  world: OBC.World,
+  fragments: OBC.FragmentsManager,
+): Promise<LoadedModel> {
+  const model = handles.fragments.list.get(modelId);
+  if (!model) throw new Error("Falha ao carregar o modelo 3D: não apareceu em fragments.list");
   await fragments.core.update(true);
-
-  // Enquadra a camera com base na bounding box do modelo
   await fitCameraToModel(world, model);
-
   return { model };
 }
 
@@ -152,35 +173,102 @@ export async function unloadIfc(handles: ViewerHandles, modelId = "main"): Promi
   }
 }
 
-/** Recentra a câmara no modelo (botão “Enquadrar”). */
-export async function refitViewerCamera(handles: ViewerHandles, modelId = "main"): Promise<void> {
+/** Recentra a câmara nos modelos visíveis (botão “Enquadrar”). */
+export async function refitViewerCamera(handles: ViewerHandles, modelId?: string): Promise<void> {
+  if (modelId) {
+    const model = handles.fragments.list.get(modelId);
+    if (!model || model.object.visible === false) return;
+    await fitCameraToModel(handles.world, model);
+    await handles.fragments.core.update(true);
+    return;
+  }
+  await fitCameraToVisibleModels(handles);
+}
+
+export async function fitCameraToVisibleModels(handles: ViewerHandles): Promise<void> {
+  const box = new THREE.Box3();
+  let any = false;
+  for (const [, model] of handles.fragments.list) {
+    if (model.object.visible === false) continue;
+    const b = new THREE.Box3().setFromObject(model.object);
+    if (b.isEmpty()) continue;
+    box.union(b);
+    any = true;
+  }
+  if (!any) return;
+  await lookAtBox(handles.world, box, 1.5);
+  await handles.fragments.core.update(true);
+}
+
+/** Enquadra a câmara nos itens selecionados (conjunto / grupo espacial). */
+export async function fitCameraToItems(
+  handles: ViewerHandles,
+  localIds: number[],
+  modelId = "main",
+): Promise<void> {
   const model = handles.fragments.list.get(modelId);
-  if (!model) return;
-  await fitCameraToModel(handles.world, model);
+  if (!model || localIds.length === 0) return;
+  await fitCameraToItemSets(handles, [{ model, localIds }]);
+}
+
+export async function fitCameraToItemSets(
+  handles: ViewerHandles,
+  sets: Array<{ model: FRAGS.FragmentsModel; localIds: number[] }>,
+): Promise<void> {
+  const worldBox = new THREE.Box3();
+  let any = false;
+  for (const { model, localIds } of sets) {
+    if (!localIds.length) continue;
+    try {
+      let box: THREE.Box3;
+      if (typeof model.getMergedBox === "function") {
+        box = await model.getMergedBox(localIds);
+      } else {
+        const boxes = await model.getBoxes(localIds);
+        box = new THREE.Box3();
+        for (const b of boxes) {
+          if (b) box.union(b);
+        }
+      }
+      if (box.isEmpty() || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) continue;
+      model.object.updateWorldMatrix(true, false);
+      box.applyMatrix4(model.object.matrixWorld);
+      worldBox.union(box);
+      any = true;
+    } catch (err) {
+      console.warn("Não foi possível enquadrar a seleção:", err);
+    }
+  }
+  if (!any) return;
+  await lookAtBox(handles.world, worldBox, 2.15);
   await handles.fragments.core.update(true);
 }
 
 async function fitCameraToModel(world: OBC.World, model: FRAGS.FragmentsModel) {
   try {
     const box = new THREE.Box3().setFromObject(model.object);
-    if (!isFinite(box.min.x) || !isFinite(box.max.x)) return;
-    const center = new THREE.Vector3();
-    box.getCenter(center);
-    const size = new THREE.Vector3();
-    box.getSize(size);
-    const maxDim = Math.max(size.x, size.y, size.z);
-    const dist = maxDim * 1.5 || 30;
-    const cam = world.camera as OBC.OrthoPerspectiveCamera;
-    await cam.controls.setLookAt(
-      center.x + dist,
-      center.y + dist * 0.8,
-      center.z + dist,
-      center.x,
-      center.y,
-      center.z,
-      true,
-    );
+    await lookAtBox(world, box, 1.5);
   } catch (err) {
     console.warn("Nao foi possivel enquadrar a camera:", err);
   }
+}
+
+async function lookAtBox(world: OBC.World, box: THREE.Box3, distanceScale: number) {
+  if (box.isEmpty() || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
+  const center = new THREE.Vector3();
+  box.getCenter(center);
+  const size = new THREE.Vector3();
+  box.getSize(size);
+  const maxDim = Math.max(size.x, size.y, size.z, 0.6);
+  const dist = maxDim * distanceScale || 30;
+  const cam = world.camera as OBC.OrthoPerspectiveCamera;
+  await cam.controls.setLookAt(
+    center.x + dist * 0.85,
+    center.y + dist * 0.55,
+    center.z + dist * 0.85,
+    center.x,
+    center.y,
+    center.z,
+    true,
+  );
 }

@@ -11,9 +11,12 @@ import { patchIfcGeoref, type GeoAnchorWrite } from "./georefWrite";
 import {
   applyReplacements,
   bytesToLatin1,
+  commentEntity,
   createIfcGuid,
+  detectIfcSchema,
   findEntity,
   findExpressIdByGlobalId,
+  findFirstExpressIdByType,
   formatIfcDateTime,
   formatMonetaryMeasure,
   ifcOptionalString,
@@ -22,8 +25,34 @@ import {
   latin1ToBytes,
   maxExpressId,
   serializeEntity,
+  stepSet,
+  type IfcSchemaKind,
   type StepEntity,
 } from "./stepText";
+import {
+  findSequenceEntities,
+  rewriteRelatedObjects,
+  rewriteRelNests,
+  rewriteWorkControlName,
+  serializeIfcCalendarDate,
+  serializeIfcDateAndTime,
+  serializeIfcLocalTime,
+  serializeIfcScheduleTimeControl,
+  serializeNewIfcTask,
+  serializeNewWorkPlan,
+  serializeNewWorkSchedule,
+  serializeRelAggregates,
+  serializeRelAssignsTasks,
+  serializeRelDeclares,
+  serializeRelNests,
+  serializeRelSequence,
+  sequenceInvolves,
+  type NewTaskInput,
+  type OutlineRowInput,
+  type SequenceType,
+} from "./scheduleWrite";
+
+export type { NewTaskInput, OutlineRowInput, SequenceType };
 
 export interface TaskPatch {
   name?: string;
@@ -36,15 +65,17 @@ export interface TaskPatch {
 
 /**
  * Mantém o IFC original em memória e aplica só as linhas alteradas
- * (IfcTask / IfcTaskTime / IfcCostItem / IfcCostValue / IfcGroup /
- * IfcRelAssignsToGroup / IfcRelAssignsToProduct / IfcSite)
+ * (IfcTask / IfcTaskTime / IfcWorkSchedule / IfcRelNests / IfcRelSequence /
+ * IfcCostItem / IfcCostValue / IfcGroup / IfcRelAssignsToGroup /
+ * IfcRelAssignsToProduct / IfcSite)
  * na exportação — o resto do ficheiro fica intacto.
  */
 export class IfcSession {
   readonly fileName: string;
   readonly schedule: ScheduleData;
   private readonly originalText: string;
-  private nextExpressId: number;
+  /** Preenchido na primeira alocação — evita varrer o STEP inteiro só para abrir. */
+  private nextExpressId: number | undefined;
   private readonly identityEdited = new Set<number>();
   private readonly timeEdited = new Set<number>();
   private readonly costEdited = new Set<number>();
@@ -64,17 +95,47 @@ export class IfcSession {
   private readonly dirtyGroupMemberIds = new Set<number>();
   private readonly deletedGroupIds = new Set<number>();
   private readonly removedGroupTaskRels = new Map<number, { taskId: number; groupId: number }>();
+  private readonly createdTaskIds = new Set<number>();
+  private readonly deletedTaskIds = new Set<number>();
+  private readonly deletedEntityIds = new Set<number>();
+  private readonly createdNestsRelIds = new Set<number>();
+  private readonly dirtyNestsParentIds = new Set<number>();
+  private readonly createdSequenceRels: Array<{
+    relId: number;
+    predId: number;
+    succId: number;
+    type: SequenceType;
+  }> = [];
+  private createdWorkPlan = false;
+  private createdWorkSchedule = false;
+  private createdDeclaresRelId: number | undefined;
+  private createdAggregatesRel = false;
+  private createdScheduleControlRel = false;
+  private dirtyScheduleControl = false;
+  private renamedSchedule = false;
+  private readonly schema: IfcSchemaKind;
+  private readonly ownerHistoryRef: string;
+  private workControlDateId?: number;
+  private localTimeId?: number;
+  private readonly dateTimeByDay = new Map<string, number>();
+  private readonly createdDateLines: string[] = [];
+  private readonly ifc2x3Times = new Map<
+    number,
+    { stcId: number; relId: number; startRef: number; endRef: number }
+  >();
   private extra = emptyExtraTransform();
   private geoWrite: GeoAnchorWrite | null = null;
   private geoChanged = false;
   dirty = false;
 
-  constructor(buffer: Uint8Array, fileName: string, schedule: ScheduleData) {
-    this.originalText = bytesToLatin1(buffer);
+  constructor(source: Uint8Array | string, fileName: string, schedule: ScheduleData) {
+    this.originalText = typeof source === "string" ? source : bytesToLatin1(source);
     this.fileName = fileName;
     this.schedule = schedule;
-    this.nextExpressId = maxExpressId(this.originalText) + 1;
     if (!this.schedule.groups) this.schedule.groups = [];
+    this.schema = detectIfcSchema(this.originalText);
+    const oh = findFirstExpressIdByType(this.originalText, "IFCOWNERHISTORY");
+    this.ownerHistoryRef = oh != null ? `#${oh}` : "$";
   }
 
   get georef(): IfcGeoref | undefined {
@@ -128,8 +189,10 @@ export class IfcSession {
       time = true;
     }
 
-    if (time && task.start && task.end && task.taskTimeId == null) {
-      task.taskTimeId = this.nextExpressId++;
+    if (time && this.schema === "IFC2X3" && task.start && task.end) {
+      this.attachIfc2x3Time(task);
+    } else if (time && task.start && task.end && task.taskTimeId == null) {
+      task.taskTimeId = this.allocId();
       this.createdTaskTimeIds.add(task.taskTimeId);
       identity = true;
     }
@@ -156,6 +219,368 @@ export class IfcSession {
     if (identity || time || cost) this.dirty = true;
     recomputeScheduleRange(this.schedule);
     return { task, changed: identity || time || cost, timeChanged: time };
+  }
+
+  renameWorkSchedule(name: string): void {
+    const next = name.trim();
+    if (!next) return;
+    this.ensureWorkSchedule(next);
+    if (this.schedule.name === next) return;
+    this.schedule.name = next;
+    this.renamedSchedule = true;
+    this.dirty = true;
+  }
+
+  /**
+   * Garante IfcWorkPlan + IfcWorkSchedule + relações ao IfcProject.
+   * Sem isto não há onde aninhar IfcTask.
+   */
+  ensureWorkSchedule(name = "Cronograma"): { created: boolean } {
+    if (this.schedule.workScheduleId != null) {
+      return { created: false };
+    }
+    const projectId =
+      this.schedule.projectId ?? findFirstExpressIdByType(this.originalText, "IFCPROJECT");
+    if (projectId == null) {
+      throw new Error("Este IFC não tem IfcProject — não dá para gravar um cronograma nativo.");
+    }
+    this.schedule.projectId = projectId;
+    const label = name.trim() || "Cronograma";
+    if (this.schedule.workPlanId == null) {
+      this.schedule.workPlanId = this.allocId();
+      this.createdWorkPlan = true;
+      this.schedule.workPlanName = label;
+    }
+    this.schedule.workScheduleId = this.allocId();
+    this.createdWorkSchedule = true;
+    this.schedule.name =
+      this.schedule.name === "—" || this.schedule.name === "Cronograma" ? label : this.schedule.name || label;
+    if (this.schema === "IFC2X3") {
+      this.workControlDateId = this.ensureDateTime(new Date());
+    } else {
+      this.createdDeclaresRelId = this.allocId();
+    }
+    if (this.schedule.aggregatesRelId == null && this.schedule.workPlanId != null) {
+      this.schedule.aggregatesRelId = this.allocId();
+      this.createdAggregatesRel = true;
+    }
+    this.dirty = true;
+    return { created: true };
+  }
+
+  createTask(input: NewTaskInput): Task {
+    this.ensureWorkSchedule(input.name);
+    const id = this.allocId();
+    const start = input.start;
+    const end = input.end;
+    let taskTimeId: number | undefined;
+    if (start && end) {
+      if (this.schema !== "IFC2X3") {
+        taskTimeId = this.allocId();
+        this.createdTaskTimeIds.add(taskTimeId);
+        this.timeEdited.add(id);
+      }
+    }
+    const task: Task = {
+      id,
+      globalId: createIfcGuid(),
+      name: input.name.trim() || "Nova tarefa",
+      identification: input.identification?.trim() || undefined,
+      start,
+      end,
+      taskTimeId,
+      isMilestone: input.isMilestone,
+      parentId: input.parentId,
+      children: [],
+      productIds: [],
+      productGuids: [],
+      groupIds: [],
+      predecessors: [],
+    };
+    this.schedule.byId.set(id, task);
+    this.createdTaskIds.add(id);
+    this.identityEdited.add(id);
+    if (this.schema === "IFC2X3" && start && end) this.attachIfc2x3Time(task);
+
+    const parent = input.parentId != null ? this.schedule.byId.get(input.parentId) : undefined;
+    if (input.parentId != null && !parent) {
+      throw new Error(`Tarefa pai #${input.parentId} não encontrada.`);
+    }
+    if (parent) {
+      task.parentId = parent.id;
+      insertSibling(parent.children, task, input.afterId);
+      this.touchNests(parent);
+    } else {
+      task.parentId = undefined;
+      insertSibling(this.schedule.roots, task, input.afterId);
+      this.touchScheduleControl();
+    }
+    recomputeScheduleRange(this.schedule);
+    recomputeProductGuidsByTask(this.schedule);
+    this.dirty = true;
+    return task;
+  }
+
+  deleteTask(taskId: number): void {
+    const task = this.schedule.byId.get(taskId);
+    if (!task) return;
+    for (const child of [...task.children]) this.deleteTask(child.id);
+
+    for (const gid of [...(task.groupIds ?? [])]) {
+      this.assignGroupToTask(taskId, gid);
+    }
+    for (let i = task.productIds.length - 1; i >= 0; i--) {
+      this.removeProductLink(task, task.productGuids[i], task.productIds[i]);
+    }
+
+    if (task.parentId != null) {
+      const parent = this.schedule.byId.get(task.parentId);
+      if (parent) {
+        parent.children = parent.children.filter((c) => c.id !== taskId);
+        this.touchNests(parent);
+      }
+    } else {
+      this.schedule.roots = this.schedule.roots.filter((t) => t.id !== taskId);
+      this.touchScheduleControl();
+    }
+
+    this.dropSequencesInvolving(taskId);
+    this.schedule.byId.delete(taskId);
+    this.identityEdited.delete(taskId);
+    this.timeEdited.delete(taskId);
+    this.costEdited.delete(taskId);
+
+    if (this.createdTaskIds.has(taskId)) {
+      this.createdTaskIds.delete(taskId);
+      if (task.taskTimeId != null) this.createdTaskTimeIds.delete(task.taskTimeId);
+      if (task.nestsRelId != null) this.createdNestsRelIds.delete(task.nestsRelId);
+    } else {
+      this.deletedTaskIds.add(taskId);
+      if (task.taskTimeId != null) this.deletedEntityIds.add(task.taskTimeId);
+      if (task.nestsRelId != null) {
+        if (this.createdNestsRelIds.has(task.nestsRelId)) this.createdNestsRelIds.delete(task.nestsRelId);
+        else this.deletedEntityIds.add(task.nestsRelId);
+      }
+    }
+    recomputeScheduleRange(this.schedule);
+    recomputeProductGuidsByTask(this.schedule);
+    this.dirty = true;
+  }
+
+  /**
+   * Move a tarefa na árvore IfcRelNests. Os filhos da tarefa acompanham o pai.
+   * `parentId` indefinido coloca a tarefa na raiz do IfcWorkSchedule.
+   */
+  reparentTask(taskId: number, parentId: number | undefined, afterId?: number): void {
+    const task = this.schedule.byId.get(taskId);
+    if (!task) throw new Error(`Tarefa #${taskId} não encontrada.`);
+    if (parentId === taskId) return;
+    if (parentId != null) {
+      const parent = this.schedule.byId.get(parentId);
+      if (!parent) throw new Error(`Tarefa pai #${parentId} não encontrada.`);
+      if (this.containsTask(task, parentId)) {
+        throw new Error("Não é possível aninhar uma tarefa dentro de si própria.");
+      }
+    }
+
+    const sameParent = (task.parentId ?? null) === (parentId ?? null);
+    if (sameParent) {
+      const list = parentId != null ? this.schedule.byId.get(parentId)!.children : this.schedule.roots;
+      const at = list.indexOf(task);
+      const after = afterId != null ? list.findIndex((t) => t.id === afterId) : -1;
+      const desired = after >= 0 ? after + 1 : list.length;
+      const current = at >= 0 && at < desired ? desired - 1 : desired;
+      if (at === current || (at >= 0 && after >= 0 && at === after + 1)) return;
+    }
+
+    if (task.parentId != null) {
+      const oldParent = this.schedule.byId.get(task.parentId);
+      if (oldParent) {
+        oldParent.children = oldParent.children.filter((c) => c.id !== taskId);
+        this.touchNests(oldParent);
+      }
+    } else {
+      this.schedule.roots = this.schedule.roots.filter((t) => t.id !== taskId);
+      this.touchScheduleControl();
+    }
+
+    task.parentId = parentId;
+    if (parentId != null) {
+      const parent = this.schedule.byId.get(parentId)!;
+      insertSibling(parent.children, task, afterId);
+      this.touchNests(parent);
+    } else {
+      insertSibling(this.schedule.roots, task, afterId);
+      this.touchScheduleControl();
+    }
+    this.dirty = true;
+  }
+
+  private containsTask(root: Task, id: number): boolean {
+    if (root.id === id) return true;
+    return root.children.some((c) => this.containsTask(c, id));
+  }
+
+  /**
+   * CSV / XML → IfcTask. Casa por WBS (Identification) ou nome entre irmãos;
+   * o que não existir é criado com IfcRelNests / IfcRelAssignsToControl.
+   */
+  importOutline(rows: OutlineRowInput[], scheduleName?: string): { created: number; updated: number } {
+    if (!rows.length) throw new Error("Não há tarefas para gravar no IFC.");
+    this.ensureWorkSchedule(scheduleName || rows[0]?.name || "Cronograma");
+    if (scheduleName && !this.schedule.roots.length) this.renameWorkSchedule(scheduleName);
+
+    const stack: Array<Task | undefined> = [];
+    const idByIndex: number[] = [];
+    let created = 0;
+    let updated = 0;
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const level = Math.max(1, Math.floor(row.outlineLevel) || 1);
+      const parent = level <= 1 ? undefined : stack[level - 1];
+      const existing = this.findMergeTarget(row, parent);
+      let task: Task;
+      if (existing) {
+        this.applyTaskEdit(existing.id, {
+          name: row.name,
+          identification: row.identification,
+          start: row.start,
+          end: row.end,
+        });
+        task = existing;
+        updated += 1;
+      } else {
+        task = this.createTask({
+          name: row.name,
+          identification: row.identification,
+          start: row.start,
+          end: row.end,
+          isMilestone: row.isMilestone,
+          parentId: parent?.id,
+        });
+        created += 1;
+      }
+      idByIndex[i] = task.id;
+      stack[level] = task;
+      stack.length = level + 1;
+    }
+
+    for (let i = 0; i < rows.length; i++) {
+      const succId = idByIndex[i];
+      if (succId == null) continue;
+      for (const pred of rows[i].predecessorIndexes ?? []) {
+        const predId = idByIndex[pred.index];
+        if (predId == null || predId === succId) continue;
+        this.addSequence(predId, succId, pred.type);
+      }
+    }
+    return { created, updated };
+  }
+
+  private findMergeTarget(row: OutlineRowInput, parent?: Task): Task | undefined {
+    const ident = row.identification?.trim();
+    if (ident) {
+      for (const t of this.schedule.byId.values()) {
+        if (t.identification === ident) return t;
+      }
+    }
+    const name = row.name.trim();
+    if (!name) return undefined;
+    const siblings = parent ? parent.children : this.schedule.roots;
+    return siblings.find((t) => t.name === name);
+  }
+
+  private addSequence(predId: number, succId: number, type: SequenceType): void {
+    const succ = this.schedule.byId.get(succId);
+    const pred = this.schedule.byId.get(predId);
+    if (!succ || !pred) return;
+    if (succ.predecessors.some((p) => p.taskId === predId)) return;
+    succ.predecessors.push({ taskId: predId, type });
+    this.createdSequenceRels.push({ relId: this.allocId(), predId, succId, type });
+    this.dirty = true;
+  }
+
+  private dropSequencesInvolving(taskId: number): void {
+    for (const t of this.schedule.byId.values()) {
+      t.predecessors = t.predecessors.filter((p) => p.taskId !== taskId);
+    }
+    for (let i = this.createdSequenceRels.length - 1; i >= 0; i--) {
+      const rel = this.createdSequenceRels[i];
+      if (rel.predId === taskId || rel.succId === taskId) this.createdSequenceRels.splice(i, 1);
+    }
+  }
+
+  private touchNests(parent: Task): void {
+    if (parent.children.length === 0) {
+      if (parent.nestsRelId != null) {
+        if (this.createdNestsRelIds.has(parent.nestsRelId)) this.createdNestsRelIds.delete(parent.nestsRelId);
+        else this.deletedEntityIds.add(parent.nestsRelId);
+        parent.nestsRelId = undefined;
+      }
+      this.dirtyNestsParentIds.delete(parent.id);
+      return;
+    }
+    if (parent.nestsRelId == null) {
+      parent.nestsRelId = this.allocId();
+      this.createdNestsRelIds.add(parent.nestsRelId);
+    }
+    this.dirtyNestsParentIds.add(parent.id);
+  }
+
+  private touchScheduleControl(): void {
+    if (this.schedule.roots.length === 0) {
+      if (this.schedule.scheduleControlRelId != null) {
+        if (this.createdScheduleControlRel) this.createdScheduleControlRel = false;
+        else this.deletedEntityIds.add(this.schedule.scheduleControlRelId);
+        this.schedule.scheduleControlRelId = undefined;
+      }
+      this.dirtyScheduleControl = false;
+      return;
+    }
+    if (this.schedule.scheduleControlRelId == null) {
+      this.schedule.scheduleControlRelId = this.allocId();
+      this.createdScheduleControlRel = true;
+    } else if (!this.createdScheduleControlRel) {
+      this.dirtyScheduleControl = true;
+    }
+  }
+
+  private attachIfc2x3Time(task: Task): void {
+    if (!task.start || !task.end || this.schedule.workScheduleId == null) return;
+    const startRef = this.ensureDateTime(task.start);
+    const endRef = this.ensureDateTime(task.end);
+    const existing = this.ifc2x3Times.get(task.id);
+    if (existing) {
+      existing.startRef = startRef;
+      existing.endRef = endRef;
+      return;
+    }
+    const stcId = this.allocId();
+    const relId = this.allocId();
+    task.taskTimeId = stcId;
+    this.ifc2x3Times.set(task.id, { stcId, relId, startRef, endRef });
+  }
+
+  private ensureDateTime(d: Date): number {
+    const key = `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+    const hit = this.dateTimeByDay.get(key);
+    if (hit != null) return hit;
+    if (this.localTimeId == null) {
+      this.localTimeId = this.allocId();
+      this.createdDateLines.push(serializeIfcLocalTime(this.localTimeId));
+    }
+    const calId = this.allocId();
+    const dtId = this.allocId();
+    this.createdDateLines.push(serializeIfcCalendarDate(calId, d));
+    this.createdDateLines.push(serializeIfcDateAndTime(dtId, calId, this.localTimeId));
+    this.dateTimeByDay.set(key, dtId);
+    return dtId;
+  }
+
+  private allocId(): number {
+    if (this.nextExpressId == null) this.nextExpressId = maxExpressId(this.originalText) + 1;
+    return this.nextExpressId++;
   }
 
   /**
@@ -186,7 +611,7 @@ export class IfcSession {
     members: Array<{ guid: string; expressId?: number }>,
   ): SelectionGroup {
     const trimmed = name.trim() || "Conjunto";
-    const groupId = this.nextExpressId++;
+    const groupId = this.allocId();
     const productIds: number[] = [];
     const productGuids: string[] = [];
     for (const m of members) {
@@ -195,7 +620,7 @@ export class IfcSession {
       productIds.push(pid);
       productGuids.push(m.guid);
     }
-    const assignRelId = productIds.length ? this.nextExpressId++ : undefined;
+    const assignRelId = productIds.length ? this.allocId() : undefined;
     const group: SelectionGroup = {
       id: groupId,
       globalId: createIfcGuid(),
@@ -249,7 +674,7 @@ export class IfcSession {
     group.productGuids = nextGuids;
     if (this.createdGroupIds.has(groupId)) {
       if (nextIds.length && !this.createdGroupAssignRel.has(groupId)) {
-        const relId = this.nextExpressId++;
+        const relId = this.allocId();
         group.assignRelId = relId;
         this.createdGroupAssignRel.set(groupId, relId);
       }
@@ -314,7 +739,7 @@ export class IfcSession {
       );
       if (pending) this.removedGroupTaskRels.delete(pending[0]);
       else {
-        this.createdGroupTaskRels.set(key, { relId: this.nextExpressId++, taskId, groupId });
+        this.createdGroupTaskRels.set(key, { relId: this.allocId(), taskId, groupId });
       }
     }
 
@@ -354,7 +779,7 @@ export class IfcSession {
     );
     if (pendingRemove) this.removedExistingAssignRels.delete(pendingRemove[0]);
     else if (!this.createdProductRels.has(key)) {
-      this.createdProductRels.set(key, { relId: this.nextExpressId++, taskId: task.id, productId });
+      this.createdProductRels.set(key, { relId: this.allocId(), taskId: task.id, productId });
     }
   }
 
@@ -373,7 +798,7 @@ export class IfcSession {
 
   private ensureCostEntities(task: Task): void {
     if (task.costValueId == null) {
-      task.costValueId = this.nextExpressId++;
+      task.costValueId = this.allocId();
       this.createdCostValueIds.add(task.costValueId);
       if (task.costItemId != null) {
         this.costItemNeedsValueLink.add(task.costItemId);
@@ -381,11 +806,11 @@ export class IfcSession {
       }
     }
     if (task.costItemId == null) {
-      task.costItemId = this.nextExpressId++;
+      task.costItemId = this.allocId();
       this.createdCostItemIds.add(task.costItemId);
-      const assignRelId = this.nextExpressId++;
+      const assignRelId = this.allocId();
       const scheduleRelId =
-        this.schedule.costScheduleId != null ? this.nextExpressId++ : undefined;
+        this.schedule.costScheduleId != null ? this.allocId() : undefined;
       this.createdCostRels.set(task.id, { assignRelId, scheduleRelId });
     }
     if (task.costItemId != null && task.costValueId != null) {
@@ -399,13 +824,71 @@ export class IfcSession {
   exportBytes(): Uint8Array {
     const replacements: Array<{ start: number; end: number; text: string }> = [];
     const newLines: string[] = [];
+    const now = new Date();
+    const oh = this.ownerHistoryRef;
+
+    newLines.push(...this.createdDateLines);
+
+    if (this.createdWorkPlan && this.schedule.workPlanId != null) {
+      newLines.push(
+        serializeNewWorkPlan(
+          this.schedule.workPlanId,
+          this.schedule.workPlanName || this.schedule.name,
+          now,
+          this.schema,
+          oh,
+          this.workControlDateId,
+        ),
+      );
+    } else if (this.renamedSchedule && this.schedule.workPlanId != null && this.createdWorkPlan === false) {
+      /* o título do Gantt grava IfcWorkSchedule, não o WorkPlan */
+    }
+    if (this.createdWorkSchedule && this.schedule.workScheduleId != null) {
+      newLines.push(
+        serializeNewWorkSchedule(this.schedule.workScheduleId, this.schedule.name, now, this.schema, oh, this.workControlDateId),
+      );
+    } else if (this.renamedSchedule && this.schedule.workScheduleId != null) {
+      const ent = findEntity(this.originalText, this.schedule.workScheduleId);
+      if (ent) {
+        replacements.push({
+          start: ent.start,
+          end: ent.end,
+          text: rewriteWorkControlName(ent, this.schedule.name),
+        });
+      }
+    }
+    if (this.schema !== "IFC2X3" && this.createdDeclaresRelId != null && this.schedule.projectId != null) {
+      const defs = [this.schedule.workScheduleId, this.schedule.workPlanId].filter(
+        (id): id is number => id != null,
+      );
+      newLines.push(serializeRelDeclares(this.createdDeclaresRelId, this.schedule.projectId, defs, oh));
+    }
+    if (
+      this.createdAggregatesRel &&
+      this.schedule.aggregatesRelId != null &&
+      this.schedule.workPlanId != null &&
+      this.schedule.workScheduleId != null
+    ) {
+      newLines.push(
+        serializeRelAggregates(
+          this.schedule.aggregatesRelId,
+          this.schedule.workPlanId,
+          [this.schedule.workScheduleId],
+          oh,
+        ),
+      );
+    }
+
     const taskIds = new Set([...this.identityEdited, ...this.timeEdited, ...this.costEdited]);
 
     for (const taskId of taskIds) {
+      if (this.deletedTaskIds.has(taskId)) continue;
       const task = this.schedule.byId.get(taskId);
       if (!task) continue;
 
-      if (this.identityEdited.has(taskId)) {
+      if (this.createdTaskIds.has(taskId)) {
+        newLines.push(serializeNewIfcTask(task, this.schema, oh));
+      } else if (this.identityEdited.has(taskId)) {
         const taskEnt = findEntity(this.originalText, task.id);
         if (!taskEnt) {
           throw new Error(`Não foi possível localizar IfcTask #${task.id} no IFC.`);
@@ -417,7 +900,13 @@ export class IfcSession {
         });
       }
 
-      if (this.timeEdited.has(taskId) && task.start && task.end && task.taskTimeId != null) {
+      if (
+        this.schema !== "IFC2X3" &&
+        this.timeEdited.has(taskId) &&
+        task.start &&
+        task.end &&
+        task.taskTimeId != null
+      ) {
         if (this.createdTaskTimeIds.has(task.taskTimeId)) {
           newLines.push(serializeNewTaskTime(task.taskTimeId, task.start, task.end));
         } else {
@@ -525,7 +1014,7 @@ export class IfcSession {
               });
             }
           } else {
-            const assignRelId = this.nextExpressId++;
+            const assignRelId = this.allocId();
             group.assignRelId = assignRelId;
             newLines.push(serializeNewAssignToGroup(assignRelId, group));
           }
@@ -563,14 +1052,92 @@ export class IfcSession {
       });
     }
 
+    if (this.schema === "IFC2X3" && this.schedule.workScheduleId != null) {
+      for (const [taskId, rec] of this.ifc2x3Times) {
+        if (this.deletedTaskIds.has(taskId)) continue;
+        const task = this.schedule.byId.get(taskId);
+        if (!task) continue;
+        newLines.push(
+          serializeIfcScheduleTimeControl(rec.stcId, task.name, oh, rec.startRef, rec.endRef),
+        );
+        newLines.push(
+          serializeRelAssignsTasks(rec.relId, task.id, this.schedule.workScheduleId, rec.stcId, oh),
+        );
+      }
+    }
+
+    for (const parentId of this.dirtyNestsParentIds) {
+      const parent = this.schedule.byId.get(parentId);
+      if (!parent || parent.nestsRelId == null) continue;
+      const childIds = parent.children.map((c) => c.id);
+      if (this.createdNestsRelIds.has(parent.nestsRelId)) {
+        if (childIds.length) newLines.push(serializeRelNests(parent.nestsRelId, parent.id, childIds, oh));
+      } else {
+        const ent = findEntity(this.originalText, parent.nestsRelId);
+        if (ent) {
+          replacements.push({
+            start: ent.start,
+            end: ent.end,
+            text: rewriteRelNests(ent, parent.id, childIds),
+          });
+        }
+      }
+    }
+
+    if (this.schedule.scheduleControlRelId != null && this.schedule.workScheduleId != null) {
+      const rootIds = this.schedule.roots.map((t) => t.id);
+      if (this.createdScheduleControlRel) {
+        if (rootIds.length) {
+          newLines.push(
+            serializeAssignToControlSet(
+              this.schedule.scheduleControlRelId,
+              rootIds,
+              this.schedule.workScheduleId,
+              oh,
+            ),
+          );
+        }
+      } else if (this.dirtyScheduleControl) {
+        const ent = findEntity(this.originalText, this.schedule.scheduleControlRelId);
+        if (ent) {
+          replacements.push({
+            start: ent.start,
+            end: ent.end,
+            text: rewriteRelatedObjects(ent, 4, rootIds),
+          });
+        }
+      }
+    }
+
+    for (const rel of this.createdSequenceRels) {
+      newLines.push(serializeRelSequence(rel.relId, rel.predId, rel.succId, rel.type));
+    }
+
+    const commented = new Set<number>();
+    const comment = (id: number, reason?: string) => {
+      if (commented.has(id)) return;
+      const ent = findEntity(this.originalText, id);
+      if (!ent) return;
+      commented.add(id);
+      replacements.push({ start: ent.start, end: ent.end, text: commentEntity(ent, reason) });
+    };
+    for (const taskId of this.deletedTaskIds) comment(taskId);
+    for (const expressId of this.deletedEntityIds) comment(expressId);
+    if (this.deletedTaskIds.size) {
+      for (const ent of findSequenceEntities(this.originalText)) {
+        if (![...this.deletedTaskIds].some((id) => sequenceInvolves(ent, id))) continue;
+        comment(ent.expressId, "unlinked");
+      }
+    }
+
     const patched = applyReplacements(this.originalText, replacements);
-    const withTasks = insertBeforeLastEndsec(patched, newLines);
+    const withTasks = insertBeforeLastEndsec(patched, newLines.filter((l) => l.trim()));
     const georef = this.schedule.georef;
     const spatial =
       georef && (this.geoChanged || !extraIsIdentity(this.extra))
         ? patchIfcGeoref(
             withTasks,
-            this.nextExpressId,
+            this.nextExpressId ?? maxExpressId(this.originalText) + 1,
             georef,
             this.extra,
             this.geoWrite,
@@ -599,13 +1166,18 @@ export class IfcSession {
 
 function rewriteIfcTask(ent: StepEntity, task: Task): string {
   const args = [...ent.args];
-  if (args.length < 13) {
-    throw new Error(`IfcTask #${task.id} tem ${args.length} atributos; esperado ≥ 13 (IFC4).`);
+  if (args.length >= 13) {
+    args[2] = ifcOptionalString(task.name);
+    args[5] = ifcOptionalString(task.identification);
+    if (task.taskTimeId != null) args[11] = `#${task.taskTimeId}`;
+    return serializeEntity(ent.expressId, ent.type, args);
   }
-  args[2] = ifcOptionalString(task.name);
-  args[5] = ifcOptionalString(task.identification);
-  if (task.taskTimeId != null) args[11] = `#${task.taskTimeId}`;
-  return serializeEntity(ent.expressId, ent.type, args);
+  if (args.length >= 10) {
+    args[2] = ifcOptionalString(task.name);
+    args[5] = ifcString(task.identification?.trim() || `T${task.id}`);
+    return serializeEntity(ent.expressId, ent.type, args);
+  }
+  throw new Error(`IfcTask #${task.id} tem ${args.length} atributos; esperado ≥ 10.`);
 }
 
 function rewriteIfcTaskTime(ent: StepEntity, start: Date, end: Date): string {
@@ -707,13 +1279,27 @@ function serializeNewCostItem(expressId: number, valueId: number, task: Task): s
   return serializeEntity(expressId, "IFCCOSTITEM", args);
 }
 
-function serializeNewAssignToControl(expressId: number, relatedId: number, relatingControlId: number): string {
+function serializeNewAssignToControl(
+  expressId: number,
+  relatedId: number,
+  relatingControlId: number,
+  ownerHistory = "$",
+): string {
+  return serializeAssignToControlSet(expressId, [relatedId], relatingControlId, ownerHistory);
+}
+
+function serializeAssignToControlSet(
+  expressId: number,
+  relatedIds: number[],
+  relatingControlId: number,
+  ownerHistory = "$",
+): string {
   const args = [
     ifcString(createIfcGuid()),
+    ownerHistory,
     "$",
     "$",
-    "$",
-    `(#${relatedId})`,
+    stepSet(relatedIds),
     "$",
     `#${relatingControlId}`,
   ];
@@ -856,4 +1442,10 @@ function rewriteAssignRelWithout(ent: StepEntity, taskId: number, productId: num
     return `/* unlinked #${ent.expressId} ${ent.type} */`;
   }
   return serializeEntity(ent.expressId, ent.type, args);
+}
+
+function insertSibling(list: Task[], task: Task, afterId?: number): void {
+  const i = afterId != null ? list.findIndex((t) => t.id === afterId) : -1;
+  if (i >= 0) list.splice(i + 1, 0, task);
+  else list.push(task);
 }

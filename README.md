@@ -1,9 +1,12 @@
-# Visualizador Web 4D — IFC
+# Vista 4D — visualizador e editor openBIM (IFC)
 
-Aplicação web para visualizar arquivos **IFC com simulação 4D** dirigida pelo
-**cronograma nativo** do próprio IFC (`IfcWorkSchedule` / `IfcTask` /
-`IfcTaskTime` / `IfcRelAssignsToProcess`), tipicamente exportado pelo
-**Bonsai (BlenderBIM)**.
+Aplicação web para **abrir, editar e exportar** a hierarquia nativa do IFC.
+O 4D/5D são os primeiros módulos: a simulação no tempo usa o cronograma que
+já está no ficheiro (`IfcWorkSchedule` / `IfcTask` / `IfcTaskTime` e ligações
+aos produtos), tipicamente exportado pelo **Bonsai (BlenderBIM)**.
+
+A visão do produto, o contrato «grava no STEP ou é rascunho» e o mapa de
+entidades estão em **[SOLUCAO.md](SOLUCAO.md)**.
 
 ## Demonstração rápida
 

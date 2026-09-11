@@ -2,11 +2,18 @@ import type { ScheduleData, Task } from "../schedule/types";
 import { getTaskState } from "../schedule/simulation";
 import { displayTaskName } from "./taskLabels";
 
+function searchRoots(schedule: ScheduleData): Task[] {
+  if (schedule.roots.some((r) => r.isFederationRoot)) {
+    return schedule.roots.flatMap((r) => (r.isFederationRoot ? r.children : [r]));
+  }
+  return schedule.roots;
+}
+
 /**
  * Tarefa-pai da fase de obra (disciplinas como filhos).
  * Aceita ficheiros Bonsai (código interno na Identification) ou nome "Construction" / "Obra".
  */
-function findConstructionPhaseRoot(schedule: ScheduleData): Task | undefined {
+function findConstructionPhaseRoot(roots: Task[]): Task | undefined {
   const walk = (t: Task): Task | undefined => {
     const id = t.identification?.trim() ?? "";
     const nm = t.name.trim().toLowerCase();
@@ -18,7 +25,7 @@ function findConstructionPhaseRoot(schedule: ScheduleData): Task | undefined {
     }
     return undefined;
   };
-  for (const r of schedule.roots) {
+  for (const r of roots) {
     const x = walk(r);
     if (x) return x;
   }
@@ -26,27 +33,34 @@ function findConstructionPhaseRoot(schedule: ScheduleData): Task | undefined {
 }
 
 export function findDisciplineGroups(schedule: ScheduleData): Task[] {
-  const construction = findConstructionPhaseRoot(schedule);
-  if (construction != null && construction.children.length > 0) {
-    return construction.children;
-  }
-
-  const out: Task[] = [];
+  const bases = searchRoots(schedule);
+  const grouped: Task[] = [];
   const seen = new Set<number>();
+  const addAll = (list: Task[]) => {
+    for (const t of list) {
+      if (seen.has(t.id)) continue;
+      seen.add(t.id);
+      grouped.push(t);
+    }
+  };
+
+  for (const root of bases) {
+    const construction = findConstructionPhaseRoot([root]);
+    if (construction != null && construction.children.length > 0) {
+      addAll(construction.children);
+    }
+  }
+  if (grouped.length > 0) return grouped;
+
   const collectFromObraLike = (t: Task) => {
     const nm = t.name.trim().toLowerCase();
     if ((nm === "construction" || nm === "obra") && t.children.length >= 2) {
-      for (const c of t.children) {
-        if (!seen.has(c.id)) {
-          seen.add(c.id);
-          out.push(c);
-        }
-      }
+      addAll(t.children);
     }
     for (const c of t.children) collectFromObraLike(c);
   };
-  for (const r of schedule.roots) collectFromObraLike(r);
-  if (out.length > 0) return out;
+  for (const r of bases) collectFromObraLike(r);
+  if (grouped.length > 0) return grouped;
 
   const byCode: Task[] = [];
   const collect = (t: Task) => {
@@ -54,7 +68,7 @@ export function findDisciplineGroups(schedule: ScheduleData): Task[] {
     if (/^DCP-3\.\d+$/i.test(id)) byCode.push(t);
     for (const c of t.children) collect(c);
   };
-  for (const r of schedule.roots) collect(r);
+  for (const r of bases) collect(r);
   return byCode;
 }
 

@@ -1,5 +1,5 @@
 import "./styles.css";
-import { createViewer, loadIfc, unloadIfc, refitViewerCamera } from "./viewer/setupWorld";
+import { createViewer, loadIfc, loadFragments, exportFragmentsBuffer, unloadIfc, fitCameraToItemSets, fitCameraToVisibleModels } from "./viewer/setupWorld";
 import { ScheduleHighlighter } from "./viewer/highlight";
 import { parseSchedule } from "./schedule/parseSchedule";
 import { computeStateBuckets } from "./schedule/simulation";
@@ -16,7 +16,13 @@ import { initPanelSplitters, constrainPanelWidths } from "./ui/splitters";
 import { initModuleNav } from "./ui/moduleNav";
 import { initAppShell } from "./ui/appShell";
 import { ProjectWorkspace } from "./ui/projectWorkspace";
+import { renderModulePlaceholder } from "./ui/modulePlaceholder";
+import { findToolByWorkspace, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
+import { IfcModelSet, encodeIfcRef, scheduleTitle } from "./ifc/modelSet";
+import { ModelLayersUI } from "./ui/modelLayers";
+import { prepareIfcForOpen } from "./ifc/stepText";
+import { getCachedFragments, hashIfcBytes, saveCachedFragments } from "./ifc/fragCache";
 import { computeCostProgress, formatMoney } from "./schedule/cost";
 import type { ScheduleData, Task } from "./schedule/types";
 import { FirstPersonController } from "./viewer/firstPerson";
@@ -25,7 +31,6 @@ import { IfcSpatialTree } from "./ui/ifcTree";
 import { SelectionSetsList } from "./ui/selectionSets";
 
 const WASM_URL = "/wasm/";
-const MODEL_ID = "main";
 
 async function main() {
   const overlay = document.getElementById("loader-overlay")!;
@@ -74,7 +79,7 @@ async function main() {
     costRoll: document.getElementById("prop-cost-roll")!,
   };
 
-  let ifcSession: IfcSession | null = null;
+  let models = new IfcModelSet();
   let selectedTask: Task | null = null;
   let lastDate = new Date();
   let scheduleRef: ScheduleData | null = null;
@@ -84,7 +89,17 @@ async function main() {
   let dirty = true;
   let applying = false;
 
+  const bumpSimulation = (guids?: Iterable<string>) => {
+    dirty = true;
+    if (guids && highlighter) {
+      void highlighter.includeGuids(guids).then(() => {
+        dirty = true;
+      });
+    }
+  };
+
   let applyTaskEdit: (task: Task, patch: TaskPatch) => void = () => {};
+  let onGanttNativeChange = (_info: { timeChanged?: boolean; structure?: boolean }) => {};
 
   const inspector = new InspectorUI({
     els: inspectorEls,
@@ -101,77 +116,186 @@ async function main() {
 
   let refreshNavInspector = () => {};
   let shell: ReturnType<typeof initAppShell> | null = null;
+  let openEarthPanel = (_open: boolean) => {};
 
-  const setPanelOpen = (panel: "schedule" | "inspector", open: boolean) => {
+  type LayoutPanel = "schedule" | "inspector" | "timeline" | "gantt" | "sets";
+  const PANEL_LS: Record<LayoutPanel, string> = {
+    schedule: "vista4d.scheduleCollapsed",
+    inspector: "vista4d.inspectorCollapsed",
+    timeline: "vista4d.timelineCollapsed",
+    gantt: "vista4d.ganttCollapsed",
+    sets: "vista4d.setsCollapsed",
+  };
+
+  const readCollapsed = (key: string, fallback = false): boolean => {
+    try {
+      const v = localStorage.getItem(key);
+      if (v === "1") return true;
+      if (v === "0") return false;
+    } catch {
+      /* ignore */
+    }
+    return fallback;
+  };
+
+  const writeCollapsed = (key: string, collapsed: boolean): void => {
+    try {
+      localStorage.setItem(key, collapsed ? "1" : "0");
+    } catch {
+      /* ignore */
+    }
+  };
+
+  const refreshLayoutRestore = () => {
+    const bar = document.getElementById("layout-restore");
+    if (!bar || !grid) return;
+    const ws = grid.getAttribute("data-workspace");
+    if (grid.getAttribute("data-shell") === "placeholder") {
+      for (const btn of bar.querySelectorAll<HTMLElement>("[data-restore]")) btn.hidden = true;
+      bar.hidden = true;
+      return;
+    }
+    const setChip = (id: string, on: boolean) => {
+      const btn = bar.querySelector<HTMLElement>(`[data-restore="${id}"]`);
+      if (btn) btn.hidden = !on;
+    };
+    setChip("schedule", ws === "schedule-4d" && grid.classList.contains("schedule-collapsed"));
+    setChip("inspector", grid.classList.contains("inspector-collapsed"));
+    setChip("timeline", ws === "schedule-4d" && grid.classList.contains("timeline-collapsed"));
+    setChip(
+      "gantt",
+      ws === "project-plan" && grid.classList.contains("model-open") && grid.classList.contains("gantt-collapsed"),
+    );
+    setChip(
+      "sets",
+      ws === "project-plan" && grid.classList.contains("model-open") && grid.classList.contains("sets-collapsed"),
+    );
+    const hudIdle = document.getElementById("sim-hud")?.classList.contains("is-idle");
+    setChip("hud", ws === "schedule-4d" && !hudIdle && !!simHud && !simHud.chartVisible);
+    const earthEl = document.getElementById("earth-panel");
+    setChip("earth", !!btnEarth?.classList.contains("is-active") && !!earthEl?.classList.contains("is-hidden"));
+    bar.hidden = [...bar.querySelectorAll<HTMLElement>("[data-restore]")].every((b) => b.hidden);
+  };
+
+  const setHudCostOpen = (open: boolean) => {
+    btnHudCost?.classList.toggle("is-active", open);
+    btnHudCost?.setAttribute("aria-pressed", open ? "true" : "false");
+    simHud?.setCostPanelOpen(open);
+    refreshLayoutRestore();
+  };
+
+  const setPanelOpen = (panel: LayoutPanel, open: boolean, persist = true) => {
     if (!grid) return;
     grid.classList.toggle(`${panel}-collapsed`, !open);
     if (panel === "schedule") {
       toggleSchedule?.classList.toggle("is-active", open);
       toggleSchedule?.setAttribute("aria-pressed", open ? "true" : "false");
     }
+    if (persist) writeCollapsed(PANEL_LS[panel], !open);
     refreshNavInspector();
     shell?.refresh();
     constrainPanelWidths();
+    refreshLayoutRestore();
+    requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   };
 
   const projectWs = projectRoot
     ? new ProjectWorkspace(projectRoot, {
         getIfcSchedule: () => scheduleRef,
-        getIfcFileName: () => ifcSession?.fileName ?? null,
+        getIfcFileName: () => models.active?.fileName ?? (models.size ? models.label() : null),
+        getSession: () => models.active?.session ?? null,
+        resolveIfcTask: (id) => models.resolveTask(id),
+        federateIfcId: (session, nativeId) => {
+          const m = models.all.find((x) => x.session === session);
+          return m ? encodeIfcRef(m.slot, nativeId) : nativeId;
+        },
         onRequestIfcImport: () => fileInput?.click(),
         onPlanChange: () => {
           /* o nome do Gantt fica na toolbar da tela — o header mostra o IFC */
         },
-        onSelectTask: (task) => highlightPlanTask(task),
+        onSelectTask: (task) => {
+          const ifcId = task?.linkedIfcTaskId;
+          const src = ifcId != null ? models.resolveTask(ifcId)?.model.id : null;
+          if (src) {
+            models.setActive(src);
+            renderModelLayers();
+          }
+          highlightPlanTask(task);
+        },
         onToggleModel: () => togglePlanModel(),
+        onHideGantt: () => setPanelOpen("gantt", false),
+        onNativeChange: (info) => onGanttNativeChange(info),
       })
     : null;
 
   let pauseTimeline = () => {};
   let highlightPlanTask: (task: { linkedIfcTaskId?: number } | null) => void = () => {};
+  let focusGuidsInView = async (_guids: Iterable<string>, _opts?: { fit?: boolean }) => {};
+  let refreshWorkingUi = () => {};
   let togglePlanModel = () => {};
   let setPlanModelOpen = (_open: boolean) => {};
+  let refreshFederatedView = (_opts?: { structure?: boolean }) => {};
+  let renderModelLayers = () => {};
+
+  const syncWorkspaceChrome = (id: WorkspaceId) => {
+    const shellKind = workspaceShell(id);
+    const tool = findToolByWorkspace(id);
+    if (shellKind === "plan") {
+      pauseTimeline();
+      void highlighter?.revealAll();
+      if (!projectWs?.getPlan() && scheduleRef?.roots.length) {
+        projectWs?.bindFromIfc(scheduleRef, models.label());
+      }
+      if (simKicker) simKicker.textContent = "Planejamento";
+      currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
+    } else if (shellKind === "schedule") {
+      setPlanModelOpen(false);
+      dirty = true;
+      if (simKicker) simKicker.textContent = "Simulação";
+      currentDateEl.textContent = formatDateLabel(lastDate);
+    } else {
+      pauseTimeline();
+      setPlanModelOpen(false);
+      if (simKicker) simKicker.textContent = tool?.label ?? "Módulo";
+      currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
+    }
+    projectWs?.setActive(shellKind === "plan");
+    inspector.setReadOnly(shellKind === "schedule");
+    renderModulePlaceholder(id);
+    refreshLayoutRestore();
+    requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
+  };
 
   const nav = initModuleNav({
-    inspectorOpen: () => !grid?.classList.contains("inspector-collapsed"),
+    inspectorOpen: () =>
+      grid?.getAttribute("data-shell") !== "placeholder" && !grid?.classList.contains("inspector-collapsed"),
     onToggleInspector: () => {
+      if (grid?.getAttribute("data-shell") === "placeholder") return;
       setPanelOpen("inspector", !!grid?.classList.contains("inspector-collapsed"));
     },
     onRevealSchedule: () => setPanelOpen("schedule", true),
     onWorkspaceChange: (id) => {
-      if (id === "project-plan") {
-        pauseTimeline();
-        setPanelOpen("inspector", false);
-        void highlighter?.revealAll();
-        if (!projectWs?.getPlan() && scheduleRef?.roots.length) {
-          projectWs?.bindFromIfc(scheduleRef, ifcSession?.fileName);
-        }
-        if (simKicker) simKicker.textContent = "Planejamento";
-        currentDateEl.textContent = ifcSession?.fileName ?? "Sem modelo IFC";
-      } else {
-        setPlanModelOpen(false);
-        dirty = true;
-        if (simKicker) simKicker.textContent = "Simulação";
-        currentDateEl.textContent = formatDateLabel(lastDate);
-      }
-      projectWs?.setActive(id === "project-plan");
+      syncWorkspaceChrome(id);
+      shell?.closeNavDrawer();
     },
   });
   refreshNavInspector = () => nav.refreshInspectorToggle();
-  projectWs?.setActive(nav.getWorkspace() === "project-plan");
-  if (nav.getWorkspace() === "project-plan") {
-    setPanelOpen("inspector", false);
-    if (simKicker) simKicker.textContent = "Planejamento";
-    currentDateEl.textContent = "Sem modelo IFC";
-  }
+  syncWorkspaceChrome(nav.getWorkspace());
+
+  if (readCollapsed(PANEL_LS.inspector)) setPanelOpen("inspector", false, false);
+  if (readCollapsed(PANEL_LS.timeline)) setPanelOpen("timeline", false, false);
+  if (readCollapsed(PANEL_LS.gantt)) setPanelOpen("gantt", false, false);
+  if (readCollapsed(PANEL_LS.sets)) setPanelOpen("sets", false, false);
 
   const navEl = document.getElementById("module-nav");
   if (grid && navEl) {
     shell = initAppShell({
       grid,
       nav: navEl,
-      inspectorOpen: () => !grid.classList.contains("inspector-collapsed"),
-      scheduleOpen: () => !grid.classList.contains("schedule-collapsed"),
+      inspectorOpen: () =>
+        grid.getAttribute("data-shell") !== "placeholder" && !grid.classList.contains("inspector-collapsed"),
+      scheduleOpen: () =>
+        grid.getAttribute("data-shell") === "schedule" && !grid.classList.contains("schedule-collapsed"),
       setInspectorOpen: (open) => setPanelOpen("inspector", open),
       setScheduleOpen: (open) => setPanelOpen("schedule", open),
       setNavCollapsed: (collapsed) => nav.setCollapsed(collapsed),
@@ -184,16 +308,30 @@ async function main() {
     shell?.closeNavDrawer();
     setPanelOpen("inspector", !!grid?.classList.contains("inspector-collapsed"));
   });
-  document.getElementById("btn-reveal-schedule")?.addEventListener("click", () => {
-    shell?.closeNavDrawer();
-    setPanelOpen("schedule", true);
+  document.getElementById("toggle-model-sets")?.addEventListener("click", () => {
+    setPanelOpen("sets", false);
+  });
+  document.getElementById("layout-restore")?.addEventListener("click", (e) => {
+    const id = (e.target as HTMLElement).closest("[data-restore]")?.getAttribute("data-restore");
+    if (!id) return;
+    if (id === "hud") {
+      setHudCostOpen(true);
+      return;
+    }
+    if (id === "earth") {
+      openEarthPanel(true);
+      return;
+    }
+    setPanelOpen(id as LayoutPanel, true);
   });
 
   toggleSchedule?.addEventListener("click", () => {
     setPanelOpen("schedule", !!grid?.classList.contains("schedule-collapsed"));
   });
   if (window.matchMedia("(max-width: 1279px)").matches) {
-    setPanelOpen("schedule", false);
+    setPanelOpen("schedule", false, false);
+  } else if (readCollapsed(PANEL_LS.schedule)) {
+    setPanelOpen("schedule", false, false);
   }
 
   const setStatus = (txt: string) => {
@@ -262,30 +400,39 @@ async function main() {
     fileNameEl.title = dirty ? "Há alterações por exportar" : name;
   };
 
+  const syncFileChrome = () => {
+    const dirty = models.anyDirty();
+    setFileLabel(models.size ? models.label() : "Importar IFC…", dirty);
+    if (btnExport) btnExport.disabled = models.size === 0;
+    btnExport?.classList.toggle("is-dirty", dirty);
+    if (btnExportLabel) btnExportLabel.textContent = models.size > 1 ? "Exportar IFCs" : "Exportar IFC";
+    const importLabel = document.getElementById("btn-import-label");
+    if (importLabel) importLabel.textContent = models.size ? "Adicionar IFC" : "Importar IFC";
+    btnOpenIfc?.setAttribute("title", models.size ? "Modelos IFC na vista" : "Importar arquivo IFC");
+  };
+
   const markIfcDirty = () => {
     btnExport?.classList.add("is-dirty");
     btnExport?.classList.remove("is-exported");
-    if (btnExportLabel) btnExportLabel.textContent = "Exportar IFC";
-    const base = fileNameEl.dataset.base || "modelo.ifc";
-    setFileLabel(base, true);
+    if (btnExportLabel) btnExportLabel.textContent = models.size > 1 ? "Exportar IFCs" : "Exportar IFC";
+    syncFileChrome();
   };
 
   const exportIfc = () => {
-    if (!ifcSession) return;
+    if (!models.size) return;
     try {
-      ifcSession.download();
+      const dirty = models.all.filter((m) => m.session.dirty);
+      const list = dirty.length ? dirty : models.all;
+      list.forEach((m, i) => {
+        window.setTimeout(() => m.session.download(), i * 280);
+      });
       btnExport?.classList.remove("is-dirty");
       btnExport?.classList.add("is-exported");
-      if (btnExportLabel) btnExportLabel.textContent = "IFC exportado";
-      const base = fileNameEl.dataset.base || ifcSession.fileName;
-      setFileLabel(base, false);
+      if (btnExportLabel) btnExportLabel.textContent = list.length > 1 ? "IFCs exportados" : "IFC exportado";
+      setFileLabel(models.label(), false);
       setTimeout(() => {
         btnExport?.classList.remove("is-exported");
-        if (ifcSession?.dirty) {
-          btnExport?.classList.add("is-dirty");
-          setFileLabel(base, true);
-        }
-        if (btnExportLabel) btnExportLabel.textContent = "Exportar IFC";
+        syncFileChrome();
       }, 1800);
     } catch (err) {
       console.error(err);
@@ -321,18 +468,21 @@ async function main() {
     schedule: placeholder,
     onSelect: (task) => {
       selectedTask = task;
+      if (task?.sourceModelId) {
+        models.setActive(task.sourceModelId);
+        renderModelLayers();
+      }
       simHud?.setSelected(task?.id ?? null);
       if (!task) {
-        highlighter?.clearSelection();
+        void highlighter?.clearSelection().then(() => refreshWorkingUi());
         refreshInspector();
         return;
       }
       setPanelOpen("inspector", true);
       const gids = scheduleRef?.productGuidsByTask.get(task.id) ?? task.productGuids;
-      highlighter?.selectByGuids(gids);
+      void focusGuidsInView(gids);
       refreshInspector();
     },
-    onEdit: (task, patch) => applyTaskEdit(task, patch),
   });
 
   const simHudRoot = document.getElementById("sim-hud");
@@ -340,13 +490,12 @@ async function main() {
     simHud = new SimHud({
       root: simHudRoot,
       onPhaseSelect: (task) => tree.selectById(task.id),
+      onDismissCost: () => setHudCostOpen(false),
     });
   }
   btnHudCost?.addEventListener("click", () => {
     const open = btnHudCost.getAttribute("aria-pressed") !== "true";
-    btnHudCost.classList.toggle("is-active", open);
-    btnHudCost.setAttribute("aria-pressed", open ? "true" : "false");
-    simHud?.setCostPanelOpen(open);
+    setHudCostOpen(open);
   });
 
   const headerCenter = document.querySelector(".header-center");
@@ -356,36 +505,44 @@ async function main() {
     onDateChange: (date) => {
       lastDate = date;
       dirty = true;
-      currentDateEl.textContent = formatDateLabel(date);
+      if (workspaceShell(nav.getWorkspace()) === "schedule") {
+        currentDateEl.textContent = formatDateLabel(date);
+      }
       tree.update(date);
       refreshInspector();
       refreshCost5d();
     },
     onPlayingChange: (playing) => {
       headerCenter?.classList.toggle("is-playing", playing);
+      if (playing) void highlighter?.clearIsolation();
       dirty = true;
       refreshCost5d();
     },
+    onCollapse: () => setPanelOpen("timeline", false),
   });
   timeline.setIdle(true);
   pauseTimeline = () => timeline.pause();
 
   applyTaskEdit = (task, patch) => {
-    if (!ifcSession || !scheduleRef) return;
-    const { changed, timeChanged } = ifcSession.applyTaskEdit(task.id, patch);
+    if (!scheduleRef || task.isFederationRoot) return;
+    const resolved = models.resolveTask(task.id);
+    if (!resolved || resolved.nativeId <= 0) return;
+    const { changed, timeChanged } = resolved.session.applyTaskEdit(resolved.nativeId, patch);
     if (!changed) return;
-    tree.refreshLayout();
-    if (timeChanged) {
-      timeline.setRange(scheduleRef.minDate, scheduleRef.maxDate);
-      dirty = true;
-    } else {
-      tree.update(lastDate);
-    }
-    if (scheduleCountEl) {
-      scheduleCountEl.textContent = String(scheduleRef.leafTaskCount);
-      scheduleCountEl.title = `${scheduleRef.leafTaskCount} tarefas-folha`;
-    }
     markIfcDirty();
+    refreshFederatedView({ structure: false });
+    if (timeChanged) dirty = true;
+    else tree.update(lastDate);
+    refreshInspector();
+    refreshCost5d();
+  };
+
+  onGanttNativeChange = (info) => {
+    if (!models.size || !scheduleRef) return;
+    markIfcDirty();
+    refreshFederatedView({ structure: !!info.structure });
+    if (info.structure || info.timeChanged) dirty = true;
+    else tree.update(lastDate);
     refreshInspector();
     refreshCost5d();
   };
@@ -393,11 +550,11 @@ async function main() {
   try {
     setStatus("Inicializando o visualizador…");
     const viewer = await createViewer(viewportEl);
+    highlighter = new ScheduleHighlighter(viewer.fragments);
     let modelGizmo: ModelGizmo | null = null;
     let walk: FirstPersonController | null = null;
     let lastWalkFragUpdate = 0;
     let boxSelect: BoxSelectController | null = null;
-    let refreshWorkingUi = () => {};
     let renderSets = () => {};
     let bindSpatialTree = () => {};
     const btnBoxSelect = document.getElementById("btn-box-select");
@@ -416,48 +573,78 @@ async function main() {
       const setsEl = document.getElementById("model-sets");
       if (setsEl) setsEl.hidden = !(open && nav.getWorkspace() === "project-plan");
       if (open) {
-        setPanelOpen("inspector", false);
         pauseTimeline();
         void highlighter?.revealAll().then(() => {
           highlightPlanTask(projectWs?.getSelected() ?? null);
-        });
-        requestAnimationFrame(() => {
-          window.dispatchEvent(new Event("resize"));
-          void refitViewerCamera(viewer, MODEL_ID);
+          requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
         });
       } else {
         boxSelect?.setToolEnabled(false);
         btnBoxSelect?.classList.remove("is-active");
         btnBoxSelect?.setAttribute("aria-pressed", "false");
       }
+      constrainPanelWidths();
+      refreshLayoutRestore();
     };
     togglePlanModel = () => {
-      if (!ifcSession) {
+      if (!models.size) {
         pendingPlanModel = true;
         fileInput?.click();
         return;
       }
       setPlanModelOpen(!grid?.classList.contains("model-open"));
     };
-    highlightPlanTask = (task) => {
+    focusGuidsInView = async (guids: Iterable<string>, opts: { fit?: boolean } = { fit: true }) => {
       if (!highlighter) return;
-      if (!task?.linkedIfcTaskId || !scheduleRef) {
-        void highlighter.clearSelection().then(() => refreshWorkingUi());
-        renderSets();
+      const list = [...guids];
+      if (!list.length) {
+        await highlighter.clearSelection();
+        refreshWorkingUi();
         return;
       }
-      const gids = scheduleRef.productGuidsByTask.get(task.linkedIfcTaskId) ?? [];
-      void highlighter.selectByGuids(gids).then(() => refreshWorkingUi());
-      renderSets();
+      const ids = await highlighter.isolateGuids(list);
+      refreshWorkingUi();
+      if (opts.fit !== false && ids.length) {
+        const sets = highlighter.selectionItems();
+        if (sets.length) await fitCameraToItemSets(viewer, sets);
+      }
     };
 
-    btnFit?.addEventListener("click", () => {
+    const fitCurrentView = () => {
       if (walk?.enabled) {
         walk.respawn();
         return;
       }
-      void refitViewerCamera(viewer, MODEL_ID);
-    });
+      const sets = highlighter?.selectionItems() ?? [];
+      if (sets.some((s) => s.localIds.length)) void fitCameraToItemSets(viewer, sets);
+      else void fitCameraToVisibleModels(viewer);
+    };
+
+    highlightPlanTask = (task) => {
+      if (!highlighter) return;
+      const picked = projectWs?.getSelectedTasks() ?? [];
+      const tasks = picked.length ? picked : task ? [task] : [];
+      const gids: string[] = [];
+      const seen = new Set<string>();
+      for (const t of tasks) {
+        const id = t.linkedIfcTaskId;
+        if (id == null || !scheduleRef) continue;
+        for (const g of scheduleRef.productGuidsByTask.get(id) ?? []) {
+          if (seen.has(g)) continue;
+          seen.add(g);
+          gids.push(g);
+        }
+      }
+      if (!gids.length) {
+        void highlighter.clearSelection().then(() => refreshWorkingUi());
+        renderSets();
+        return;
+      }
+      void focusGuidsInView(gids);
+      renderSets();
+    };
+
+    btnFit?.addEventListener("click", () => fitCurrentView());
 
     let pickDown: { x: number; y: number } | null = null;
     viewportEl.addEventListener("pointerdown", (e) => {
@@ -469,33 +656,28 @@ async function main() {
       const moved = Math.hypot(e.clientX - pickDown.x, e.clientY - pickDown.y);
       pickDown = null;
       if (moved > 6) return;
-      if (boxSelect?.isDragging() || boxSelect?.isToolEnabled()) return;
+      if (boxSelect?.isDragging()) return;
       void pickTaskFromModel(e);
     });
 
     const pickTaskFromModel = async (e: PointerEvent) => {
       if (walk?.enabled) return;
       if (modelGizmo?.isDragging()) return;
-      if (!highlighter || !scheduleRef) return;
+      if (!highlighter) return;
       const renderer = viewer.world.renderer;
       if (!renderer) return;
       const hit = await highlighter.pickHit(viewer.world.camera.three, e, renderer.three.domElement);
-      if (!hit) return;
-      const { guid } = hit;
-
-      if (nav.getWorkspace() === "project-plan" && grid?.classList.contains("model-open")) {
-        if (e.ctrlKey || e.metaKey) {
-          await highlighter.toggleWorkingGuid(guid);
-        } else {
-          await highlighter.setWorkingSelection([guid]);
-        }
+      if (!hit) {
+        if (e.ctrlKey || e.metaKey) return;
+        tree.selectById(null);
+        await highlighter.clearSelection();
         refreshWorkingUi();
         return;
       }
-
-      const task = findTaskForGuid(scheduleRef, guid);
-      if (!task) return;
-      tree.selectById(task.id);
+      const { guid } = hit;
+      if (e.ctrlKey || e.metaKey) await highlighter.toggleWorkingGuid(guid);
+      else await highlighter.setWorkingSelection([guid]);
+      refreshWorkingUi();
     };
 
     const ifcTreeEl = document.getElementById("ifc-tree");
@@ -504,9 +686,14 @@ async function main() {
       ? new IfcSpatialTree(ifcTreeEl, {
           onSelect: (guids, additive) => {
             if (!highlighter) return;
-            void (additive ? highlighter.addWorkingGuids(guids) : highlighter.setWorkingSelection(guids)).then(() =>
-              refreshWorkingUi(),
-            );
+            void (async () => {
+              if (additive) {
+                await highlighter.addWorkingGuids(guids);
+                await focusGuidsInView(highlighter.getWorkingGuids());
+                return;
+              }
+              await focusGuidsInView(guids);
+            })();
           },
         })
       : null;
@@ -515,21 +702,24 @@ async function main() {
           onCreate: () => createSetFromSelection(),
           onRename: (id, name) => {
             try {
-              ifcSession?.renameGroup(id, name);
+              const resolved = models.resolveGroup(id);
+              resolved?.session.renameGroup(resolved.nativeId, name);
               markIfcDirty();
-              renderSets();
+              refreshFederatedView();
             } catch (err) {
               projectWs?.notify((err as Error).message);
             }
           },
           onDelete: (id) => {
-            if (!ifcSession) return;
+            const resolved = models.resolveGroup(id);
+            if (!resolved) return;
             if (!window.confirm("Apagar este IfcGroup do modelo?")) return;
             try {
-              ifcSession.deleteGroup(id);
+              resolved.session.deleteGroup(resolved.nativeId);
               markIfcDirty();
               projectWs?.applyProductGuids(projectWs.getSelected()?.linkedIfcTaskId ?? 0, []);
-              renderSets();
+              bumpSimulation(highlighter?.getWorkingGuids() ?? []);
+              refreshFederatedView({ structure: true });
               projectWs?.notify("Conjunto removido do IFC.");
             } catch (err) {
               projectWs?.notify((err as Error).message);
@@ -538,26 +728,29 @@ async function main() {
           onSelect: (id) => {
             const group = scheduleRef?.groups.find((g) => g.id === id);
             if (!group || !highlighter) return;
-            void highlighter.setWorkingSelection(group.productGuids).then(() => refreshWorkingUi());
+            void focusGuidsInView(group.productGuids);
             renderSets();
           },
           onAddSelection: (id) => {
-            if (!ifcSession || !highlighter) return;
+            if (!highlighter) return;
+            const resolved = models.resolveGroup(id);
             const extra = highlighter.getWorkingGuids();
             const group = scheduleRef?.groups.find((g) => g.id === id);
-            if (!group) return;
+            if (!group || !resolved) return;
             const members = new Map(group.productGuids.map((g, i) => [g, group.productIds[i]]));
             for (const g of extra) {
-              if (!members.has(g)) members.set(g, highlighter.localIdOf(g) ?? 0);
+              if (highlighter.guidModelId(g) !== resolved.model.id) continue;
+              if (!members.has(g)) members.set(g, highlighter.localIdOf(g, resolved.model.id) ?? 0);
             }
             try {
-              ifcSession.setGroupMembers(
-                id,
+              resolved.session.setGroupMembers(
+                resolved.nativeId,
                 [...members.entries()].map(([guid, expressId]) => ({ guid, expressId })),
               );
               markIfcDirty();
               projectWs?.applyProductGuids(projectWs.getSelected()?.linkedIfcTaskId ?? 0, []);
-              renderSets();
+              bumpSimulation(group.productGuids);
+              refreshFederatedView({ structure: true });
               projectWs?.notify("Seleção adicionada ao conjunto (IfcRelAssignsToGroup).");
             } catch (err) {
               projectWs?.notify((err as Error).message);
@@ -567,21 +760,65 @@ async function main() {
         })
       : null;
 
+    const activateModelSetsTab = (tab: "tree" | "sets") => {
+      document.querySelectorAll("[data-ms-tab]").forEach((btn) => {
+        const on = btn.getAttribute("data-ms-tab") === tab;
+        btn.classList.toggle("is-active", on);
+        btn.setAttribute("aria-selected", on ? "true" : "false");
+      });
+      document.querySelectorAll("[data-ms-pane]").forEach((pane) => {
+        pane.classList.toggle("is-hidden", pane.getAttribute("data-ms-pane") !== tab);
+      });
+    };
+
+    const applyIfcRelations = (rerender = true) => {
+      const taskGuids: string[] = [];
+      for (const list of scheduleRef?.productGuidsByTask.values() ?? []) {
+        for (const g of list) taskGuids.push(g);
+      }
+      const groupGuids = scheduleRef?.groups.flatMap((g) => g.productGuids) ?? [];
+      ifcTree?.setRelations(taskGuids, groupGuids, rerender);
+    };
+
+    const syncLinkedActivities = (guids: string[]) => {
+      const ids = scheduleRef ? findTaskIdsForGuids(scheduleRef, guids) : [];
+      const planOpen = nav.getWorkspace() === "project-plan" && !!grid?.classList.contains("model-open");
+      tree.markHits(ids, nav.getWorkspace() === "schedule-4d");
+      if (planOpen) {
+        const already = projectWs?.getSelected()?.linkedIfcTaskId;
+        projectWs?.markHits(ids, ids.length > 1);
+        if (ids.length === 1 && ids[0] !== already) projectWs?.selectByIfcTaskId(ids[0]!);
+      } else if (ids.length === 1) {
+        const t = scheduleRef?.byId.get(ids[0]!);
+        if (!t) return;
+        selectedTask = t;
+        simHud?.setSelected(t.id);
+        tree.selectById(t.id, false);
+        refreshInspector();
+      }
+    };
+
     refreshWorkingUi = () => {
-      const n = highlighter?.getWorkingGuids().length ?? 0;
+      const guids = highlighter?.getWorkingGuids() ?? [];
+      const n = guids.length;
       if (modelSetsCount) {
         modelSetsCount.textContent = `${n} selecionado${n === 1 ? "" : "s"}`;
       }
-      ifcTree?.setActiveGuids(highlighter?.getWorkingGuids() ?? []);
+      if (guids.length && ifcTreeSearch) ifcTreeSearch.value = "";
+      ifcTree?.revealGuids(guids);
+      setsList?.markHits(guids, scheduleRef?.groups ?? []);
+      syncLinkedActivities(guids);
+      const revealed = ifcTreeEl?.querySelector(".ms-row.is-active, .ms-row.is-hit");
+      if (guids.length && !revealed && setsList?.hasHits()) activateModelSetsTab("sets");
     };
 
     renderSets = () => {
       setsList?.setTaskId(projectWs?.getSelected()?.linkedIfcTaskId ?? null);
-      setsList?.render(scheduleRef?.groups ?? []);
+      setsList?.markHits(highlighter?.getWorkingGuids() ?? [], scheduleRef?.groups ?? []);
     };
 
     const createSetFromSelection = () => {
-      if (!ifcSession || !highlighter) {
+      if (!models.size || !highlighter) {
         projectWs?.notify("Importe um IFC primeiro.");
         return;
       }
@@ -594,13 +831,45 @@ async function main() {
       if (!name) return;
       try {
         const hl = highlighter;
-        const group = ifcSession.createGroup(
-          name,
-          guids.map((guid) => ({ guid, expressId: hl.localIdOf(guid) })),
-        );
-        setsList?.setSelected(group.id);
+        const refs = hl.refsOf(guids);
+        const byModel = new Map<string, Array<{ guid: string; expressId?: number }>>();
+        for (const r of refs) {
+          const list = byModel.get(r.modelId) ?? [];
+          list.push({ guid: r.guid, expressId: r.localId });
+          byModel.set(r.modelId, list);
+        }
+        if (!byModel.size) {
+          projectWs?.notify("Os elementos selecionados não pertencem a um IFC visível.");
+          return;
+        }
+        const task = projectWs?.getSelected();
+        const taskRef = task?.linkedIfcTaskId != null ? models.resolveTask(task.linkedIfcTaskId) : null;
+        let lastGuids: string[] = [];
+        let created = 0;
+        for (const [modelId, members] of byModel) {
+          const entry = models.get(modelId);
+          if (!entry) continue;
+          const group = entry.session.createGroup(name, members);
+          created += 1;
+          lastGuids = group.productGuids;
+          if (taskRef && taskRef.model.id === modelId && task) {
+            const linked = entry.session.assignGroupToTask(taskRef.nativeId, group.id);
+            lastGuids = linked.guids;
+            projectWs?.applyProductGuids(task.linkedIfcTaskId!, linked.guids);
+          }
+          setsList?.setSelected(encodeIfcRef(entry.slot, group.id));
+        }
+        if (lastGuids.length) void focusGuidsInView(lastGuids);
+        bumpSimulation(guids);
         markIfcDirty();
-        renderSets();
+        refreshFederatedView({ structure: true });
+        const extra =
+          created > 1
+            ? ` (${created} IfcGroup, um por ficheiro).`
+            : taskRef
+              ? ` ligado à tarefa «${task?.name}».`
+              : ". Selecione uma tarefa no Gantt e ligue-o.";
+        projectWs?.notify(`Conjunto «${name}» gravado${extra}`);
         document.querySelectorAll("[data-ms-tab]").forEach((btn) => {
           const on = btn.getAttribute("data-ms-tab") === "sets";
           btn.classList.toggle("is-active", on);
@@ -609,7 +878,6 @@ async function main() {
         document.querySelectorAll("[data-ms-pane]").forEach((pane) => {
           pane.classList.toggle("is-hidden", pane.getAttribute("data-ms-pane") !== "sets");
         });
-        projectWs?.notify(`Conjunto «${group.name}» gravado como IfcGroup.`);
       } catch (err) {
         projectWs?.notify((err as Error).message);
       }
@@ -618,19 +886,27 @@ async function main() {
     const assignGroupToSelectedTask = (groupId: number) => {
       const task = projectWs?.getSelected();
       if (!task?.linkedIfcTaskId) {
-        projectWs?.notify("Selecione no Gantt uma tarefa com ponto azul (IfcTask nativa).");
+        projectWs?.notify("Selecione no Gantt a IfcTask a ligar.");
         return;
       }
-      if (!ifcSession) return;
+      const groupRef = models.resolveGroup(groupId);
+      const taskRef = models.resolveTask(task.linkedIfcTaskId);
+      if (!groupRef || !taskRef) return;
+      if (groupRef.model.id !== taskRef.model.id) {
+        projectWs?.notify("O conjunto e a tarefa têm de ser do mesmo ficheiro IFC.");
+        return;
+      }
       try {
-        const { added, guids } = ifcSession.assignGroupToTask(task.linkedIfcTaskId, groupId);
+        const { added, guids } = groupRef.session.assignGroupToTask(taskRef.nativeId, groupRef.nativeId);
         projectWs?.applyProductGuids(task.linkedIfcTaskId, guids);
-        void highlighter?.selectByGuids(guids).then(() => refreshWorkingUi());
+        if (added || guids.length) void focusGuidsInView(guids);
+        else void highlighter?.clearSelection().then(() => refreshWorkingUi());
+        bumpSimulation(guids);
         markIfcDirty();
-        renderSets();
+        refreshFederatedView({ structure: true });
         projectWs?.notify(
           added
-            ? "Conjunto ligado à tarefa (IfcRelAssignsToProcess + produtos)."
+            ? "Conjunto ligado à tarefa. No Cronograma 4D os elementos entram na linha do tempo."
             : "Conjunto desligado da tarefa.",
         );
       } catch (err) {
@@ -650,7 +926,10 @@ async function main() {
             : mode === "remove"
               ? highlighter.removeWorkingGuids(guids)
               : highlighter.setWorkingSelection(guids);
-        void run.then(() => refreshWorkingUi());
+        void run.then(() => {
+          if (mode === "replace" && !guids.length) tree.selectById(null);
+          refreshWorkingUi();
+        });
       },
     });
 
@@ -687,8 +966,109 @@ async function main() {
 
     bindSpatialTree = () => {
       if (!highlighter) return;
-      void ifcTree?.bind(highlighter.getModel(), highlighter);
+      applyIfcRelations(false);
+      const entries = models.visible.map((m) => ({
+        model: m.model,
+        label: m.displayName,
+        modelId: m.id,
+      }));
+      void ifcTree?.bindMany(entries, highlighter).then(() => refreshWorkingUi());
       renderSets();
+    };
+
+    const syncWalkModels = () => {
+      const vis = models.visible.map((m) => m.model);
+      void walk?.setModel(vis.length ? vis : null);
+    };
+
+    const attachGizmoToActive = (reset: boolean) => {
+      const m = models.active;
+      if (!m?.visible) {
+        gizmo.attach(null);
+        return;
+      }
+      gizmo.attach(m.model.object);
+      if (reset) {
+        gizmo.reset();
+        gizmo.fitSize(m.model.object);
+      }
+    };
+
+    const applyActiveGeoref = (opts: { snap?: boolean; resetGizmo?: boolean } = {}) => {
+      const session = models.active?.session;
+      if (!session) return;
+      const georef = session.schedule.georef;
+      const storedAlt = georef?.elevation;
+      const hasAlt = hasStoredSiteElevation(storedAlt);
+      const anchor: AnchorLLA =
+        georef?.lat != null && georef.lon != null
+          ? {
+              lat: georef.lat,
+              lon: georef.lon,
+              altitude: hasAlt ? storedAlt! : 0,
+              heading: georef.heading,
+            }
+          : { ...FALLBACK_ANCHOR, heading: georef?.heading ?? 0 };
+      earth.setAnchor(anchor, { snap: !!opts.snap && !hasAlt && earth.enabled });
+      earthPanel?.setState({
+        anchor,
+        hideRadius: earth.getHideRadius(),
+        transform: emptyExtraTransform(),
+      });
+      if (hasAlt) earthPanel?.setTerrainHeight(anchor.altitude);
+      else earthPanel?.setTerrainHeight(null, earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC");
+      earthPanel?.setSource(georef ? georefSourceLabel(georef) : "IFC sem coordenadas geográficas");
+      attachGizmoToActive(opts.resetGizmo !== false);
+      earthPanel?.setMode(null);
+      syncGizmo();
+    };
+
+    refreshFederatedView = (opts) => {
+      const keepId = selectedTask?.id ?? null;
+      scheduleRef = models.visible.length ? models.mergedSchedule() : emptySchedule();
+      const schedule = scheduleRef;
+      const structure = opts?.structure !== false;
+      if (!models.visible.length || schedule.roots.length === 0) {
+        tree.setSchedule(emptySchedule());
+        timeline.bindSchedule(emptySchedule());
+        timeline.setIdle(!models.size);
+        simHud?.bind(null);
+        selectedTask = null;
+      } else if (structure) {
+        tree.setSchedule(schedule, true);
+        if (keepId != null && schedule.byId.has(keepId)) {
+          selectedTask = schedule.byId.get(keepId) ?? null;
+          tree.selectById(keepId, false);
+        } else {
+          selectedTask = null;
+        }
+        simHud?.bind(schedule);
+        timeline.bindSchedule(schedule);
+        timeline.setIdle(false);
+        timeline.setRange(schedule.minDate, schedule.maxDate);
+      } else {
+        tree.setSchedule(schedule, true);
+        if (keepId != null) selectedTask = schedule.byId.get(keepId) ?? selectedTask;
+        simHud?.bind(schedule);
+        timeline.setRange(schedule.minDate, schedule.maxDate);
+      }
+      scheduleNameEl.textContent = models.visible.length ? scheduleTitle(schedule) : "Importe um arquivo IFC";
+      scheduleNameEl.title = models.visible.length
+        ? models.visible.map((m) => m.displayName).join(", ")
+        : "IfcWorkPlan / IfcWorkSchedule / IfcTask";
+      if (scheduleCountEl) {
+        scheduleCountEl.textContent = String(schedule.leafTaskCount);
+        scheduleCountEl.title = `${schedule.leafTaskCount} tarefas-folha`;
+      }
+      projectWs?.bindFromIfc(schedule, models.label());
+      bindSpatialTree();
+      renderSets();
+      renderModelLayers();
+      syncFileChrome();
+      refreshLayoutRestore();
+      refreshInspector();
+      refreshCost5d();
+      if (models.visible.length) tree.update(lastDate);
     };
 
     const FALLBACK_ANCHOR: AnchorLLA = {
@@ -718,7 +1098,9 @@ async function main() {
       if (btnEarthSettings) {
         btnEarthSettings.title = open ? "Ocultar parâmetros do terreno" : "Mostrar parâmetros do terreno";
       }
+      refreshLayoutRestore();
     };
+    openEarthPanel = setEarthPanelOpen;
 
     const gizmo = new ModelGizmo({
       scene: viewer.world.scene.three,
@@ -727,8 +1109,8 @@ async function main() {
       onChange: (t) => {
         earth.setClipCenter(t.x, t.y, t.z);
         earthPanel?.setTransform(t);
-        ifcSession?.setExtraTransform(t);
-        if (ifcSession && !extraIsIdentity(t)) markIfcDirty();
+        models.active?.session.setExtraTransform(t);
+        if (models.active && !extraIsIdentity(t)) markIfcDirty();
       },
     });
     viewer.world.onCameraChanged.add(() => gizmo.updateCamera());
@@ -736,8 +1118,8 @@ async function main() {
     applyTerrainSnap = (alt) => {
       earthPanel?.setTerrainHeight(alt);
       const a = earth.getAnchor();
-      if (ifcSession) {
-        ifcSession.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: alt });
+      if (models.active) {
+        models.active.session.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: alt });
         markIfcDirty();
       }
       const t = gizmo.read();
@@ -746,7 +1128,7 @@ async function main() {
         gizmo.apply(next);
         earth.setClipCenter(next.x, next.y, next.z);
         earthPanel?.setTransform(next);
-        ifcSession?.setExtraTransform(next);
+        models.active?.session.setExtraTransform(next);
       }
     };
 
@@ -763,9 +1145,9 @@ async function main() {
             earth.setAnchor({ ...state.anchor, altitude: earth.getAnchor().altitude });
             earth.setHideRadius(state.hideRadius);
             const geoMoved = prev.lat !== state.anchor.lat || prev.lon !== state.anchor.lon;
-            if (geoMoved && ifcSession) {
+            if (geoMoved && models.active) {
               const a = earth.getAnchor();
-              ifcSession.setGeoAnchor({
+              models.active.session.setGeoAnchor({
                 lat: state.anchor.lat,
                 lon: state.anchor.lon,
                 elevation: a.altitude,
@@ -776,8 +1158,8 @@ async function main() {
           onTransformChange: (t) => {
             gizmo.apply(t);
             earth.setClipCenter(t.x, t.y, t.z);
-            ifcSession?.setExtraTransform(t);
-            if (ifcSession && !extraIsIdentity(t)) markIfcDirty();
+            models.active?.session.setExtraTransform(t);
+            if (models.active && !extraIsIdentity(t)) markIfcDirty();
           },
           onModeChange: (mode) => gizmo.setMode(mode),
           onSnapTerrain: () => {
@@ -790,11 +1172,17 @@ async function main() {
         })
       : null;
 
+    const syncGizmo = () => {
+      const allow = earth.enabled && !walk?.enabled;
+      gizmo.setAllowed(allow);
+      if (!allow) earthPanel?.setMode(null);
+    };
+
     const setEarthEnabledUi = (enabled: boolean) => {
       btnEarth?.classList.toggle("is-active", enabled);
       btnEarth?.setAttribute("aria-pressed", enabled ? "true" : "false");
       if (btnEarth) btnEarth.title = enabled ? "Ocultar contexto Google Earth" : "Mostrar contexto Google Earth";
-      gizmo.setVisible(enabled && !walk?.enabled);
+      syncGizmo();
       if (btnEarthSettings) btnEarthSettings.hidden = !enabled;
       if (enabled && !walk?.enabled) setEarthPanelOpen(true);
       else if (!enabled) setEarthPanelOpen(false);
@@ -810,7 +1198,7 @@ async function main() {
         button: btnWalk,
         earth,
         onEnabledChange: (on) => {
-          gizmo.setVisible(earth.enabled && !on);
+          syncGizmo();
           if (on) setEarthPanelOpen(false);
         },
         onCameraMove: () => {
@@ -846,130 +1234,166 @@ async function main() {
       }
     });
 
+    const popover = document.getElementById("model-popover");
+    const viewportLayers = document.getElementById("model-layers");
+    const layerRoots = [popover, viewportLayers].filter((el): el is HTMLElement => !!el);
+    const layersUi = layerRoots.length
+      ? new ModelLayersUI(layerRoots, {
+          onToggle: (id, visible) => void setModelLayerVisible(id, visible),
+          onSelect: (id) => {
+            models.setActive(id);
+            attachGizmoToActive(false);
+            applyActiveGeoref({ snap: false, resetGizmo: false });
+            renderModelLayers();
+          },
+          onRemove: (id) => void removeLoadedModel(id),
+          onAdd: () => pickIfcFile(),
+        })
+      : null;
+    renderModelLayers = () => layersUi?.render(models.all, models.activeId);
+
+    const setModelLayerVisible = async (id: string, visible: boolean) => {
+      models.setVisible(id, visible);
+      await highlighter?.setModelVisible(id, visible);
+      syncWalkModels();
+      attachGizmoToActive(false);
+      refreshFederatedView({ structure: true });
+      dirty = true;
+    };
+
+    const removeLoadedModel = async (id: string) => {
+      const entry = models.get(id);
+      if (!entry) return;
+      if (entry.session.dirty) {
+        const ok = window.confirm(
+          `Há alterações em «${entry.displayName}» que ainda não foram exportadas. Remover descarta essas alterações.`,
+        );
+        if (!ok) return;
+      }
+      await highlighter?.removeModel(id);
+      await unloadIfc(viewer, id);
+      models.remove(id);
+      if (!models.size) {
+        gizmo.attach(null);
+        await walk?.setModel(null);
+        selectedTask = null;
+        scheduleRef = emptySchedule();
+        tree.setSchedule(emptySchedule());
+        timeline.bindSchedule(emptySchedule());
+        timeline.setIdle(true);
+        simHud?.bind(null);
+        ifcTree?.clear();
+        setImportVisible(true);
+      } else {
+        attachGizmoToActive(false);
+        syncWalkModels();
+      }
+      refreshFederatedView({ structure: true });
+      dirty = true;
+    };
+
     const loadFromBuffer = async (buffer: Uint8Array, fileName: string) => {
       setImportVisible(false);
       setLoading(true, "O modelo 3D e o cronograma nativo entram em seguida.");
-      setStatus("Lendo o cronograma do IFC…");
-      const schedule = await parseSchedule(buffer, WASM_URL);
-
-      setStatus("Convertendo o modelo 3D…");
-      highlighter = null;
-      timeline.pause();
-      gizmo.attach(null);
-      await walk?.setModel(null);
-      await unloadIfc(viewer, MODEL_ID);
-      const { model } = await loadIfc(viewer, buffer.slice(), MODEL_ID, (p) =>
-        setStatus(`Convertendo IFC… ${(p * 100).toFixed(0)}%`),
-      );
-
-      scheduleRef = schedule;
-      ifcSession = new IfcSession(buffer, fileName, schedule);
-      setFileLabel(fileName);
-      scheduleNameEl.textContent =
-        schedule.workPlanName && schedule.workPlanName !== schedule.name
-          ? `${schedule.name} · ${schedule.workPlanName}`
-          : schedule.name;
-      scheduleNameEl.title = schedule.documents.length
-        ? `IfcWorkSchedule nativo. Documentos: ${schedule.documents.map((d) => d.name).join(", ")}`
-        : "IfcWorkPlan / IfcWorkSchedule / IfcTask";
-      projectWs?.bindFromIfc(schedule, fileName);
-      if (scheduleCountEl) {
-        scheduleCountEl.textContent = String(schedule.leafTaskCount);
-        scheduleCountEl.title = `${schedule.leafTaskCount} tarefas-folha`;
+      setStatus("A preparar o IFC…");
+      const cacheLookup = hashIfcBytes(buffer).then(async (h) => ({
+        hash: h,
+        frag: await getCachedFragments(h),
+      }));
+      const { text: preparedText, bytes: preparedBytes } = prepareIfcForOpen(buffer);
+      const { hash, frag: cachedFrag } = await cacheLookup;
+      if (hash && models.hasHash(hash)) {
+        setLoading(false);
+        setImportVisible(false);
+        window.alert(`«${fileName}» já está na vista.`);
+        return;
       }
-      if (btnExport) btnExport.disabled = false;
-      btnExport?.classList.remove("is-dirty", "is-exported");
-      if (btnExportLabel) btnExportLabel.textContent = "Exportar IFC";
 
-      selectedTask = null;
-      if (taskSearch) taskSearch.value = "";
-      tree.setSchedule(schedule);
-      tree.setFilter("");
-      simHud?.bind(schedule);
-      timeline.bindSchedule(schedule);
-      timeline.setIdle(false);
+      setStatus("Lendo o cronograma do IFC…");
+      const schedule = await parseSchedule(preparedBytes, WASM_URL);
+      const first = models.size === 0;
+      const modelId = `ifc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-      const allGuids = collectAllGuids(schedule);
-      setStatus(`Mapeando ${allGuids.size} elementos para a simulação…`);
-      highlighter = new ScheduleHighlighter(model, viewer.fragments, allGuids);
-      await highlighter.ready();
-      bindSpatialTree();
+      timeline.pause();
+      let model: import("@thatopen/fragments").FragmentsModel;
+      if (cachedFrag) {
+        setStatus("A carregar o modelo 3D em cache…");
+        ({ model } = await loadFragments(viewer, cachedFrag, modelId));
+      } else {
+        setStatus("Convertendo o modelo 3D…");
+        ({ model } = await loadIfc(viewer, preparedBytes, modelId, (p) =>
+          setStatus(`Convertendo IFC… ${(p * 100).toFixed(0)}%`),
+        ));
+      }
+
+      const session = new IfcSession(preparedText, fileName, schedule);
+      const entry = models.add({ id: modelId, fileName, session, model, hash });
+
+      setStatus(`Mapeando elementos de «${entry.displayName}»…`);
+      if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
+      await highlighter.addModel(entry.id, model, collectAllGuids(schedule));
+
+      refreshFederatedView({ structure: true });
       if (pendingPlanModel && nav.getWorkspace() === "project-plan") {
         pendingPlanModel = false;
         setPlanModelOpen(true);
       }
 
-      const georef = schedule.georef;
-      const storedAlt = georef?.elevation;
-      const hasAlt = hasStoredSiteElevation(storedAlt);
-      const anchor: AnchorLLA =
-        georef?.lat != null && georef.lon != null
-          ? {
-              lat: georef.lat,
-              lon: georef.lon,
-              altitude: hasAlt ? storedAlt! : 0,
-              heading: georef.heading,
-            }
-          : { ...FALLBACK_ANCHOR, heading: georef?.heading ?? 0 };
-      earth.setAnchor(anchor, { snap: !hasAlt && earth.enabled });
-      earth.setClipCenter(0, 0, 0);
-      earthPanel?.setState({
-        anchor,
-        hideRadius: earth.getHideRadius(),
-        transform: emptyExtraTransform(),
-      });
-      if (hasAlt) {
-        earthPanel?.setTerrainHeight(anchor.altitude);
+      if (first) {
+        earth.setClipCenter(0, 0, 0);
+        applyActiveGeoref({ snap: true, resetGizmo: true });
+        lastDate = scheduleRef?.minDate ?? schedule.minDate;
       } else {
-        earthPanel?.setTerrainHeight(null, earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC");
+        attachGizmoToActive(true);
       }
-      earthPanel?.setSource(georef ? georefSourceLabel(georef) : "IFC sem coordenadas geográficas");
-      gizmo.attach(model.object);
-      gizmo.reset();
-      gizmo.fitSize(model.object);
-      gizmo.setVisible(earth.enabled && !walk?.enabled);
-      void walk?.setModel(model);
-
-      lastDate = schedule.minDate;
+      syncWalkModels();
+      if (scheduleRef && lastDate < scheduleRef.minDate) lastDate = scheduleRef.minDate;
+      if (scheduleRef && lastDate > scheduleRef.maxDate) lastDate = scheduleRef.maxDate;
       dirty = true;
       tree.update(lastDate);
-      currentDateEl.textContent = formatDateLabel(lastDate);
+      if (workspaceShell(nav.getWorkspace()) === "schedule") {
+        currentDateEl.textContent = formatDateLabel(lastDate);
+      } else {
+        currentDateEl.textContent = models.label();
+      }
       refreshInspector();
       refreshCost5d();
       setLoading(false);
+      void fitCameraToVisibleModels(viewer);
+      if (!cachedFrag) {
+        void exportFragmentsBuffer(model)
+          .then((buf) => saveCachedFragments(hash, buf))
+          .catch((err) => console.warn("Cache Fragments:", err));
+      }
     };
 
     const pickIfcFile = () => fileInput?.click();
 
-    const importFile = async (file: File) => {
+    const importFiles = async (files: File[]) => {
       if (loading) return;
-      if (!isIfcFile(file)) {
-        window.alert("Selecione um arquivo IFC (.ifc).");
+      const ifcs = files.filter(isIfcFile);
+      if (!ifcs.length) {
+        window.alert("Selecione um ou mais arquivos IFC (.ifc).");
         return;
-      }
-      if (ifcSession?.dirty) {
-        const ok = window.confirm(
-          "Há alterações no IFC que ainda não foram exportadas. Importar outro arquivo descarta essas alterações.",
-        );
-        if (!ok) return;
       }
       loading = true;
       try {
-        const buffer = new Uint8Array(await file.arrayBuffer());
-        await loadFromBuffer(buffer, file.name);
+        for (const file of ifcs) {
+          const buffer = new Uint8Array(await file.arrayBuffer());
+          await loadFromBuffer(buffer, file.name);
+        }
       } catch (err) {
         console.error(err);
         window.alert(`Não foi possível importar o IFC: ${(err as Error).message}`);
-        if (!highlighter) {
-          ifcSession = null;
-          scheduleRef = null;
+        if (!models.size) {
           selectedTask = null;
+          scheduleRef = emptySchedule();
           tree.setSchedule(emptySchedule());
           timeline.bindSchedule(emptySchedule());
           timeline.setIdle(true);
           simHud?.bind(null);
-          if (btnExport) btnExport.disabled = true;
-          setFileLabel("Importar IFC…");
+          refreshLayoutRestore();
+          syncFileChrome();
           scheduleNameEl.textContent = "Importe um arquivo IFC";
           if (scheduleCountEl) scheduleCountEl.textContent = "0";
           refreshInspector();
@@ -984,15 +1408,35 @@ async function main() {
     };
 
     const onPickFile = () => {
-      const file = fileInput?.files?.[0];
-      if (file) void importFile(file);
+      const files = [...(fileInput?.files ?? [])];
+      if (files.length) void importFiles(files);
+    };
+
+    const toggleModelPopover = (open?: boolean) => {
+      if (!popover) return;
+      const next = open ?? popover.hidden;
+      popover.hidden = !next;
+      btnOpenIfc?.setAttribute("aria-expanded", next ? "true" : "false");
     };
 
     fileInput?.addEventListener("change", onPickFile);
     btnImport?.addEventListener("click", pickIfcFile);
-    btnOpenIfc?.addEventListener("click", pickIfcFile);
+    btnOpenIfc?.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (!models.size) {
+        pickIfcFile();
+        return;
+      }
+      toggleModelPopover();
+    });
     btnImportPick?.addEventListener("click", pickIfcFile);
     btnExport?.addEventListener("click", exportIfc);
+    document.addEventListener("pointerdown", (e) => {
+      if (!popover || popover.hidden) return;
+      const t = e.target as Node;
+      if (popover.contains(t) || btnOpenIfc?.contains(t)) return;
+      toggleModelPopover(false);
+    });
 
     const onDragOver = (e: DragEvent) => {
       e.preventDefault();
@@ -1009,12 +1453,12 @@ async function main() {
     viewportShell.addEventListener("drop", (e) => {
       e.preventDefault();
       viewportShell.classList.remove("is-drop-target");
-      const file = [...(e.dataTransfer?.files ?? [])].find(isIfcFile);
-      if (file) void importFile(file);
+      const files = [...(e.dataTransfer?.files ?? [])].filter(isIfcFile);
+      if (files.length) void importFiles(files);
     });
 
     window.addEventListener("beforeunload", (e) => {
-      if (!ifcSession?.dirty) return;
+      if (!models.anyDirty()) return;
       e.preventDefault();
       e.returnValue = "";
     });
@@ -1045,6 +1489,7 @@ async function main() {
         }
         return;
       }
+      if (workspaceShell(nav.getWorkspace()) === "placeholder") return;
       if (nav.getWorkspace() === "project-plan") {
         if (e.code === "KeyM") {
           e.preventDefault();
@@ -1053,7 +1498,12 @@ async function main() {
         }
         if (e.code === "KeyF") {
           e.preventDefault();
-          void refitViewerCamera(viewer, MODEL_ID);
+          fitCurrentView();
+          return;
+        }
+        if (e.code === "Escape") {
+          e.preventDefault();
+          void highlighter?.clearSelection().then(() => refreshWorkingUi());
           return;
         }
         if (e.code === "KeyI") {
@@ -1079,33 +1529,42 @@ async function main() {
         timeline.nudgeDays(e.shiftKey ? 7 : 1);
       } else if (e.code === "KeyF") {
         e.preventDefault();
-        void refitViewerCamera(viewer, MODEL_ID);
+        fitCurrentView();
+      } else if (e.code === "Escape") {
+        e.preventDefault();
+        void highlighter?.clearSelection().then(() => refreshWorkingUi());
       } else if (e.code === "KeyB") {
         e.preventDefault();
         setPanelOpen("schedule", !!grid?.classList.contains("schedule-collapsed"));
       } else if (e.code === "KeyI") {
         e.preventDefault();
         setPanelOpen("inspector", !!grid?.classList.contains("inspector-collapsed"));
+      } else if (e.code === "KeyT" && !earth.enabled) {
+        e.preventDefault();
+        setPanelOpen("timeline", !!grid?.classList.contains("timeline-collapsed"));
       } else if (earth.enabled && (e.code === "KeyG" || e.code === "KeyT")) {
         e.preventDefault();
-        gizmo.setMode("translate");
-        earthPanel?.setMode("translate");
+        const next = gizmo.getMode() === "translate" ? null : "translate";
+        gizmo.setMode(next);
+        earthPanel?.setMode(next);
       } else if (earth.enabled && e.code === "KeyR") {
         e.preventDefault();
-        gizmo.setMode("rotate");
-        earthPanel?.setMode("rotate");
+        const next = gizmo.getMode() === "rotate" ? null : "rotate";
+        gizmo.setMode(next);
+        earthPanel?.setMode(next);
       }
     });
 
     const tick = async () => {
       walk?.update();
-      if (dirty && !applying && highlighter && scheduleRef) {
+      const shellKind = workspaceShell(nav.getWorkspace());
+      if (shellKind !== "placeholder" && dirty && !applying && highlighter && scheduleRef && models.visible.length) {
         dirty = false;
         applying = true;
         try {
-          if (nav.getWorkspace() === "project-plan") {
+          if (shellKind === "plan") {
             await highlighter.revealAll();
-          } else {
+          } else if (shellKind === "schedule") {
             const buckets = computeStateBuckets(scheduleRef, lastDate);
             const previewAll = !timeline.playing && timeline.atStart;
             await highlighter.apply(buckets, { previewAll });
@@ -1121,7 +1580,7 @@ async function main() {
     requestAnimationFrame(tick);
 
     lastDate = placeholder.minDate;
-    currentDateEl.textContent = formatDateLabel(lastDate);
+    syncWorkspaceChrome(nav.getWorkspace());
     refreshInspector();
     refreshCost5d();
     setLoading(false);
@@ -1147,15 +1606,17 @@ function collectAllGuids(schedule: ScheduleData): Set<string> {
   return out;
 }
 
-function findTaskForGuid(schedule: ScheduleData, guid: string): Task | null {
-  let fallback: Task | null = null;
+function findTaskIdsForGuids(schedule: ScheduleData, guids: Iterable<string>): number[] {
+  const want = new Set(guids);
+  if (!want.size) return [];
+  const hits: number[] = [];
   for (const t of schedule.byId.values()) {
     const list = schedule.productGuidsByTask.get(t.id) ?? t.productGuids;
-    if (!list.includes(guid)) continue;
-    if (t.children.length === 0) return t;
-    if (!fallback) fallback = t;
+    if (!list.some((g) => want.has(g))) continue;
+    hits.push(t.id);
   }
-  return fallback;
+  const leaves = hits.filter((id) => (schedule.byId.get(id)?.children.length ?? 0) === 0);
+  return leaves.length ? leaves : hits;
 }
 
 function isIfcFile(file: File): boolean {

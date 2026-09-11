@@ -38,6 +38,7 @@ export class InspectorUI {
   private currentDate = new Date();
   private productCount = 0;
   private syncing = false;
+  private readOnly = false;
   currency = "BRL";
 
   constructor(opts: InspectorOptions) {
@@ -45,7 +46,7 @@ export class InspectorUI {
     const { form, name, ident, start, end, cost } = opts.els;
     form.addEventListener("submit", (e) => {
       e.preventDefault();
-      this.commitIdentity();
+      if (!this.readOnly) this.commitIdentity();
     });
     name.addEventListener("change", () => this.commitIdentity());
     ident.addEventListener("change", () => this.commitIdentity());
@@ -54,6 +55,36 @@ export class InspectorUI {
     start.addEventListener("input", () => this.commitDates());
     end.addEventListener("input", () => this.commitDates());
     cost.addEventListener("change", () => this.commitCost());
+  }
+
+  setReadOnly(readOnly: boolean): void {
+    this.readOnly = readOnly;
+    const { name, ident, start, end, cost, form } = this.opts.els;
+    for (const el of [name, ident, start, end, cost]) {
+      el.readOnly = readOnly;
+      el.tabIndex = readOnly ? -1 : 0;
+      if (el.type === "date" || el.type === "number") el.disabled = readOnly;
+      if (readOnly) {
+        if (el.placeholder && el.dataset.editPh == null) el.dataset.editPh = el.placeholder;
+        el.placeholder = "";
+      } else if (el.dataset.editPh != null) {
+        el.placeholder = el.dataset.editPh;
+      }
+    }
+    form.setAttribute("aria-readonly", readOnly ? "true" : "false");
+    form.closest("#inspector")?.classList.toggle("is-readonly", readOnly);
+    const emptyCopy = document.getElementById("inspector-empty-copy");
+    if (emptyCopy) {
+      emptyCopy.textContent = readOnly
+        ? "Selecione uma tarefa no cronograma ou um elemento 3D para ver as propriedades."
+        : "Selecione uma tarefa no cronograma ou um elemento 3D para ver e editar as propriedades.";
+    }
+    const hint = document.getElementById("insp-hint");
+    if (hint) {
+      hint.textContent = readOnly
+        ? "O Cronograma 4D é o resultado da simulação. A edição de dados fica no Planejamento de projeto."
+        : "O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue. Exporte o IFC para persistir.";
+    }
   }
 
   update(task: Task | null, currentDate: Date, productCount: number): void {
@@ -67,7 +98,18 @@ export class InspectorUI {
     const { els } = this.opts;
     const task = this.task;
 
-    if (!task) {
+      if (!task || task.isFederationRoot) {
+        if (task?.isFederationRoot) {
+          els.empty.style.display = "none";
+          els.body.classList.remove("is-hidden");
+          els.count.textContent = "0";
+          els.name.value = task.name;
+          els.ident.value = task.sourceFileName ?? "";
+          els.state.textContent = "Modelo IFC";
+          els.products.textContent = "Pasta do ficheiro na vista federada";
+          this.setReadOnly(true);
+          return;
+        }
       els.empty.style.display = "";
       els.body.classList.add("is-hidden");
       els.count.textContent = "0";
@@ -77,6 +119,7 @@ export class InspectorUI {
     els.empty.style.display = "none";
     els.body.classList.remove("is-hidden");
     els.count.textContent = String(this.productCount);
+    this.setReadOnly(false);
 
     const st = getTaskState(task, this.currentDate);
     els.state.className = `insp-status is-${st}`;
@@ -109,7 +152,7 @@ export class InspectorUI {
   }
 
   private commitIdentity(): void {
-    if (this.syncing || !this.task) return;
+    if (this.readOnly || this.syncing || !this.task) return;
     const { name, ident } = this.opts.els;
     const patch: TaskPatch = {
       name: name.value,
@@ -119,7 +162,7 @@ export class InspectorUI {
   }
 
   private commitDates(): void {
-    if (this.syncing || !this.task) return;
+    if (this.readOnly || this.syncing || !this.task) return;
     const { start, end } = this.opts.els;
     if (!start.value || !end.value) {
       this.setDateError("Preencha início e término.");
@@ -136,7 +179,7 @@ export class InspectorUI {
   }
 
   private commitCost(): void {
-    if (this.syncing || !this.task) return;
+    if (this.readOnly || this.syncing || !this.task) return;
     const raw = this.opts.els.cost.value.trim().replace(",", ".");
     if (!raw) {
       if (this.task.cost == null) return;

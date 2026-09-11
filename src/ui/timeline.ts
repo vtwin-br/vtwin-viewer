@@ -6,6 +6,7 @@ export interface TimelineOptions {
   /** Chamado quando a data atual muda (sincrono - dispare repaint debounced no caller). */
   onDateChange: (date: Date) => void;
   onPlayingChange?: (playing: boolean) => void;
+  onCollapse?: () => void;
 }
 
 const SPEEDS: Array<{ label: string; daysPerSec: number; title: string }> = [
@@ -24,6 +25,7 @@ const ICON_PAUSE = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="tr
 const ICON_NEXT = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.2 6.1v11.8L11.6 12 2.2 6.1z"/><path d="M12.4 6.1v11.8L21.8 12 12.4 6.1z"/></svg>`;
 const ICON_END = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 6.1v11.8L15 12 5 6.1z"/><rect x="16.8" y="6" width="2.2" height="12" rx="0.5"/></svg>`;
 const ICON_MORE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>`;
+const ICON_HIDE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 10l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 export class TimelineUI {
   private opts: TimelineOptions;
@@ -194,9 +196,17 @@ export class TimelineUI {
     moreBtn.setAttribute("aria-haspopup", "true");
     more.append(moreBtn, speedWrap);
 
+    const hideBtn = document.createElement("button");
+    hideBtn.type = "button";
+    hideBtn.className = "t-hide";
+    hideBtn.title = "Ocultar linha do tempo";
+    hideBtn.setAttribute("aria-label", "Ocultar linha do tempo");
+    hideBtn.innerHTML = ICON_HIDE;
+    hideBtn.addEventListener("click", () => this.opts.onCollapse?.());
+
     const top = document.createElement("div");
     top.className = "t-top";
-    top.append(date, controls);
+    top.append(date, controls, hideBtn);
 
     const bottom = document.createElement("div");
     bottom.className = "t-bottom";

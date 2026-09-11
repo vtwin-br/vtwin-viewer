@@ -7,6 +7,7 @@ import { displayTaskName } from "./taskLabels";
 export interface SimHudOptions {
   root: HTMLElement;
   onPhaseSelect: (task: Task) => void;
+  onDismissCost?: () => void;
 }
 
 interface ChartRow {
@@ -45,7 +46,12 @@ export class SimHud {
     root.innerHTML = `
       <nav class="hud-phases" aria-label="Fases da obra"></nav>
       <aside class="hud-cost" aria-label="Custo 5D">
-        <p class="hud-cost-kicker">Projeção mensal de custo</p>
+        <div class="hud-cost-head">
+          <p class="hud-cost-kicker">Projeção mensal de custo</p>
+          <button type="button" class="hud-cost-close" data-hud-cost-close title="Ocultar gráfico 5D" aria-label="Ocultar gráfico 5D">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
+          </button>
+        </div>
         <div class="hud-cost-totals">
           <span><em>Orçamento</em><strong data-hud-budget>—</strong></span>
           <span><em>Realizado</em><strong data-hud-realized>—</strong></span>
@@ -77,6 +83,9 @@ export class SimHud {
     this.plannedLine = root.querySelector('[data-line="planned"]');
     new ResizeObserver(() => this.drawPlannedLine()).observe(this.plotEl);
     this.setIdle(true);
+    root.querySelector("[data-hud-cost-close]")?.addEventListener("click", () => {
+      this.opts.onDismissCost?.();
+    });
   }
 
   setIdle(idle: boolean): void {
@@ -292,9 +301,11 @@ export class SimHud {
 
 function hudPhaseLabel(task: Task): string {
   const name = displayTaskName(task);
+  const file = task.sourceFileName?.replace(/\.ifc$/i, "");
+  const prefix = file && task.sourceModelId ? `${file} · ` : "";
   const parts = name.split(/\s+/).filter(Boolean);
-  if (parts.length <= 2) return name;
-  return parts.slice(0, 2).join(" ");
+  const short = parts.length <= 2 ? name : parts.slice(0, 2).join(" ");
+  return prefix + short;
 }
 
 function formatHudMoney(amount: number, currency = "BRL"): string {

@@ -1,4 +1,5 @@
 import type { ScheduleData, Task, TaskState } from "./types";
+import { LEAF_BY_GUID_CACHE, ownAndGroupGuids } from "./range";
 
 export interface SimulationStateBuckets {
   /** GUIDs em "nao iniciado" naquela data. */
@@ -100,15 +101,15 @@ export function getTaskState(task: Task, currentDate: Date): TaskState {
 // ---------------------------------------------------------------------------
 // Cache: mapa GUID -> tasks-folha (leaf) que referenciam aquele produto
 // ---------------------------------------------------------------------------
-const cacheKey = "__leafByGuid__";
 function getLeafTasksByGuid(schedule: ScheduleData): Map<string, Task[]> {
-  const anySched = schedule as any;
-  if (anySched[cacheKey]) return anySched[cacheKey] as Map<string, Task[]>;
+  const anySched = schedule as unknown as Record<string, unknown>;
+  const cached = anySched[LEAF_BY_GUID_CACHE] as Map<string, Task[]> | undefined;
+  if (cached) return cached;
 
   const map = new Map<string, Task[]>();
   const visit = (t: Task) => {
     if (t.children.length === 0) {
-      for (const g of t.productGuids) {
+      for (const g of ownAndGroupGuids(schedule, t)) {
         const list = map.get(g);
         if (list) list.push(t);
         else map.set(g, [t]);
@@ -119,13 +120,11 @@ function getLeafTasksByGuid(schedule: ScheduleData): Map<string, Task[]> {
   };
   for (const r of schedule.roots) visit(r);
 
-  // Tambem inclui produtos atribuidos diretamente a tasks intermediarias (raro,
-  // mas pode acontecer). Se um produto so aparece numa task com filhos, ainda
-  // queremos respeitar o tempo daquela task.
+  // Produtos / conjuntos só na tarefa-resumo (sem os mesmos GUIDs nas folhas).
   const seen = new Set(map.keys());
   const visitAll = (t: Task) => {
     if (t.children.length > 0) {
-      for (const g of t.productGuids) {
+      for (const g of ownAndGroupGuids(schedule, t)) {
         if (!seen.has(g)) {
           map.set(g, [t]);
           seen.add(g);
@@ -136,6 +135,6 @@ function getLeafTasksByGuid(schedule: ScheduleData): Map<string, Task[]> {
   };
   for (const r of schedule.roots) visitAll(r);
 
-  anySched[cacheKey] = map;
+  anySched[LEAF_BY_GUID_CACHE] = map;
   return map;
 }

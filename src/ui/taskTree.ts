@@ -2,7 +2,6 @@ import type { ScheduleData, Task } from "../schedule/types";
 import { getTaskState } from "../schedule/simulation";
 import { formatMoney, treeCost } from "../schedule/cost";
 import { displayTaskName, isInternalProjectCode } from "./taskLabels";
-import type { TaskPatch } from "../ifc/ifcSession";
 
 const ICON_CHEVRON = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
@@ -10,7 +9,6 @@ export interface TaskTreeOptions {
   container: HTMLElement;
   schedule: ScheduleData;
   onSelect: (task: Task | null) => void;
-  onEdit?: (task: Task, patch: TaskPatch) => void;
 }
 
 interface TaskNodeRefs {
@@ -22,25 +20,9 @@ interface TaskNodeRefs {
   barWrap: HTMLElement;
   nameEl: HTMLElement;
   durationEl: HTMLElement;
-  editor: HTMLElement;
-  nameInput: HTMLInputElement;
-  identInput: HTMLInputElement;
-  startInput: HTMLInputElement;
-  endInput: HTMLInputElement;
-  costInput: HTMLInputElement;
   childrenWrap: HTMLElement | null;
   toggle: HTMLElement;
   collapsed: boolean;
-}
-
-interface BarDrag {
-  taskId: number;
-  mode: "move" | "start" | "end";
-  originX: number;
-  startMs: number;
-  endMs: number;
-  width: number;
-  preview?: { start: Date; end: Date };
 }
 
 export class TaskTreeUI {
@@ -49,32 +31,32 @@ export class TaskTreeUI {
   private selectedId: number | null = null;
   private totalRangeMs = 1;
   private startMs = 0;
-  private drag: BarDrag | null = null;
-  private fillingEditor = false;
 
   constructor(opts: TaskTreeOptions) {
     this.opts = opts;
     this.applySchedule(opts.schedule);
     this.render();
-    window.addEventListener("pointermove", this.onBarMove);
-    window.addEventListener("pointerup", this.onBarUp);
   }
 
   /** Substitui o cronograma (novo IFC importado) e reconstrói a árvore. */
-  setSchedule(schedule: ScheduleData): void {
-    this.selectedId = null;
-    this.opts.onSelect(null);
+  setSchedule(schedule: ScheduleData, keepSelection = false): void {
+    const keep = keepSelection ? this.selectedId : null;
+    if (!keepSelection) {
+      this.selectedId = null;
+      this.opts.onSelect(null);
+    }
     this.applySchedule(schedule);
     this.render();
+    if (keep != null && schedule.byId.has(keep)) this.select(keep, false, false);
   }
 
-  /** Seleciona uma tarefa sem alternar (ex.: clique no 3D). */
-  selectById(taskId: number | null): void {
+  /** Seleciona uma tarefa sem alternar (ex.: clique no 3D). `emit: false` só destaca a linha. */
+  selectById(taskId: number | null, emit = true): void {
     if (taskId == null) {
       this.clearSelection();
       return;
     }
-    this.select(taskId, false);
+    this.select(taskId, false, emit);
   }
 
   private applySchedule(schedule: ScheduleData) {
@@ -130,19 +112,10 @@ export class TaskTreeUI {
     barWrap.className = "task-bar-wrapper";
     const bar = document.createElement("div");
     bar.className = "task-bar state-pending";
-    const handleStart = document.createElement("span");
-    handleStart.className = "bar-handle is-start";
-    handleStart.title = "Arraste para alterar o início";
-    const handleEnd = document.createElement("span");
-    handleEnd.className = "bar-handle is-end";
-    handleEnd.title = "Arraste para alterar o fim";
     const progress = document.createElement("div");
     progress.className = "task-bar-progress";
-    bar.append(handleStart, handleEnd);
     barWrap.append(bar, progress);
     this.positionBar(bar, task);
-
-    const editor = this.buildEditor(task);
 
     let childrenWrap: HTMLElement | null = null;
     if (task.children.length > 0) {
@@ -168,10 +141,9 @@ export class TaskTreeUI {
       }
       this.select(task.id, false);
     });
+    barWrap.addEventListener("click", () => this.select(task.id, false));
 
-    bar.addEventListener("pointerdown", (e) => this.beginBarDrag(e, task.id));
-
-    wrap.append(row, barWrap, editor);
+    wrap.append(row, barWrap);
     if (childrenWrap) wrap.appendChild(childrenWrap);
 
     this.nodes.set(task.id, {
@@ -183,108 +155,12 @@ export class TaskTreeUI {
       barWrap,
       nameEl: name,
       durationEl: duration,
-      editor,
-      nameInput: editor.querySelector(".te-name") as HTMLInputElement,
-      identInput: editor.querySelector(".te-ident") as HTMLInputElement,
-      startInput: editor.querySelector(".te-start") as HTMLInputElement,
-      endInput: editor.querySelector(".te-end") as HTMLInputElement,
-      costInput: editor.querySelector(".te-cost") as HTMLInputElement,
       childrenWrap,
       toggle,
       collapsed,
     });
 
     return wrap;
-  }
-
-  private buildEditor(task: Task): HTMLElement {
-    const editor = document.createElement("div");
-    editor.className = "task-editor";
-    editor.hidden = true;
-    editor.innerHTML = `
-      <p class="te-kicker">Editar propriedades da atividade</p>
-      <label class="te-field">
-        <span>Nome</span>
-        <input class="te-name" type="text" spellcheck="false" />
-      </label>
-      <label class="te-field">
-        <span>Identificação</span>
-        <input class="te-ident" type="text" spellcheck="false" placeholder="Opcional" />
-      </label>
-      <div class="te-dates">
-        <label class="te-field">
-          <span>Início</span>
-          <input class="te-start" type="date" />
-        </label>
-        <label class="te-field">
-          <span>Fim</span>
-          <input class="te-end" type="date" />
-        </label>
-      </div>
-      <label class="te-field">
-        <span>Custo 5D (IfcCostItem)</span>
-        <input class="te-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="Opcional" />
-      </label>
-      <p class="te-hint">O valor grava em IfcCostValue.AppliedValue. Também pode arrastar a barra para mudar as datas.</p>
-    `;
-
-    const nameInput = editor.querySelector(".te-name") as HTMLInputElement;
-    const identInput = editor.querySelector(".te-ident") as HTMLInputElement;
-    const startInput = editor.querySelector(".te-start") as HTMLInputElement;
-    const endInput = editor.querySelector(".te-end") as HTMLInputElement;
-    const costInput = editor.querySelector(".te-cost") as HTMLInputElement;
-
-    nameInput.addEventListener("change", () => {
-      if (this.fillingEditor) return;
-      this.opts.onEdit?.(task, { name: nameInput.value });
-    });
-    identInput.addEventListener("change", () => {
-      if (this.fillingEditor) return;
-      this.opts.onEdit?.(task, { identification: identInput.value });
-    });
-    const commitDates = () => {
-      if (this.fillingEditor) return;
-      this.commitEditorDates(task, startInput, endInput);
-    };
-    startInput.addEventListener("change", commitDates);
-    endInput.addEventListener("change", commitDates);
-    costInput.addEventListener("change", () => {
-      if (this.fillingEditor) return;
-      this.commitEditorCost(task, costInput);
-    });
-    editor.addEventListener("click", (e) => e.stopPropagation());
-    editor.addEventListener("pointerdown", (e) => e.stopPropagation());
-    return editor;
-  }
-
-  private commitEditorDates(task: Task, startInput: HTMLInputElement, endInput: HTMLInputElement) {
-    if (!startInput.value || !endInput.value) return;
-    const start = combineDateInput(startInput.value, task.start, 9, 0);
-    const end = combineDateInput(endInput.value, task.end, 17, 0);
-    if (end.getTime() < start.getTime()) return;
-    this.opts.onEdit?.(task, { start, end });
-  }
-
-  private commitEditorCost(task: Task, costInput: HTMLInputElement) {
-    const raw = costInput.value.trim().replace(",", ".");
-    if (!raw) {
-      if (task.cost == null) return;
-      this.opts.onEdit?.(task, { cost: 0 });
-      return;
-    }
-    const n = Number(raw);
-    if (!Number.isFinite(n) || n < 0) return;
-    this.opts.onEdit?.(task, { cost: n });
-  }
-
-  private fillEditor(ref: TaskNodeRefs, task: Task) {
-    this.fillingEditor = true;
-    ref.nameInput.value = task.name;
-    ref.identInput.value = task.identification ?? "";
-    ref.startInput.value = task.start ? toDateInput(task.start) : "";
-    ref.endInput.value = task.end ? toDateInput(task.end) : "";
-    ref.costInput.value = task.cost == null ? "" : String(task.cost);
-    this.fillingEditor = false;
   }
 
   /** Filtra a árvore por texto (nome ou identificação); expande ramos com correspondência. */
@@ -313,7 +189,7 @@ export class TaskTreeUI {
     for (const r of this.opts.schedule.roots) visit(r);
   }
 
-  /** Recoloca barras e atualiza nomes após editar datas/identidade no IFC. */
+  /** Recoloca barras e atualiza nomes após o IFC mudar no editor de planejamento. */
   refreshLayout(): void {
     this.startMs = this.opts.schedule.minDate.getTime();
     this.totalRangeMs = Math.max(1, this.opts.schedule.maxDate.getTime() - this.startMs);
@@ -323,8 +199,16 @@ export class TaskTreeUI {
       this.fillName(ref.nameEl, task);
       ref.durationEl.textContent = fmtDuration(task.start, task.end);
       this.positionBar(ref.bar, task);
-      if (id === this.selectedId) this.fillEditor(ref, task);
     }
+  }
+
+  /** Reconstrói a árvore após criar/apagar IfcTask, mantendo a seleção. */
+  rebuild(): void {
+    const keep = this.selectedId;
+    this.selectedId = null;
+    this.applySchedule(this.opts.schedule);
+    this.render();
+    if (keep != null && this.opts.schedule.byId.has(keep)) this.select(keep, false);
   }
 
   private fillName(el: HTMLElement, task: Task): void {
@@ -336,13 +220,23 @@ export class TaskTreeUI {
       el.appendChild(ident);
     }
     el.appendChild(document.createTextNode(displayTaskName(task)));
+    if (task.isFederationRoot) {
+      const badge = document.createElement("span");
+      badge.className = "task-file";
+      badge.textContent = "IFC";
+      el.appendChild(badge);
+    } else if (task.sourceFileName && this.opts.schedule.roots.some((r) => r.isFederationRoot)) {
+      const badge = document.createElement("span");
+      badge.className = "task-file";
+      badge.textContent = task.sourceFileName.replace(/\.ifc$/i, "");
+      el.appendChild(badge);
+    }
     const roll = treeCost(task);
     el.title =
       `${displayTaskName(task)}${task.identification ? ` (${task.identification})` : ""}\n` +
       (task.start ? `Início: ${fmtDate(task.start)}\n` : "") +
       (task.end ? `Fim: ${fmtDate(task.end)}\n` : "") +
-      (roll > 0 ? `Custo 5D: ${formatMoney(roll, this.opts.schedule.currency)}\n` : "") +
-      "Clique para editar · arraste a barra para as datas";
+      (roll > 0 ? `Custo 5D: ${formatMoney(roll, this.opts.schedule.currency)}` : "");
   }
 
   private positionBar(bar: HTMLElement, task: Task) {
@@ -361,72 +255,6 @@ export class TaskTreeUI {
     bar.classList.add("is-timed");
     bar.style.opacity = "1";
   }
-
-  private beginBarDrag(e: PointerEvent, taskId: number) {
-    if (e.button !== 0) return;
-    const task = this.opts.schedule.byId.get(taskId);
-    const ref = this.nodes.get(taskId);
-    if (!task?.start || !task.end || !ref) return;
-    e.preventDefault();
-    e.stopPropagation();
-    this.select(taskId, false);
-    const target = e.target as HTMLElement;
-    const mode: BarDrag["mode"] = target.classList.contains("is-start")
-      ? "start"
-      : target.classList.contains("is-end")
-        ? "end"
-        : "move";
-    this.drag = {
-      taskId,
-      mode,
-      originX: e.clientX,
-      startMs: task.start.getTime(),
-      endMs: task.end.getTime(),
-      width: Math.max(1, ref.barWrap.getBoundingClientRect().width),
-    };
-    ref.bar.classList.add("is-dragging");
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-  }
-
-  private onBarMove = (e: PointerEvent) => {
-    if (!this.drag) return;
-    const task = this.opts.schedule.byId.get(this.drag.taskId);
-    const ref = this.nodes.get(this.drag.taskId);
-    if (!task || !ref) return;
-    const deltaMs = ((e.clientX - this.drag.originX) / this.drag.width) * this.totalRangeMs;
-    const day = 86400000;
-    let start = this.drag.startMs;
-    let end = this.drag.endMs;
-    const duration = end - start;
-    if (this.drag.mode === "move") {
-      start = this.drag.startMs + deltaMs;
-      end = start + duration;
-    } else if (this.drag.mode === "start") {
-      start = Math.min(this.drag.startMs + deltaMs, this.drag.endMs - day);
-    } else {
-      end = Math.max(this.drag.endMs + deltaMs, this.drag.startMs + day);
-    }
-    const preview = { start: new Date(start), end: new Date(end) };
-    this.positionBar(ref.bar, { ...task, start: preview.start, end: preview.end });
-    ref.durationEl.textContent = fmtDuration(preview.start, preview.end);
-    this.fillingEditor = true;
-    ref.startInput.value = toDateInput(preview.start);
-    ref.endInput.value = toDateInput(preview.end);
-    this.fillingEditor = false;
-    this.drag.preview = preview;
-  };
-
-  private onBarUp = () => {
-    if (!this.drag) return;
-    const { taskId } = this.drag;
-    const preview = this.drag.preview;
-    const ref = this.nodes.get(taskId);
-    ref?.bar.classList.remove("is-dragging");
-    this.drag = null;
-    const task = this.opts.schedule.byId.get(taskId);
-    if (!task || !preview) return;
-    this.opts.onEdit?.(task, { start: preview.start, end: preview.end });
-  };
 
   /** Atualiza cores das barras + progresso para a data atual. */
   update(currentDate: Date) {
@@ -465,14 +293,17 @@ export class TaskTreeUI {
     const prev = this.nodes.get(this.selectedId);
     prev?.row.classList.remove("is-selected");
     prev?.root.classList.remove("is-selected");
-    if (prev) prev.editor.hidden = true;
     this.selectedId = null;
     this.opts.onSelect(null);
   }
 
-  private select(taskId: number, toggleOff: boolean) {
+  private select(taskId: number, toggleOff: boolean, emit = true) {
     if (this.selectedId === taskId) {
       if (toggleOff) this.clearSelection();
+      else {
+        this.expandAncestors(taskId);
+        this.nodes.get(taskId)?.row.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      }
       return;
     }
 
@@ -480,38 +311,49 @@ export class TaskTreeUI {
       const prev = this.nodes.get(this.selectedId);
       prev?.row.classList.remove("is-selected");
       prev?.root.classList.remove("is-selected");
-      if (prev) prev.editor.hidden = true;
     }
     this.selectedId = taskId;
     const ref = this.nodes.get(taskId);
     const task = this.opts.schedule.byId.get(taskId);
     if (ref && task) {
+      this.expandAncestors(taskId);
       ref.row.classList.add("is-selected");
       ref.root.classList.add("is-selected");
-      ref.editor.hidden = false;
-      this.fillEditor(ref, task);
       ref.row.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
-    this.opts.onSelect(task ?? null);
+    if (emit) this.opts.onSelect(task ?? null);
   }
-}
 
-function toDateInput(d: Date): string {
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+  /** Destaca tarefas 4D ligadas aos GUIDs selecionados no modelo / árvore IFC. */
+  markHits(taskIds: Iterable<number>, scroll = true): void {
+    const want = new Set(taskIds);
+    for (const [id, ref] of this.nodes) {
+      const on = want.has(id);
+      ref.row.classList.toggle("is-hit", on);
+      ref.root.classList.toggle("is-hit", on);
+      if (on) this.expandAncestors(id);
+    }
+    if (!want.size) return;
+    if (scroll) {
+      this.opts.container.querySelector<HTMLElement>(".task-row.is-hit")?.scrollIntoView({
+        block: "nearest",
+        behavior: "smooth",
+      });
+    }
+  }
 
-function combineDateInput(
-  dateStr: string,
-  previous: Date | undefined,
-  fallbackH: number,
-  fallbackM: number,
-): Date {
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const h = previous?.getHours() ?? fallbackH;
-  const min = previous?.getMinutes() ?? fallbackM;
-  const s = previous?.getSeconds() ?? 0;
-  return new Date(y, m - 1, d, h, min, s);
+  private expandAncestors(taskId: number): void {
+    let current = this.opts.schedule.byId.get(taskId);
+    while (current?.parentId != null) {
+      const parent = this.nodes.get(current.parentId);
+      if (parent?.childrenWrap?.classList.contains("collapsed")) {
+        parent.childrenWrap.classList.remove("collapsed");
+        parent.toggle.classList.remove("is-collapsed");
+        parent.collapsed = false;
+      }
+      current = this.opts.schedule.byId.get(current.parentId);
+    }
+  }
 }
 
 function fmtDate(d: Date): string {

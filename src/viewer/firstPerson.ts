@@ -34,6 +34,7 @@ export interface FirstPersonOptions {
 export class FirstPersonController {
   readonly collider = new WalkCollider();
   private opts: FirstPersonOptions;
+  private pendingModels: FRAGS.FragmentsModel[] = [];
   private _enabled = false;
   private keys = new Set<string>();
   private yaw = 0;
@@ -73,18 +74,15 @@ export class FirstPersonController {
     return document.pointerLockElement === this.opts.domElement;
   }
 
-  async setModel(model: FRAGS.FragmentsModel | null): Promise<void> {
-    if (!model) {
+  async setModel(model: FRAGS.FragmentsModel | FRAGS.FragmentsModel[] | null): Promise<void> {
+    this.pendingModels = !model ? [] : Array.isArray(model) ? model : [model];
+    this.collider.detach();
+    if (!this.pendingModels.length) {
       if (this._enabled) this.disable();
-      this.collider.detach();
       this.opts.button.disabled = true;
+      this.syncButton();
       return;
     }
-    this.opts.button.disabled = true;
-    this.opts.button.title = "A preparar colisão do modelo…";
-    this.building = true;
-    await this.collider.attach(model);
-    this.building = false;
     this.opts.button.disabled = false;
     this.syncButton();
   }
@@ -97,7 +95,20 @@ export class FirstPersonController {
   async enable(): Promise<void> {
     if (this._enabled) return;
     if (this.building) return;
-    if (!this.collider.ready) return;
+    if (!this.collider.ready) {
+      if (!this.pendingModels.length) return;
+      this.building = true;
+      this.opts.button.disabled = true;
+      this.syncButton();
+      try {
+        await this.collider.attach(this.pendingModels);
+      } finally {
+        this.building = false;
+        this.opts.button.disabled = !this.pendingModels.length;
+        this.syncButton();
+      }
+      if (!this.collider.ready) return;
+    }
 
     const cam = this.opts.camera;
     if (cam.projection.current !== "Perspective") {
@@ -125,6 +136,8 @@ export class FirstPersonController {
     this.syncButton();
     this.syncHint();
     this.opts.onEnabledChange?.(true);
+    cam.setUserInput(false);
+    cam.controls.enabled = false;
     this.applyCamera();
     void this.opts.domElement.requestPointerLock();
   }

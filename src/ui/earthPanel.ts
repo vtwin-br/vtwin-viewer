@@ -12,7 +12,7 @@ export interface EarthPanelOptions {
   initial: EarthPanelState;
   onChange: (state: EarthPanelState) => void;
   onTransformChange: (t: ModelExtraTransform) => void;
-  onModeChange: (mode: GizmoMode) => void;
+  onModeChange: (mode: GizmoMode | null) => void;
   onSnapTerrain: () => void;
   /** Só oculta o painel; a camada Earth continua ligada. */
   onDismiss: () => void;
@@ -46,6 +46,7 @@ export class EarthPanel {
   private elModeMove: HTMLButtonElement;
   private elModeRotate: HTMLButtonElement;
   private elReset: HTMLButtonElement;
+  private gizmoMode: GizmoMode | null = null;
 
   constructor(root: HTMLElement, opts: EarthPanelOptions) {
     this.root = root;
@@ -79,6 +80,7 @@ export class EarthPanel {
 
     this.bind();
     this.syncToInputs();
+    this.setMode(null);
   }
 
   show(): void {
@@ -120,9 +122,12 @@ export class EarthPanel {
     this.state.anchor.altitude = meters;
   }
 
-  setMode(mode: GizmoMode): void {
+  setMode(mode: GizmoMode | null): void {
+    this.gizmoMode = mode;
     this.elModeMove.classList.toggle("is-active", mode === "translate");
     this.elModeRotate.classList.toggle("is-active", mode === "rotate");
+    this.elModeMove.setAttribute("aria-pressed", mode === "translate" ? "true" : "false");
+    this.elModeRotate.setAttribute("aria-pressed", mode === "rotate" ? "true" : "false");
   }
 
   // ---------------------------------------------------------------------
@@ -160,12 +165,14 @@ export class EarthPanel {
       onYawDeg(v);
     });
     this.elModeMove.addEventListener("click", () => {
-      this.setMode("translate");
-      this.opts.onModeChange("translate");
+      const next = this.gizmoMode === "translate" ? null : "translate";
+      this.setMode(next);
+      this.opts.onModeChange(next);
     });
     this.elModeRotate.addEventListener("click", () => {
-      this.setMode("rotate");
-      this.opts.onModeChange("rotate");
+      const next = this.gizmoMode === "rotate" ? null : "rotate";
+      this.setMode(next);
+      this.opts.onModeChange(next);
     });
     this.elReset.addEventListener("click", () => {
       this.commitTransform(emptyExtraTransform());

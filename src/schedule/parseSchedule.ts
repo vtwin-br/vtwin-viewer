@@ -3,7 +3,7 @@ import { extractGeoref } from "../ifc/georef";
 import { VISTA4D_SET_TYPE, type ScheduleData, type SelectionGroup, type Task } from "./types";
 
 /**
- * Le o IFC com web-ifc (instancia dedicada) e extrai a estrutura de cronograma:
+ * Le o IFC com web-ifc (WASM reutilizado entre aberturas) e extrai a estrutura de cronograma:
  *
  *  - IfcWorkSchedule (raiz 4D)
  *  - IfcTask  +  IfcRelNests  ->  hierarquia
@@ -15,14 +15,25 @@ import { VISTA4D_SET_TYPE, type ScheduleData, type SelectionGroup, type Task } f
  *
  * Espelha a forma como o Bonsai (BlenderBIM) escreve cronogramas em IFC4.
  */
+let scheduleApi: Promise<WebIFC.IfcAPI> | null = null;
+
+async function getScheduleApi(wasmPath: string): Promise<WebIFC.IfcAPI> {
+  if (!scheduleApi) {
+    scheduleApi = (async () => {
+      const api = new WebIFC.IfcAPI();
+      api.SetWasmPath(wasmPath, true);
+      await api.Init();
+      return api;
+    })();
+  }
+  return scheduleApi;
+}
+
 export async function parseSchedule(
   buffer: Uint8Array,
   wasmPath: string,
 ): Promise<ScheduleData> {
-  const ifcApi = new WebIFC.IfcAPI();
-  ifcApi.SetWasmPath(wasmPath, true);
-  await ifcApi.Init();
-
+  const ifcApi = await getScheduleApi(wasmPath);
   const modelId = ifcApi.OpenModel(buffer);
 
   try {
@@ -33,11 +44,14 @@ export async function parseSchedule(
 }
 
 function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
+  const projectId = idsOfType(ifcApi, modelId, WebIFC.IFCPROJECT)[0];
+  const workPlanId = idsOfType(ifcApi, modelId, WebIFC.IFCWORKPLAN)[0];
+
   // ---------- 1) IfcWorkSchedule (escolhe a primeira) ----------
   const scheduleIds = idsOfType(ifcApi, modelId, WebIFC.IFCWORKSCHEDULE);
   const workScheduleId = scheduleIds[0];
   const workSchedule = workScheduleId
-    ? (ifcApi.GetLine(modelId, workScheduleId) as any)
+    ? (safeLine(ifcApi, modelId, workScheduleId) as any)
     : null;
   const scheduleName: string =
     str(workSchedule?.Name) ?? str(workSchedule?.LongName) ?? "Cronograma";
@@ -45,13 +59,14 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
   // ---------- 2) Mapa de IfcTaskTime por expressID ----------
   const taskTimeMap = new Map<number, any>();
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCTASKTIME)) {
-    taskTimeMap.set(id, ifcApi.GetLine(modelId, id));
+    taskTimeMap.set(id, safeLine(ifcApi, modelId, id));
   }
 
   // ---------- 3) Todas as IfcTask (cria objetos base) ----------
   const allTasks = new Map<number, Task>();
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCTASK)) {
-    const raw = ifcApi.GetLine(modelId, id) as any;
+    const raw = safeLine(ifcApi, modelId, id) as any;
+    if (!raw) continue;
     const taskTimeRef = ref(raw?.TaskTime);
     const taskTime = taskTimeRef ? taskTimeMap.get(taskTimeRef) : null;
 
@@ -62,7 +77,7 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
       id,
       globalId: str(raw?.GlobalId) ?? "",
       name: str(raw?.Name) ?? "(sem nome)",
-      identification: str(raw?.Identification) ?? undefined,
+      identification: str(raw?.Identification) ?? str(raw?.TaskId) ?? undefined,
       start,
       end,
       taskTimeId: taskTimeRef,
@@ -81,7 +96,7 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
   const childIds = new Set<number>();
   const scheduleChildIds = new Set<number>(); // filhos diretos da IfcWorkSchedule
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELNESTS)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const parentId = ref(rel?.RelatingObject);
     if (parentId == null) continue;
     const related = arr(rel?.RelatedObjects).map(ref).filter((x): x is number => x != null);
@@ -95,28 +110,49 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
 
     const parent = allTasks.get(parentId);
     if (!parent) continue;
+    if (parent.nestsRelId == null) parent.nestsRelId = id;
     for (const rid of related) {
       const child = allTasks.get(rid);
       if (!child) continue;
       parent.children.push(child);
+      child.parentId = parentId;
       childIds.add(rid);
     }
   }
 
   // Bonsai / IFC4: a raiz do cronograma liga-se à IfcWorkSchedule por IfcRelAssignsToControl
   // (RelatingControl = schedule, RelatedObjects = IfcTask), não só por IfcRelNests.
+  let scheduleControlRelId: number | undefined;
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOCONTROL)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
+    if (!rel) continue;
     const control = ref(rel?.RelatingControl);
-    if (control == null || control !== workScheduleId) continue;
+    if (control == null || workScheduleId == null || control !== workScheduleId) continue;
+    const timeForTask = ref(rel?.TimeForTask);
     for (const rid of refs(rel?.RelatedObjects)) {
-      if (allTasks.has(rid)) scheduleChildIds.add(rid);
+      if (!allTasks.has(rid)) continue;
+      scheduleChildIds.add(rid);
+      if (timeForTask != null) applyScheduleTimeControl(ifcApi, modelId, allTasks, rid, timeForTask);
+      if (timeForTask == null && scheduleControlRelId == null) scheduleControlRelId = id;
+    }
+  }
+
+  // IFC2X3: datas da tarefa vivem em IfcRelAssignsTasks + IfcScheduleTimeControl
+  for (const id of idsOfType(ifcApi, modelId, webIfcType("IFCRELASSIGNSTASKS"))) {
+    const rel = safeLine(ifcApi, modelId, id) as any;
+    if (!rel) continue;
+    const timeForTask = ref(rel?.TimeForTask);
+    for (const rid of refs(rel?.RelatedObjects)) {
+      if (allTasks.has(rid)) {
+        scheduleChildIds.add(rid);
+        if (timeForTask != null) applyScheduleTimeControl(ifcApi, modelId, allTasks, rid, timeForTask);
+      }
     }
   }
 
   // IfcRelSequence: RelatingProcess = predecessor, RelatedProcess = sucessor
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELSEQUENCE)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const predId = ref(rel?.RelatingProcess);
     const succId = ref(rel?.RelatedProcess);
     if (predId == null || succId == null) continue;
@@ -138,7 +174,7 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     if (!task) return;
     let obj: any;
     try {
-      obj = ifcApi.GetLine(modelId, productExpressId);
+      obj = safeLine(ifcApi, modelId, productExpressId);
     } catch {
       return;
     }
@@ -152,7 +188,7 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
 
   // (a) IfcRelAssignsToProduct (formato Bonsai 4D)
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOPRODUCT)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const productId = ref(rel?.RelatingProduct);
     const related = arr(rel?.RelatedObjects).map(ref).filter((x): x is number => x != null);
     if (productId == null || related.length === 0) continue;
@@ -173,7 +209,7 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
 
   // (b) IfcRelAssignsToProcess (forma padrao: process -> products OU IfcGroup)
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOPROCESS)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const taskId = ref(rel?.RelatingProcess);
     if (taskId == null) continue;
     const objIds = arr(rel?.RelatedObjects)
@@ -217,7 +253,10 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
   if (scheduleChildIds.size > 0) {
     roots = [...scheduleChildIds]
       .map((id) => allTasks.get(id))
-      .filter((t): t is Task => !!t);
+      .filter((t): t is Task => !!t && !childIds.has(t.id));
+    if (roots.length === 0) {
+      roots = [...allTasks.values()].filter((t) => !childIds.has(t.id));
+    }
   } else {
     roots = [...allTasks.values()].filter((t) => !childIds.has(t.id));
   }
@@ -262,10 +301,19 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     maxTime = now + 30 * 24 * 3600 * 1000;
   }
 
-  const workPlanName = firstWorkPlanName(ifcApi, modelId);
+  const workPlanRaw = workPlanId ? (safeLine(ifcApi, modelId, workPlanId) as any) : null;
+  const workPlanName = str(workPlanRaw?.Name) ?? str(workPlanRaw?.LongName);
   const documents = extractDocuments(ifcApi, modelId);
+  const declaresRelId = findDeclaresRel(ifcApi, modelId, projectId, workPlanId, workScheduleId);
+  const aggregatesRelId = findAggregatesRel(ifcApi, modelId, workPlanId, workScheduleId);
 
   return {
+    projectId,
+    workPlanId,
+    workScheduleId,
+    declaresRelId,
+    aggregatesRelId,
+    scheduleControlRelId,
     name: scheduleName,
     workPlanName,
     documents,
@@ -305,7 +353,7 @@ function extractSelectionGroups(
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCGROUP)) {
     let raw: any;
     try {
-      raw = ifcApi.GetLine(modelId, id);
+      raw = safeLine(ifcApi, modelId, id);
     } catch {
       continue;
     }
@@ -313,12 +361,12 @@ function extractSelectionGroups(
   }
 
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOGROUP)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const groupId = ref(rel?.RelatingGroup);
     if (groupId == null) continue;
     if (!groups.has(groupId)) {
       try {
-        takeGroup(groupId, ifcApi.GetLine(modelId, groupId));
+        takeGroup(groupId, safeLine(ifcApi, modelId, groupId));
       } catch {
         continue;
       }
@@ -330,7 +378,7 @@ function extractSelectionGroups(
       if (allTasks.has(pid) || groups.has(pid)) continue;
       let obj: any;
       try {
-        obj = ifcApi.GetLine(modelId, pid);
+        obj = safeLine(ifcApi, modelId, pid);
       } catch {
         continue;
       }
@@ -360,11 +408,65 @@ function sequenceType(raw?: string): "FS" | "SS" | "FF" | "SF" {
   return "FS";
 }
 
-function firstWorkPlanName(ifcApi: WebIFC.IfcAPI, modelId: number): string | undefined {
-  const ids = idsOfType(ifcApi, modelId, WebIFC.IFCWORKPLAN);
-  if (!ids.length) return undefined;
-  const raw = ifcApi.GetLine(modelId, ids[0]) as any;
-  return str(raw?.Name) ?? str(raw?.LongName);
+function webIfcType(name: string): number | undefined {
+  const v = (WebIFC as unknown as Record<string, unknown>)[name];
+  return typeof v === "number" ? v : undefined;
+}
+
+function applyScheduleTimeControl(
+  ifcApi: WebIFC.IfcAPI,
+  modelId: number,
+  allTasks: Map<number, Task>,
+  taskId: number,
+  stcId: number,
+): void {
+  const task = allTasks.get(taskId);
+  if (!task) return;
+  const stc = safeLine(ifcApi, modelId, stcId);
+  if (!stc) return;
+  const start = parseDateTimeSelect(ifcApi, modelId, stc.ScheduleStart);
+  const end = parseDateTimeSelect(ifcApi, modelId, stc.ScheduleFinish);
+  if (start) task.start = start;
+  if (end) task.end = end;
+  if (task.taskTimeId == null) task.taskTimeId = stcId;
+}
+
+function findDeclaresRel(
+  ifcApi: WebIFC.IfcAPI,
+  modelId: number,
+  projectId?: number,
+  workPlanId?: number,
+  workScheduleId?: number,
+): number | undefined {
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELDECLARES)) {
+    const rel = safeLine(ifcApi, modelId, id) as any;
+    const ctx = ref(rel?.RelatingContext);
+    if (projectId != null && ctx !== projectId) continue;
+    const related = refs(rel?.RelatedDefinitions);
+    if (
+      (workPlanId != null && related.includes(workPlanId)) ||
+      (workScheduleId != null && related.includes(workScheduleId)) ||
+      (workPlanId == null && workScheduleId == null && ctx === projectId)
+    ) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
+function findAggregatesRel(
+  ifcApi: WebIFC.IfcAPI,
+  modelId: number,
+  workPlanId?: number,
+  workScheduleId?: number,
+): number | undefined {
+  if (workPlanId == null || workScheduleId == null) return undefined;
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELAGGREGATES)) {
+    const rel = safeLine(ifcApi, modelId, id) as any;
+    if (ref(rel?.RelatingObject) !== workPlanId) continue;
+    if (refs(rel?.RelatedObjects).includes(workScheduleId)) return id;
+  }
+  return undefined;
 }
 
 function extractDocuments(ifcApi: WebIFC.IfcAPI, modelId: number): import("./types").IfcAssociatedDocument[] {
@@ -392,7 +494,7 @@ function extractDocuments(ifcApi: WebIFC.IfcAPI, modelId: number): import("./typ
   for (const type of [WebIFC.IFCDOCUMENTINFORMATION, WebIFC.IFCDOCUMENTREFERENCE]) {
     for (const id of idsOfType(ifcApi, modelId, type)) {
       try {
-        push(ifcApi.GetLine(modelId, id));
+        push(safeLine(ifcApi, modelId, id));
       } catch {
         /* ignore */
       }
@@ -419,13 +521,13 @@ function linkCosts(
 
   const costValueMap = new Map<number, any>();
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCCOSTVALUE)) {
-    costValueMap.set(id, ifcApi.GetLine(modelId, id));
+    costValueMap.set(id, safeLine(ifcApi, modelId, id));
   }
 
   type CostOwn = { amount: number; valueId?: number; breakdown: boolean };
   const costItemOwn = new Map<number, CostOwn>();
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCCOSTITEM)) {
-    const raw = ifcApi.GetLine(modelId, id) as any;
+    const raw = safeLine(ifcApi, modelId, id) as any;
     const valueIds = refs(raw?.CostValues);
     let amount = 0;
     let valueId: number | undefined;
@@ -461,7 +563,7 @@ function linkCosts(
 
   const costChildren = new Map<number, number[]>();
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELNESTS)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const parentId = ref(rel?.RelatingObject);
     if (parentId == null || !costItemOwn.has(parentId)) continue;
     const kids = refs(rel?.RelatedObjects).filter((rid) => costItemOwn.has(rid));
@@ -496,7 +598,7 @@ function linkCosts(
   }
 
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOCONTROL)) {
-    const rel = ifcApi.GetLine(modelId, id) as any;
+    const rel = safeLine(ifcApi, modelId, id) as any;
     const control = ref(rel?.RelatingControl);
     if (control == null) continue;
     const related = refs(rel?.RelatedObjects);
@@ -521,7 +623,7 @@ function linkCosts(
   const monetaryUnitType = (WebIFC as typeof WebIFC & { IFCMONETARYUNIT?: number }).IFCMONETARYUNIT;
   if (typeof monetaryUnitType === "number") {
     for (const id of idsOfType(ifcApi, modelId, monetaryUnitType)) {
-      const raw = ifcApi.GetLine(modelId, id) as any;
+      const raw = safeLine(ifcApi, modelId, id) as any;
       const c = enumStr(raw?.Currency) ?? str(raw?.Currency);
       if (!c) continue;
       const code = c.replace(/^\./, "").replace(/\.$/, "").toUpperCase();
@@ -549,6 +651,15 @@ function idsOfType(api: WebIFC.IfcAPI, modelId: number, type: number | undefined
     return out;
   } catch {
     return [];
+  }
+}
+
+/** GetLine pode rebentar se o STEP tiver entidades fora do FILE_SCHEMA (ex. IFC4 num IFC2X3). */
+function safeLine(api: WebIFC.IfcAPI, modelId: number, id: number): any | null {
+  try {
+    return api.GetLine(modelId, id);
+  } catch {
+    return null;
   }
 }
 
@@ -657,4 +768,52 @@ function parseIfcDate(v: any): Date | undefined {
   // Formato ISO 8601 "YYYY-MM-DDTHH:MM:SS" (ou com timezone) - new Date resolve
   const d = new Date(s);
   return isNaN(d.getTime()) ? undefined : d;
+}
+
+function intVal(v: any): number | undefined {
+  if (v == null || v === "") return undefined;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  if (typeof v.value === "number" && Number.isFinite(v.value)) return v.value;
+  if (typeof v.value === "string") {
+    const n = Number(v.value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function parseDateTimeSelect(api: WebIFC.IfcAPI, modelId: number, v: any): Date | undefined {
+  const iso = parseIfcDate(v);
+  if (iso) return iso;
+  const id = ref(v);
+  const line = id != null ? safeLine(api, modelId, id) : v && typeof v === "object" ? v : null;
+  if (!line) return undefined;
+
+  const nested = line.DateComponent;
+  const nestedId = ref(nested);
+  const cal =
+    nestedId != null
+      ? safeLine(api, modelId, nestedId)
+      : nested && typeof nested === "object"
+        ? nested
+        : line;
+  const year = intVal(cal?.YearComponent);
+  const month = intVal(cal?.MonthComponent);
+  const day = intVal(cal?.DayComponent);
+  if (year == null || month == null || day == null) return undefined;
+
+  let hour = 0;
+  let minute = 0;
+  let second = 0;
+  const timeId = ref(line.TimeComponent);
+  const timeObj = timeId != null ? safeLine(api, modelId, timeId) : line.TimeComponent;
+  if (timeObj && typeof timeObj === "object") {
+    hour = intVal(timeObj.HourComponent) ?? 0;
+    minute = intVal(timeObj.MinuteComponent) ?? 0;
+    second = intVal(timeObj.SecondComponent) ?? 0;
+  }
+  return new Date(year, month - 1, day, hour, minute, second);
 }

@@ -3,16 +3,18 @@ import {
   applyDuration,
   applyEnd,
   applyStart,
-  emptyPlan,
-  finalizePlan,
   formatBytes,
-  insertTaskAfter,
-  removeTask,
+  indentTasks,
+  outlineParentIndex,
+  outlinePrevSiblingIndex,
+  outdentTasks,
+  rebuildWbs,
+  selectionRootIndices,
   visibleTasks,
 } from "../projectPlan/buildPlan";
-import { diffDays, formatDay, fromInputDate, toInputDate } from "../projectPlan/dates";
+import { addDays, diffDays, formatDay, fromInputDate, startOfDay, toInputDate } from "../projectPlan/dates";
 import { importPlanFile } from "../projectPlan/importPlan";
-import { scheduleToPlan } from "../projectPlan/fromIfc";
+import { planToOutlineRows, scheduleToPlan } from "../projectPlan/fromIfc";
 import {
   CSV_FIELDS,
   planFromMappedCsv,
@@ -24,18 +26,26 @@ import {
 } from "../projectPlan/parseCsv";
 import { fileToAttachment } from "../projectPlan/buildPlan";
 import type { PlanTask, ProjectPlan } from "../projectPlan/types";
+import type { IfcSession, TaskPatch } from "../ifc/ifcSession";
 
 const ZOOM = [8, 14, 22, 32];
 const ROW_H = 36;
 const ICON_TOGGLE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ICON_OUTDENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h7" stroke-linecap="round"/><path d="M6 9L3 12l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ICON_INDENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h11M4 12h11M4 17h7" stroke-linecap="round"/><path d="M18 9l3 3-3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 
 export interface ProjectWorkspaceOptions {
   getIfcSchedule: () => ScheduleData | null;
   getIfcFileName: () => string | null;
+  getSession: () => IfcSession | null;
+  resolveIfcTask?: (federatedId: number) => { session: IfcSession; nativeId: number } | null;
+  federateIfcId?: (session: IfcSession, nativeId: number) => number;
   onRequestIfcImport: () => void;
   onPlanChange?: (name: string | null) => void;
   onSelectTask?: (task: PlanTask | null) => void;
   onToggleModel?: () => void;
+  onHideGantt?: () => void;
+  onNativeChange?: (info: { timeChanged?: boolean; structure?: boolean }) => void;
 }
 
 export class ProjectWorkspace {
@@ -43,12 +53,15 @@ export class ProjectWorkspace {
   private opts: ProjectWorkspaceOptions;
   private plan: ProjectPlan | null = null;
   private selectedId: string | null = null;
+  private selectedIds = new Set<string>();
+  private selectionAnchorId: string | null = null;
   private pxPerDay = 14;
   private toastTimer = 0;
   private fileInput: HTMLInputElement | null = null;
   private csvDraft: CsvInspection | null = null;
   private csvFile: File | null = null;
   private modelOpen = false;
+  private hitIfcIds = new Set<number>();
 
   constructor(root: HTMLElement, opts: ProjectWorkspaceOptions) {
     this.root = root;
@@ -77,6 +90,11 @@ export class ProjectWorkspace {
     return this.plan.tasks.find((t) => t.id === this.selectedId) ?? null;
   }
 
+  getSelectedTasks(): PlanTask[] {
+    if (!this.plan || !this.selectedIds.size) return [];
+    return this.plan.tasks.filter((t) => this.selectedIds.has(t.id));
+  }
+
   setModelOpen(open: boolean): void {
     this.modelOpen = open;
     this.root.querySelectorAll("[data-act='model']").forEach((btn) => {
@@ -87,8 +105,52 @@ export class ProjectWorkspace {
 
   selectByIfcTaskId(ifcId: number): void {
     const task = this.plan?.tasks.find((t) => t.linkedIfcTaskId === ifcId);
-    if (!task) return;
-    this.setSelected(task.id, false);
+    if (!task || !this.plan) return;
+    this.expandAncestors(task.id);
+    this.selectedId = task.id;
+    this.selectedIds = new Set([task.id]);
+    this.selectionAnchorId = task.id;
+    this.renderBoard();
+    this.el("table-body")
+      ?.querySelector<HTMLElement>(`[data-id="${CSS.escape(task.id)}"]`)
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  /** Destaca no Gantt as IfcTask ligadas aos elementos selecionados (árvore / 3D / conjuntos). */
+  markHits(ifcTaskIds: Iterable<number>, scroll = true): void {
+    const next = new Set(ifcTaskIds);
+    this.hitIfcIds = next;
+    if (!this.plan) return;
+    let expanded = false;
+    for (const ifcId of this.hitIfcIds) {
+      const task = this.plan.tasks.find((t) => t.linkedIfcTaskId === ifcId);
+      if (task && this.expandAncestors(task.id)) expanded = true;
+    }
+    if (expanded) this.renderBoard();
+    else this.paintHits();
+    if (!scroll || !this.hitIfcIds.size) return;
+    this.el("table-body")
+      ?.querySelector<HTMLElement>(".pw-row.is-hit, .pw-row.is-selected")
+      ?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  private expandAncestors(id: string): boolean {
+    if (!this.plan) return false;
+    const tasks = this.plan.tasks;
+    const idx = tasks.findIndex((t) => t.id === id);
+    if (idx < 0) return false;
+    let level = tasks[idx].outlineLevel;
+    let changed = false;
+    for (let i = idx - 1; i >= 0 && level > 1; i--) {
+      if (tasks[i].outlineLevel < level) {
+        if (tasks[i].collapsed) {
+          tasks[i].collapsed = false;
+          changed = true;
+        }
+        level = tasks[i].outlineLevel;
+      }
+    }
+    return changed;
   }
 
   applyProductGuids(ifcTaskId: number, _guids: string[]): void {
@@ -115,15 +177,31 @@ export class ProjectWorkspace {
   }
 
   /** Abre o IfcWorkSchedule do modelo no Gantt (mesmas tarefas e datas do Cronograma 4D). */
-  bindFromIfc(schedule: ScheduleData, fileName?: string, force = false): void {
-    if (!schedule.roots.length) return;
-    if (this.plan?.sourceKind === "import" && !force) {
-      this.toast("O IFC tem cronograma nativo. Use «Abrir cronograma do IFC» para o ver neste Gantt.");
+  bindFromIfc(schedule: ScheduleData, fileName?: string, _force = false): void {
+    if (!schedule.roots.length) {
+      this.plan = null;
+      this.selectedId = null;
+      this.selectedIds.clear();
+      this.selectionAnchorId = null;
       this.render();
       return;
     }
+    const keepIfc = this.getSelected()?.linkedIfcTaskId;
+    const keepIds = new Set(
+      [...this.selectedIds]
+        .map((id) => this.plan?.tasks.find((t) => t.id === id)?.linkedIfcTaskId)
+        .filter((id): id is number => id != null),
+    );
     this.plan = scheduleToPlan(schedule, fileName);
-    this.selectedId = this.plan.tasks[0]?.id ?? null;
+    this.selectedId =
+      (keepIfc != null ? this.plan.tasks.find((t) => t.linkedIfcTaskId === keepIfc)?.id : undefined) ??
+      this.plan.tasks[0]?.id ??
+      null;
+    this.selectedIds = new Set(
+      this.plan.tasks.filter((t) => t.linkedIfcTaskId != null && keepIds.has(t.linkedIfcTaskId)).map((t) => t.id),
+    );
+    if (this.selectedId) this.selectedIds.add(this.selectedId);
+    this.selectionAnchorId = this.selectedId;
     this.render();
     if (this.modelOpen) this.opts.onSelectTask?.(this.getSelected());
   }
@@ -142,11 +220,11 @@ export class ProjectWorkspace {
             </svg>
           </div>
           <h3>Planejamento de projeto</h3>
-          <p data-el="empty-copy">O Gantt lê o cronograma nativo do IFC (IfcWorkPlan → IfcWorkSchedule → IfcTask), com as datas já ligadas aos elementos 3D. Também pode importar CSV/XML com mapeamento de colunas.</p>
+          <p data-el="empty-copy">O Gantt é o editor nativo do IfcWorkSchedule. Abrir, criar ou importar CSV grava IfcTask no IFC — exporte o ficheiro para ver noutro software openBIM.</p>
           <div class="pw-empty-actions" data-el="empty-actions">
             <button type="button" class="btn-primary" data-act="from-ifc">Abrir cronograma do IFC</button>
-            <button type="button" class="btn-secondary" data-act="import">Importar CSV / XML</button>
-            <button type="button" class="btn-secondary" data-act="new">Novo em branco</button>
+            <button type="button" class="btn-secondary" data-act="import">Importar CSV / XML para o IFC</button>
+            <button type="button" class="btn-secondary" data-act="new">Novo cronograma no IFC</button>
           </div>
         </div>
       </div>
@@ -161,30 +239,39 @@ export class ProjectWorkspace {
             <button type="button" class="btn-primary" data-act="add">Nova tarefa</button>
             <button type="button" class="btn-secondary" data-act="model" aria-pressed="false" title="Mostrar o modelo 3D ao lado do Gantt (M)">Modelo 3D</button>
             <button type="button" class="btn-secondary pw-act-wide" data-act="from-ifc">Abrir IFC</button>
-            <button type="button" class="btn-ghost pw-act-wide" data-act="import">Importar</button>
-            <button type="button" class="btn-ghost pw-act-wide" data-act="sync">Sincronizar</button>
+            <button type="button" class="btn-ghost pw-act-wide" data-act="import">Importar CSV</button>
             <div class="pw-overflow">
               <button type="button" class="icon-btn-plain pw-overflow-btn" data-act="more" aria-label="Mais ações" aria-haspopup="true" title="Mais ações">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
               </button>
               <div class="pw-overflow-menu" hidden data-el="more-menu">
+                <button type="button" data-act="outdent">Subir nível da EAP</button>
+                <button type="button" data-act="indent">Rebaixar nível da EAP</button>
                 <button type="button" data-act="model">Modelo 3D</button>
                 <button type="button" data-act="from-ifc">Abrir IFC</button>
-                <button type="button" data-act="import">Importar</button>
-                <button type="button" data-act="sync">Sincronizar</button>
+                <button type="button" data-act="import">Importar CSV / XML</button>
               </div>
+            </div>
+            <div class="pw-eap" role="group" aria-label="Nível da EAP">
+              <button type="button" class="pw-zoom-btn" data-act="outdent" title="Subir nível da EAP (Alt+Shift+←)" aria-label="Subir nível da EAP">${ICON_OUTDENT}</button>
+              <button type="button" class="pw-zoom-btn" data-act="indent" title="Rebaixar nível da EAP (Alt+Shift+→)" aria-label="Rebaixar nível da EAP">${ICON_INDENT}</button>
             </div>
             <div class="pw-zoom" role="group" aria-label="Zoom do Gantt">
               <button type="button" class="pw-zoom-btn" data-act="zoom-out" title="Afastar" aria-label="Afastar">−</button>
               <button type="button" class="pw-zoom-btn" data-act="zoom-in" title="Aproximar" aria-label="Aproximar">+</button>
             </div>
+            <button type="button" class="panel-collapse pw-hide-gantt" data-act="hide-gantt" title="Ocultar Gantt" aria-label="Ocultar Gantt">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
           </div>
         </header>
         <div class="pw-gantt" data-el="gantt">
           <div class="pw-table">
             <div class="pw-table-head">
-              <span class="pw-col-wbs">#</span>
+              <span class="pw-col-wbs">WBS</span>
               <span class="pw-col-name">Nome</span>
+              <span class="pw-col-prod">3D</span>
+              <span class="pw-col-set">Conjunto</span>
               <span class="pw-col-dur">Dias</span>
               <span class="pw-col-date">Início</span>
               <span class="pw-col-date">Término</span>
@@ -198,7 +285,6 @@ export class ProjectWorkspace {
           </div>
         </div>
       </div>
-      <div class="pw-sync is-hidden" data-el="sync" role="dialog" aria-modal="true" aria-labelledby="pw-sync-title"></div>
       <div class="pw-sync is-hidden" data-el="mapper" role="dialog" aria-modal="true" aria-labelledby="pw-map-title"></div>
       <div class="pw-toast" data-el="toast" hidden></div>
     `;
@@ -206,15 +292,17 @@ export class ProjectWorkspace {
       const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
       if (act === "new") this.newPlan();
       if (act === "import") this.fileInput?.click();
-      if (act === "from-ifc") this.openIfcSchedule(true);
+      if (act === "from-ifc") this.openIfcSchedule();
     });
     this.root.querySelector(".pw-toolbar")?.addEventListener("click", (e) => {
       const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
       if (act === "add") this.addTask();
       if (act === "import") this.fileInput?.click();
-      if (act === "sync") this.openSync();
-      if (act === "from-ifc") this.openIfcSchedule(true);
+      if (act === "from-ifc") this.openIfcSchedule();
       if (act === "model") this.opts.onToggleModel?.();
+      if (act === "hide-gantt") this.opts.onHideGantt?.();
+      if (act === "indent") this.changeOutline(1);
+      if (act === "outdent") this.changeOutline(-1);
       if (act === "zoom-in") this.nudgeZoom(1);
       if (act === "zoom-out") this.nudgeZoom(-1);
       if (act === "more") {
@@ -227,10 +315,14 @@ export class ProjectWorkspace {
     });
     this.root.querySelector("[data-el='title']")?.addEventListener("change", (e) => {
       if (!this.plan) return;
-      this.plan.name = (e.target as HTMLInputElement).value.trim() || this.plan.name;
+      const name = (e.target as HTMLInputElement).value.trim() || this.plan.name;
+      this.plan.name = name;
+      const session = this.opts.getSession();
+      if (!session) return;
+      session.renameWorkSchedule(name);
+      this.opts.onNativeChange?.({});
     });
     this.bindGantt();
-    this.el("sync")?.addEventListener("click", this.onSyncClick);
     this.el("mapper")?.addEventListener("click", this.onMapperClick);
     this.el("mapper")?.addEventListener("change", this.onMapperChange);
     document.addEventListener("pointerdown", (e) => {
@@ -291,7 +383,7 @@ export class ProjectWorkspace {
     chart?.addEventListener("click", (e) => {
       const hit = (e.target as HTMLElement).closest<HTMLElement>("[data-id]");
       if (!hit) return;
-      this.setSelected(hit.dataset.id!);
+      this.setSelected(hit.dataset.id!, true, this.clickMode(e));
     });
 
     this.bindTableSplit();
@@ -309,7 +401,7 @@ export class ProjectWorkspace {
         }
         return;
       }
-      this.setSelected(id);
+      this.setSelected(id, true, this.clickMode(e));
     });
 
     table?.addEventListener("change", (e) => {
@@ -318,64 +410,233 @@ export class ProjectWorkspace {
       const task = this.plan?.tasks.find((t) => t.id === row?.dataset.id);
       if (!task || !this.plan) return;
       const field = input.dataset.field;
-      if (field === "name") task.name = input.value;
-      if (field === "dur") applyDuration(task, Number(input.value) || 0);
+      const patch: TaskPatch = {};
+      if (field === "name") {
+        task.name = input.value;
+        patch.name = input.value;
+      }
+      if (field === "wbs") {
+        task.wbs = input.value.trim() || undefined;
+        patch.identification = input.value;
+      }
+      if (field === "dur") {
+        applyDuration(task, Number(input.value) || 0);
+        if (task.start) patch.start = task.start;
+        if (task.end) patch.end = task.end;
+      }
       if (field === "start") {
         const d = fromInputDate(input.value);
-        if (d) applyStart(task, d);
+        if (d) {
+          applyStart(task, d);
+          patch.start = task.start;
+          if (task.end) patch.end = task.end;
+        }
       }
       if (field === "end") {
         const d = fromInputDate(input.value);
-        if (d) applyEnd(task, d);
+        if (d) {
+          applyEnd(task, d);
+          if (task.start) patch.start = task.start;
+          patch.end = task.end;
+        }
       }
-      this.plan = finalizePlan(this.plan);
+      this.syncPlanRange();
       this.renderBoard();
+      const ifcId = task.linkedIfcTaskId;
+      const resolved = this.native(ifcId);
+      if (ifcId != null && resolved && Object.keys(patch).length) {
+        try {
+          const { timeChanged } = resolved.session.applyTaskEdit(resolved.nativeId, patch);
+          this.opts.onNativeChange?.({ timeChanged });
+        } catch (err) {
+          this.toast((err as Error).message);
+        }
+      }
     });
 
-    table?.addEventListener("keydown", (e) => {
-      if (e.key === "Delete" && this.selectedId && !(e.target as HTMLElement).matches("input")) {
-        e.preventDefault();
-        this.deleteSelected();
-      }
-      if (e.key === "Enter" && (e.target as HTMLElement).matches("input")) {
-        (e.target as HTMLInputElement).blur();
-      }
+    this.root.addEventListener("keydown", (e) => {
+      if (!this.root.contains(e.target as Node)) return;
+      this.onGanttKey(e);
     });
   }
 
   private newPlan(): void {
-    this.plan = emptyPlan("Novo planejamento");
-    this.selectedId = this.plan.tasks[1]?.id ?? this.plan.tasks[0]?.id ?? null;
-    this.render();
+    const session = this.withSession();
+    if (!session) return;
+    if (session.schedule.roots.length) {
+      this.bindFromIfc(session.schedule, session.fileName);
+      this.toast("Este IFC já tem IfcWorkSchedule — aberto no Gantt.");
+      return;
+    }
+    try {
+      const name = this.opts.getIfcFileName()?.replace(/\.ifc$/i, "") || "Cronograma";
+      session.ensureWorkSchedule(name);
+      const start = startOfDay(new Date());
+      const root = session.createTask({
+        name,
+        start,
+        end: addDays(start, 20),
+      });
+      session.createTask({
+        name: "Nova tarefa",
+        parentId: root.id,
+        start,
+        end: addDays(start, 5),
+      });
+      this.opts.onNativeChange?.({ structure: true, timeChanged: true });
+      this.rebind(this.fedId(session, root.id));
+      this.toast("IfcWorkSchedule e IfcTask gravados no modelo. Exporte o IFC para confirmar noutro programa.");
+    } catch (err) {
+      this.toast((err as Error).message);
+    }
   }
 
   private addTask(): void {
-    if (!this.plan) this.plan = emptyPlan("Novo planejamento");
-    const task = insertTaskAfter(this.plan, this.selectedId);
-    this.selectedId = task.id;
-    this.plan = finalizePlan(this.plan);
-    this.renderBoard();
-    this.el("table-body")
-      ?.querySelector<HTMLInputElement>(`[data-id="${CSS.escape(task.id)}"] input[data-field="name"]`)
-      ?.focus();
+    const session = this.withSession(this.getSelected()?.linkedIfcTaskId);
+    if (!session) return;
+    if (!this.plan) {
+      this.newPlan();
+      return;
+    }
+    const selected = this.getSelected();
+    const start = startOfDay(selected?.start ?? this.plan.minDate);
+    const end = addDays(start, selected?.durationDays || 5);
+    let parentFed: number | undefined;
+    if (selected?.linkedIfcTaskId != null && this.plan) {
+      const idx = this.plan.tasks.findIndex((t) => t.id === selected.id);
+      for (let i = idx - 1; i >= 0; i--) {
+        if (this.plan.tasks[i]!.outlineLevel < selected.outlineLevel) {
+          parentFed = this.plan.tasks[i]!.linkedIfcTaskId;
+          break;
+        }
+      }
+    }
+    const parent = this.native(parentFed);
+    const after = this.native(selected?.linkedIfcTaskId);
+    if (parent && parent.session !== session) {
+      this.toast("Não é possível criar a tarefa noutro modelo IFC. Selecione uma linha do mesmo ficheiro.");
+      return;
+    }
+    try {
+      const task = session.createTask({
+        name: "Nova tarefa",
+        start,
+        end,
+        parentId: parent && parent.nativeId > 0 ? parent.nativeId : undefined,
+        afterId: after?.session === session && after.nativeId > 0 ? after.nativeId : undefined,
+      });
+      this.opts.onNativeChange?.({ structure: true, timeChanged: true });
+      this.rebind(this.fedId(session, task.id));
+      requestAnimationFrame(() => {
+        this.el("table-body")
+          ?.querySelector<HTMLInputElement>(`[data-id="${CSS.escape(`ifc-${this.fedId(session, task.id)}`)}"] input[data-field="name"]`)
+          ?.focus();
+      });
+    } catch (err) {
+      this.toast((err as Error).message);
+    }
   }
 
   private deleteSelected(): void {
-    if (!this.plan || !this.selectedId) return;
-    removeTask(this.plan, this.selectedId);
-    this.selectedId = this.plan.tasks[0]?.id ?? null;
-    this.plan = finalizePlan(this.plan);
-    this.renderBoard();
+    if (!this.plan || !this.selectedIds.size) return;
+    const roots = selectionRootIndices(this.plan.tasks, this.selectedIds)
+      .map((i) => this.plan!.tasks[i])
+      .filter((t) => t.linkedIfcTaskId != null);
+    if (!roots.length) return;
+    const names = roots.slice(0, 3).map((t) => t.name).join(", ");
+    const extra = roots.length > 3 ? ` e mais ${roots.length - 3}` : "";
+    const label =
+      roots.length === 1
+        ? `Apagar «${roots[0]!.name}» e subtarefas do IFC (IfcTask)?`
+        : `Apagar ${roots.length} tarefas (${names}${extra}) e subtarefas do IFC?`;
+    if (!window.confirm(label)) return;
+    try {
+      for (const task of roots) {
+        const resolved = this.native(task.linkedIfcTaskId);
+        if (resolved && resolved.nativeId > 0) resolved.session.deleteTask(resolved.nativeId);
+      }
+      this.opts.onNativeChange?.({ structure: true, timeChanged: true });
+      this.rebind();
+    } catch (err) {
+      this.toast((err as Error).message);
+    }
   }
 
-  private openIfcSchedule(force = false): void {
+  private openIfcSchedule(): void {
     const schedule = this.opts.getIfcSchedule();
-    if (!schedule?.roots.length) {
-      this.toast("Importe um IFC com IfcWorkSchedule para abrir o cronograma nativo.");
+    if (!this.opts.getSession()) {
+      this.toast("Importe um IFC para editar o cronograma nativo.");
       this.opts.onRequestIfcImport();
       return;
     }
-    this.bindFromIfc(schedule, this.opts.getIfcFileName() ?? undefined, force);
+    if (!schedule?.roots.length) {
+      this.toast("Este IFC ainda não tem IfcTask. Crie um cronograma ou importe CSV/XML.");
+      return;
+    }
+    this.bindFromIfc(schedule, this.opts.getIfcFileName() ?? undefined);
+  }
+
+  private native(federatedId: number | undefined | null): { session: IfcSession; nativeId: number } | null {
+    if (federatedId == null) return null;
+    return this.opts.resolveIfcTask?.(federatedId) ?? (this.opts.getSession() ? { session: this.opts.getSession()!, nativeId: federatedId } : null);
+  }
+
+  private withSession(federatedId?: number): IfcSession | null {
+    const resolved = federatedId != null ? this.native(federatedId) : null;
+    if (resolved) return resolved.session;
+    const session = this.opts.getSession();
+    if (session) return session;
+    this.toast("Abra um IFC para gravar o cronograma no modelo.");
+    this.opts.onRequestIfcImport();
+    return null;
+  }
+
+  private rebind(selectIfcId?: number): void {
+    const schedule = this.opts.getIfcSchedule();
+    if (!schedule?.roots.length) {
+      this.plan = null;
+      this.selectedId = null;
+      this.selectedIds.clear();
+      this.selectionAnchorId = null;
+      this.render();
+      return;
+    }
+    this.plan = scheduleToPlan(schedule, this.opts.getIfcFileName() ?? undefined);
+    this.selectedId =
+      (selectIfcId != null ? this.plan.tasks.find((t) => t.linkedIfcTaskId === selectIfcId)?.id : undefined) ??
+      this.plan.tasks[0]?.id ??
+      null;
+    this.selectedIds = this.selectedId ? new Set([this.selectedId]) : new Set();
+    this.selectionAnchorId = this.selectedId;
+    this.render();
+  }
+
+  private fedId(session: IfcSession, nativeId: number): number {
+    return this.opts.federateIfcId?.(session, nativeId) ?? nativeId;
+  }
+
+  private syncPlanRange(): void {
+    if (!this.plan) return;
+    const dates = this.plan.tasks.flatMap((t) => [t.start, t.end]).filter((d): d is Date => !!d);
+    if (!dates.length) return;
+    const times = dates.map((d) => d.getTime());
+    this.plan.minDate = new Date(Math.min(...times));
+    this.plan.maxDate = new Date(Math.max(...times));
+  }
+
+  private writeImportedPlan(plan: ProjectPlan): void {
+    const session = this.withSession();
+    if (!session) return;
+    try {
+      const { created, updated } = session.importOutline(planToOutlineRows(plan), plan.name);
+      this.opts.onNativeChange?.({ structure: true, timeChanged: true });
+      this.rebind();
+      this.toast(
+        `${created} IfcTask criada${created === 1 ? "" : "s"}, ${updated} atualizada${updated === 1 ? "" : "s"} no IFC. Exporte para confirmar.`,
+      );
+    } catch (err) {
+      this.toast((err as Error).message);
+    }
   }
 
   private async importFiles(files: File[]): Promise<void> {
@@ -399,27 +660,14 @@ export class ProjectWorkspace {
     }
 
     if (imported) {
-      this.plan = imported;
-      for (const att of extra) {
-        if (!this.plan.attachments.some((a) => a.name === att.name && a.size === att.size)) {
-          this.plan.attachments.push(att);
-        }
-      }
-      this.selectedId = this.plan.tasks[0]?.id ?? null;
+      this.writeImportedPlan(imported);
     } else if (extra.length) {
-      if (!this.plan) this.plan = emptyPlan(files[0]?.name.replace(/\.[^.]+$/, "") || "Planejamento");
-      this.plan.attachments.push(...extra);
+      this.toast(
+        extra.map((a) => a.note || `${a.name} anexado só nesta sessão (ainda não é IfcDocumentReference).`).join(" "),
+      );
     }
 
-    if (!this.plan && extra.length) {
-      this.plan = emptyPlan("Novo planejamento");
-      this.plan.attachments.push(...extra);
-    }
-
-    this.render();
     if (warnings.length) this.toast(warnings.join(" "));
-    else if (imported) this.toast(`${imported.tasks.length} tarefas importadas de ${imported.sourceLabel ?? "arquivo"}.`);
-    else if (extra.length) this.toast("Arquivo anexado ao planejamento.");
   }
 
   private nudgeZoom(dir: number): void {
@@ -446,8 +694,10 @@ export class ProjectWorkspace {
     const actions = this.el("empty-actions");
     if (copy) {
       copy.innerHTML = schedule?.roots.length
-        ? `Este IFC já tem cronograma nativo (<strong>${escapeHtml(schedule.workPlanName || schedule.name)}</strong> · ${schedule.byId.size} IfcTask), com datas ligadas aos elementos 3D. Abra-o no Gantt ou importe um CSV mapeando as colunas.`
-        : `O Gantt lê o cronograma nativo do IFC (<strong>IfcWorkPlan → IfcWorkSchedule → IfcTask</strong>). Importe um IFC, ou um CSV/XML com seletor de colunas.`;
+        ? `Este IFC já tem cronograma nativo (<strong>${escapeHtml(schedule.workPlanName || schedule.name)}</strong> · ${schedule.byId.size} IfcTask). Abra-o no Gantt, ou importe CSV/XML — as linhas viram IfcTask no ficheiro.`
+        : this.opts.getSession()
+          ? `Este IFC ainda não tem <strong>IfcWorkSchedule</strong>. Crie um cronograma no modelo ou importe CSV/XML para gravar IfcTask no STEP.`
+          : `O Gantt edita o cronograma nativo do IFC. Importe um ficheiro <strong>.ifc</strong> primeiro; CSV/XML e tarefas novas gravam-se nesse modelo.`;
     }
     if (actions) {
       const hasIfc = !!schedule?.roots.length;
@@ -464,8 +714,11 @@ export class ProjectWorkspace {
     if (title && title !== document.activeElement) title.value = plan.name;
     if (meta) {
       const n = plan.tasks.length;
-      const linked = plan.tasks.filter((t) => t.linkedIfcTaskId != null).length;
-      meta.textContent = `${n} tarefa${n === 1 ? "" : "s"}${linked ? ` · ${linked} no 3D` : ""} · ${formatDay(plan.minDate)} – ${formatDay(plan.maxDate)}`;
+      const sel = this.selectedIds.size;
+      meta.textContent =
+        sel > 1
+          ? `${n} IfcTask · ${sel} selecionadas · ${formatDay(plan.minDate)} – ${formatDay(plan.maxDate)}`
+          : `${n} IfcTask · ${formatDay(plan.minDate)} – ${formatDay(plan.maxDate)}`;
     }
     this.renderAttachments();
     this.renderTableAndChart();
@@ -513,7 +766,7 @@ export class ProjectWorkspace {
     const gantt = this.el("gantt");
     if (!handle || !gantt) return;
     const apply = (w: number) => {
-      const next = Math.max(220, Math.min(640, w));
+      const next = Math.max(280, Math.min(960, w));
       gantt.style.setProperty("--pw-table-w", `${next}px`);
     };
     handle.addEventListener("pointerdown", (ev: PointerEvent) => {
@@ -530,32 +783,31 @@ export class ProjectWorkspace {
       handle.addEventListener("pointermove", onMove);
       handle.addEventListener("pointerup", onUp);
     });
-    handle.addEventListener("dblclick", () => apply(420));
+    handle.addEventListener("dblclick", () => apply(560));
   }
 
-  private rowHtml(task: PlanTask, index: number): string {
-    const selected = task.id === this.selectedId ? " is-selected" : "";
+  private rowHtml(task: PlanTask, _index: number): string {
+    const selected = this.selectedIds.has(task.id) ? " is-selected" : "";
+    const hit = task.linkedIfcTaskId != null && this.hitIfcIds.has(task.linkedIfcTaskId) ? " is-hit" : "";
     const pad = 8 + (task.outlineLevel - 1) * 14;
     const toggle = task.isSummary
       ? `<button type="button" class="pw-toggle${task.collapsed ? " is-collapsed" : ""}" data-act="toggle" aria-label="${task.collapsed ? "Expandir" : "Recolher"}">${ICON_TOGGLE}</button>`
       : `<span class="pw-toggle-ph"></span>`;
+    const prod = task.linkedProductGuids.length;
+    const sets = task.linkedGroupNames ?? [];
     return `
-      <div class="pw-row${selected}${task.isSummary ? " is-summary" : ""}" data-id="${escapeHtml(task.id)}" style="height:${ROW_H}px">
-        <span class="pw-col-wbs" title="${escapeAttr(task.wbs || "")}">${escapeHtml(task.wbs || String(index + 1))}</span>
+      <div class="pw-row${selected}${hit}${task.isSummary ? " is-summary" : ""}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="height:${ROW_H}px">
+        <span class="pw-col-wbs" title="${escapeAttr(task.wbs || "")}"><input data-field="wbs" value="${escapeAttr(task.wbs || "")}" spellcheck="false" aria-label="WBS / Identification" /></span>
         <span class="pw-col-name" style="padding-left:${pad}px">${toggle}
-          ${task.linkedIfcTaskId != null ? `<span class="pw-ifc-dot" title="IfcTask nativa"></span>` : ""}
+          <span class="pw-ifc-dot" title="IfcTask nativa"></span>
           <input data-field="name" value="${escapeAttr(task.name)}" spellcheck="false" title="${escapeAttr(task.name)}" />
-          ${
-            task.linkedProductGuids.length
-              ? `<span class="pw-prod" title="${task.linkedProductGuids.length} elementos 3D">${task.linkedProductGuids.length}</span>`
-              : ""
-          }
-          ${
-            task.linkedGroupNames?.length
-              ? `<span class="pw-set" title="Conjuntos IFC: ${escapeAttr(task.linkedGroupNames.join(", "))}">${escapeHtml(task.linkedGroupNames[0])}${task.linkedGroupNames.length > 1 ? ` +${task.linkedGroupNames.length - 1}` : ""}</span>`
-              : ""
-          }
         </span>
+        <span class="pw-col-prod">${prod ? `<span class="pw-prod" title="${prod} elementos 3D">${prod}</span>` : ""}</span>
+        <span class="pw-col-set">${
+          sets.length
+            ? `<span class="pw-set" title="Conjuntos IFC: ${escapeAttr(sets.join(", "))}">${escapeHtml(sets.join(", "))}</span>`
+            : ""
+        }</span>
         <span class="pw-col-dur"><input data-field="dur" type="number" min="0" step="0.5" value="${task.durationDays ?? ""}" aria-label="Duração em dias" /></span>
         <span class="pw-col-date"><input data-field="start" type="date" value="${task.start ? toInputDate(task.start) : ""}" aria-label="Início" /></span>
         <span class="pw-col-date"><input data-field="end" type="date" value="${task.end ? toInputDate(task.end) : ""}" aria-label="Término" /></span>
@@ -568,12 +820,14 @@ export class ProjectWorkspace {
     const dur = Math.max(task.isMilestone ? 0 : (task.durationDays ?? (task.end ? diffDays(task.start, task.end) : 1)), 0);
     const top = index * ROW_H + (task.isSummary ? 12 : 8);
     if (task.isMilestone) {
-      return `<div class="pw-mile" data-id="${escapeHtml(task.id)}" style="left:${left}px;top:${index * ROW_H + 10}px" title="${escapeAttr(task.name)}"></div>`;
+      const hit = task.linkedIfcTaskId != null && this.hitIfcIds.has(task.linkedIfcTaskId) ? " is-hit" : "";
+      return `<div class="pw-mile${hit}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="left:${left}px;top:${index * ROW_H + 10}px" title="${escapeAttr(task.name)}"></div>`;
     }
     const w = Math.max(dur * this.pxPerDay, 6);
     const pct = Math.max(0, Math.min(100, task.progress));
     const kind = task.isSummary ? "summary" : barState(task);
-    return `<div class="pw-bar is-${kind}" data-id="${escapeHtml(task.id)}" style="left:${left}px;top:${top}px;width:${w}px" title="${escapeAttr(task.name)}">
+    const hit = task.linkedIfcTaskId != null && this.hitIfcIds.has(task.linkedIfcTaskId) ? " is-hit" : "";
+    return `<div class="pw-bar is-${kind}${hit}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="left:${left}px;top:${top}px;width:${w}px" title="${escapeAttr(task.name)}">
       <i style="width:${pct}%"></i>
     </div>`;
   }
@@ -628,103 +882,156 @@ export class ProjectWorkspace {
     return `<div class="pw-scale-inner" style="width:${width}px"><div class="pw-scale-months">${months.join("")}</div><div class="pw-scale-days">${ticks.join("")}</div></div>`;
   }
 
-  private setSelected(id: string | null, emit = true): void {
-    this.selectedId = id;
+  private clickMode(e: MouseEvent): "replace" | "toggle" | "range" {
+    if (e.shiftKey) return "range";
+    if (e.ctrlKey || e.metaKey) return "toggle";
+    return "replace";
+  }
+
+  private setSelected(id: string | null, emit = true, mode: "replace" | "toggle" | "range" = "replace"): void {
+    if (!id || !this.plan) {
+      this.selectedId = null;
+      this.selectedIds.clear();
+      this.selectionAnchorId = null;
+      this.paintSelection();
+      if (emit) this.opts.onSelectTask?.(null);
+      return;
+    }
+    if (mode === "toggle") {
+      if (this.selectedIds.has(id) && this.selectedIds.size > 1) {
+        this.selectedIds.delete(id);
+        this.selectedId = [...this.selectedIds][this.selectedIds.size - 1] ?? null;
+      } else {
+        this.selectedIds.add(id);
+        this.selectedId = id;
+      }
+      this.selectionAnchorId = id;
+    } else if (mode === "range") {
+      const vis = visibleTasks(this.plan.tasks);
+      const anchor = this.selectionAnchorId ?? this.selectedId ?? id;
+      const a = vis.findIndex((t) => t.id === anchor);
+      const b = vis.findIndex((t) => t.id === id);
+      if (a >= 0 && b >= 0) {
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        this.selectedIds = new Set(vis.slice(lo, hi + 1).map((t) => t.id));
+      } else {
+        this.selectedIds = new Set([id]);
+      }
+      this.selectedId = id;
+    } else {
+      this.selectedIds = new Set([id]);
+      this.selectedId = id;
+      this.selectionAnchorId = id;
+    }
     this.paintSelection();
-    if (!emit) return;
-    const task = this.getSelected();
-    this.opts.onSelectTask?.(task);
+    if (emit) this.opts.onSelectTask?.(this.getSelected());
+    const meta = this.el("meta");
+    if (meta && this.plan) {
+      const n = this.plan.tasks.length;
+      const sel = this.selectedIds.size;
+      meta.textContent =
+        sel > 1
+          ? `${n} IfcTask · ${sel} selecionadas · ${formatDay(this.plan.minDate)} – ${formatDay(this.plan.maxDate)}`
+          : `${n} IfcTask · ${formatDay(this.plan.minDate)} – ${formatDay(this.plan.maxDate)}`;
+    }
+  }
+
+  private paintHits(): void {
+    this.root.querySelectorAll<HTMLElement>("[data-ifc]").forEach((el) => {
+      const ifc = Number(el.dataset.ifc);
+      el.classList.toggle("is-hit", Number.isFinite(ifc) && this.hitIfcIds.has(ifc));
+    });
   }
 
   private paintSelection(): void {
     this.root.querySelectorAll(".pw-row, .pw-bar, .pw-mile").forEach((el) => {
-      el.classList.toggle("is-selected", (el as HTMLElement).dataset.id === this.selectedId);
+      el.classList.toggle("is-selected", this.selectedIds.has((el as HTMLElement).dataset.id || ""));
     });
   }
 
-  private openSync(): void {
-    const panel = this.el("sync");
-    if (!panel || !this.plan) return;
-    const schedule = this.opts.getIfcSchedule();
-    const fileName = this.opts.getIfcFileName();
-    const planCount = this.plan.tasks.filter((t) => !t.isSummary).length;
-    const ifcTasks = schedule ? [...schedule.byId.values()].filter((t) => t.children.length === 0) : [];
-    const matches = schedule ? matchTasks(this.plan.tasks, schedule) : [];
-
-    panel.innerHTML = `
-      <div class="pw-sync-card">
-        <header>
-          <h3 id="pw-sync-title">Sincronizar com o modelo</h3>
-          <button type="button" class="pw-sync-close" data-act="close" aria-label="Fechar">×</button>
-        </header>
-        <p class="pw-sync-lead">O Gantt externo vira cronograma 4D: cada tarefa liga-se a elementos do IFC e, no passo seguinte, grava-se como <strong>IfcTask</strong> nativo.</p>
-        <dl class="pw-sync-stats">
-          <div><dt>Planejamento</dt><dd>${planCount} tarefas</dd></div>
-          <div><dt>Modelo IFC</dt><dd>${fileName ? escapeHtml(fileName) : "nenhum arquivo aberto"}</dd></div>
-          <div><dt>IfcTask no modelo</dt><dd>${schedule ? ifcTasks.length : "—"}</dd></div>
-          <div><dt>Correspondências por nome</dt><dd>${matches.length}</dd></div>
-        </dl>
-        ${
-          !schedule
-            ? `<p class="pw-sync-note">Importe um IFC para pré-visualizar as ligações. A gravação nativa no arquivo entra a seguir — as correspondências já ficam neste planejamento.</p>
-               <div class="pw-sync-actions">
-                 <button type="button" class="btn-primary" data-act="import-ifc">Importar IFC</button>
-                 <button type="button" class="btn-secondary" data-act="close">Agora não</button>
-               </div>`
-            : `<div class="pw-sync-matches">${
-                matches.length
-                  ? matches
-                      .slice(0, 40)
-                      .map(
-                        (m) => `<div class="pw-sync-row"><span>${escapeHtml(m.planName)}</span><span>→</span><span>${escapeHtml(m.ifcName)}</span></div>`,
-                      )
-                      .join("") + (matches.length > 40 ? `<p class="pw-sync-note">+${matches.length - 40} outras</p>` : "")
-                  : `<p class="pw-sync-note">Nenhum nome coincidiu ainda. Pode ligar à mão mais tarde, ou gravar o Gantt como IfcWorkSchedule novo.</p>`
-              }</div>
-              <div class="pw-sync-actions">
-                <button type="button" class="btn-primary" data-act="apply" ${matches.length ? "" : "disabled"}>Ligar correspondências</button>
-                <button type="button" class="btn-secondary" data-act="close">Fechar</button>
-              </div>
-              <p class="pw-sync-note">A escrita no STEP (IfcRelAssignsToProcess / IfcTaskTime) fica para o próximo passo — hoje a ligação fica na sessão de planejamento.</p>`
-        }
-      </div>`;
-    panel.classList.remove("is-hidden");
-  }
-
-  private onSyncClick = (e: Event): void => {
-    const target = e.target as HTMLElement;
-    if (target.classList.contains("pw-sync")) {
-      this.closeSync();
+  private onGanttKey(e: KeyboardEvent): void {
+    const inField = (e.target as HTMLElement).matches("input, textarea, select");
+    if (e.key === "Enter" && inField) {
+      (e.target as HTMLInputElement).blur();
       return;
     }
-    const act = target.closest("[data-act]")?.getAttribute("data-act");
-    if (act === "close") this.closeSync();
-    if (act === "import-ifc") {
-      this.closeSync();
-      this.opts.onRequestIfcImport();
+    if (e.key === "Delete" && this.selectedIds.size && !inField) {
+      e.preventDefault();
+      this.deleteSelected();
+      return;
     }
-    if (act === "apply") this.applyMatches();
-  };
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a" && !inField && this.plan) {
+      e.preventDefault();
+      const vis = visibleTasks(this.plan.tasks);
+      this.selectedIds = new Set(vis.map((t) => t.id));
+      this.selectedId = vis[0]?.id ?? null;
+      this.paintSelection();
+      this.opts.onSelectTask?.(this.getSelected());
+      return;
+    }
+    const inGantt = !!(e.target as HTMLElement).closest(".pw-gantt");
+    const indentKey =
+      (e.altKey && e.shiftKey && e.key === "ArrowRight") ||
+      (!inField && inGantt && e.key === "Tab" && !e.shiftKey);
+    const outdentKey =
+      (e.altKey && e.shiftKey && e.key === "ArrowLeft") ||
+      (!inField && inGantt && e.key === "Tab" && e.shiftKey);
+    if (indentKey) {
+      e.preventDefault();
+      this.changeOutline(1);
+      return;
+    }
+    if (outdentKey) {
+      e.preventDefault();
+      this.changeOutline(-1);
+    }
+  }
 
-  private applyMatches(): void {
-    if (!this.plan) return;
-    const schedule = this.opts.getIfcSchedule();
-    if (!schedule) return;
-    const matches = matchTasks(this.plan.tasks, schedule);
-    const byId = new Map(this.plan.tasks.map((t) => [t.id, t]));
-    for (const m of matches) {
-      const task = byId.get(m.planId);
-      if (!task) continue;
-      task.linkedIfcTaskId = m.ifcId;
-      task.linkedProductGuids = [...(schedule.productGuidsByTask.get(m.ifcId) ?? [])];
+  private changeOutline(dir: 1 | -1): void {
+    if (!this.plan || !this.selectedIds.size) return;
+    const moved = dir === 1 ? indentTasks(this.plan.tasks, this.selectedIds) : outdentTasks(this.plan.tasks, this.selectedIds);
+    if (!moved.length) {
+      this.toast(dir === 1 ? "Não é possível rebaixar a seleção." : "Não é possível subir a seleção.");
+      return;
     }
-    this.closeSync();
-    this.toast(`${matches.length} tarefa${matches.length === 1 ? "" : "s"} ligadas ao modelo nesta sessão.`);
+    const ids = moved.map((i) => this.plan!.tasks[i].id);
+    this.persistOutline(ids);
     this.renderBoard();
   }
 
-  private closeSync(): void {
-    this.el("sync")?.classList.add("is-hidden");
+  private persistOutline(movedRootIds: string[]): void {
+    const plan = this.plan;
+    if (!plan) return;
+    try {
+      for (const id of movedRootIds) {
+        const idx = plan.tasks.findIndex((t) => t.id === id);
+        if (idx < 0) continue;
+        const resolved = this.native(plan.tasks[idx]!.linkedIfcTaskId);
+        if (!resolved || resolved.nativeId <= 0) continue;
+        const pIdx = outlineParentIndex(plan.tasks, idx);
+        const sIdx = outlinePrevSiblingIndex(plan.tasks, idx);
+        const parent = pIdx >= 0 ? this.native(plan.tasks[pIdx]!.linkedIfcTaskId) : null;
+        const after = sIdx >= 0 ? this.native(plan.tasks[sIdx]!.linkedIfcTaskId) : null;
+        if (parent && parent.session !== resolved.session) {
+          this.toast("Não é possível aninhar tarefas de IFCs diferentes.");
+          continue;
+        }
+        resolved.session.reparentTask(
+          resolved.nativeId,
+          parent?.nativeId,
+          after?.session === resolved.session ? after.nativeId : undefined,
+        );
+      }
+      for (const [id, wbs] of rebuildWbs(plan.tasks)) {
+        const task = plan.tasks.find((t) => t.id === id);
+        const resolved = this.native(task?.linkedIfcTaskId);
+        if (resolved && resolved.nativeId > 0) resolved.session.applyTaskEdit(resolved.nativeId, { identification: wbs });
+      }
+      this.opts.onNativeChange?.({ structure: true });
+    } catch (err) {
+      this.toast((err as Error).message);
+    }
   }
 
   private openMapper(insp: CsvInspection): void {
@@ -754,7 +1061,7 @@ export class ProjectWorkspace {
           <h3 id="pw-map-title">Mapear colunas</h3>
           <button type="button" class="pw-sync-close" data-act="close" aria-label="Fechar">×</button>
         </header>
-        <p class="pw-sync-lead"><strong>${escapeHtml(insp.fileName)}</strong> · ${insp.dataRowCount} linhas · delimitador «${escapeHtml(insp.delimiter === "\t" ? "tab" : insp.delimiter)}». Diga qual coluna é o nome da tarefa — o número do item não deve ir para a descrição.</p>
+        <p class="pw-sync-lead"><strong>${escapeHtml(insp.fileName)}</strong> · ${insp.dataRowCount} linhas · delimitador «${escapeHtml(insp.delimiter === "\t" ? "tab" : insp.delimiter)}». Cada linha vira <strong>IfcTask</strong> no modelo aberto (WBS → Identification, datas → IfcTaskTime).</p>
         <label class="pw-map-check">
           <input type="checkbox" data-act="header" ${insp.hasHeader ? "checked" : ""} />
           A primeira linha é o cabeçalho
@@ -788,7 +1095,7 @@ export class ProjectWorkspace {
           </table>
         </div>
         <div class="pw-sync-actions">
-          <button type="button" class="btn-primary" data-act="apply" ${map.name == null ? "disabled" : ""}>Importar para o Gantt</button>
+          <button type="button" class="btn-primary" data-act="apply" ${map.name == null ? "disabled" : ""}>Gravar no IFC</button>
           <button type="button" class="btn-secondary" data-act="close">Cancelar</button>
         </div>
       </div>`;
@@ -823,14 +1130,16 @@ export class ProjectWorkspace {
 
   private commitMapper(): void {
     if (!this.csvDraft) return;
+    if (!this.opts.getSession()) {
+      this.toast("Abra um IFC antes de gravar o CSV no cronograma nativo.");
+      this.opts.onRequestIfcImport();
+      return;
+    }
     try {
       const plan = planFromMappedCsv(this.csvDraft, this.csvDraft.guessed);
       if (this.csvFile) plan.attachments.push(fileToAttachment(this.csvFile, "schedule"));
-      this.plan = plan;
-      this.selectedId = plan.tasks[0]?.id ?? null;
       this.closeMapper();
-      this.render();
-      this.toast(`${plan.tasks.length} tarefas importadas. Confira se o nome veio da coluna de descrição.`);
+      this.writeImportedPlan(plan);
     } catch (err) {
       this.toast((err as Error).message);
     }
@@ -876,35 +1185,6 @@ function barState(task: PlanTask): string {
   if (today < task.start) return "pending";
   if (today > task.end) return "done";
   return "active";
-}
-
-function matchTasks(planTasks: PlanTask[], schedule: ScheduleData): Array<{ planId: string; planName: string; ifcId: number; ifcName: string }> {
-  const ifc = [...schedule.byId.values()].map((t) => ({
-    id: t.id,
-    name: t.name,
-    key: norm(t.name),
-  }));
-  const used = new Set<number>();
-  const out: Array<{ planId: string; planName: string; ifcId: number; ifcName: string }> = [];
-  for (const t of planTasks) {
-    if (t.isSummary) continue;
-    const key = norm(t.name);
-    if (!key) continue;
-    const hit = ifc.find((i) => !used.has(i.id) && (i.key === key || i.key.includes(key) || key.includes(i.key)));
-    if (!hit) continue;
-    used.add(hit.id);
-    out.push({ planId: t.id, planName: t.name, ifcId: hit.id, ifcName: hit.name });
-  }
-  return out;
-}
-
-function norm(s: string): string {
-  return s
-    .normalize("NFD")
-    .replace(/\p{Diacritic}/gu, "")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, " ")
-    .trim();
 }
 
 function escapeHtml(s: string): string {

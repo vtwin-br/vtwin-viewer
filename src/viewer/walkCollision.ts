@@ -30,12 +30,12 @@ export interface WalkHit {
  */
 export class WalkCollider {
   private group = new THREE.Group();
+  private subs: THREE.Group[] = [];
   private meshes: THREE.Mesh[] = [];
   private raycaster = new THREE.Raycaster();
   private invMat = new THREE.Matrix4();
   private localRay = new THREE.Ray();
   private worldNormal = new THREE.Vector3();
-  private model: FRAGS.FragmentsModel | null = null;
   private earth: GoogleEarthLayer | null = null;
   private gen = 0;
   ready = false;
@@ -51,25 +51,33 @@ export class WalkCollider {
     this.earth = earth;
   }
 
-  async attach(model: FRAGS.FragmentsModel): Promise<void> {
+  async attach(model: FRAGS.FragmentsModel | FRAGS.FragmentsModel[]): Promise<void> {
+    const models = Array.isArray(model) ? model : [model];
     this.detach();
     const token = this.gen;
-    this.model = model;
-    model.object.add(this.group);
+    if (!models.length) return;
     try {
-      await this.rebuild(model, token);
+      for (const m of models) {
+        if (token !== this.gen) return;
+        const sub = new THREE.Group();
+        sub.name = "walk-collider-ifc";
+        m.object.add(sub);
+        this.subs.push(sub);
+        await this.rebuild(m, sub, token);
+      }
     } catch (err) {
       console.warn("Colisão IFC incompleta:", err);
     }
     if (token !== this.gen) return;
-    this.ready = true;
+    this.ready = this.meshes.length > 0;
   }
 
   detach(): void {
     this.gen++;
     this.disposeMeshes();
+    for (const sub of this.subs) sub.removeFromParent();
+    this.subs = [];
     this.group.removeFromParent();
-    this.model = null;
     this.ready = false;
   }
 
@@ -121,7 +129,7 @@ export class WalkCollider {
     return best;
   }
 
-  private async rebuild(model: FRAGS.FragmentsModel, token: number): Promise<void> {
+  private async rebuild(model: FRAGS.FragmentsModel, parent: THREE.Group, token: number): Promise<void> {
     const ids = await this.collectSolidIds(model);
     if (token !== this.gen) return;
 
@@ -165,11 +173,11 @@ export class WalkCollider {
       depthWrite: false,
       side: THREE.DoubleSide,
     });
-    for (const geo of batches) this.pushMesh(geo, mat);
-    if (this.meshes.length === 0) this.addFallbackFloor(model, mat);
+    for (const geo of batches) this.pushMesh(geo, mat, parent);
+    if (this.meshes.length === 0) this.addFallbackFloor(model, mat, parent);
   }
 
-  private addFallbackFloor(model: FRAGS.FragmentsModel, mat: THREE.Material): void {
+  private addFallbackFloor(model: FRAGS.FragmentsModel, mat: THREE.Material, parent: THREE.Group): void {
     const box = model.box;
     const size = new THREE.Vector3();
     const center = new THREE.Vector3();
@@ -179,10 +187,10 @@ export class WalkCollider {
     const geo = new THREE.PlaneGeometry(span, span, 1, 1);
     geo.rotateX(-Math.PI / 2);
     geo.translate(center.x, box.min.y, center.z);
-    this.pushMesh(geo, mat);
+    this.pushMesh(geo, mat, parent);
   }
 
-  private pushMesh(geo: THREE.BufferGeometry, mat: THREE.Material): void {
+  private pushMesh(geo: THREE.BufferGeometry, mat: THREE.Material, parent: THREE.Group): void {
     geo.computeBoundingBox();
     geo.boundsTree = new MeshBVH(geo, { maxLeafSize: 16 });
     const mesh = new THREE.Mesh(geo, mat);
@@ -190,7 +198,7 @@ export class WalkCollider {
     mesh.frustumCulled = false;
     mesh.layers.set(WALK_COLLIDER_LAYER);
     mesh.raycast = acceleratedRaycast;
-    this.group.add(mesh);
+    parent.add(mesh);
     this.meshes.push(mesh);
   }
 
@@ -231,12 +239,14 @@ export class WalkCollider {
   }
 
   private disposeMeshes(): void {
-    const mat = this.meshes[0]?.material;
-    if (mat && !Array.isArray(mat)) mat.dispose();
+    const mats = new Set<THREE.Material>();
     for (const mesh of this.meshes) {
+      const mat = mesh.material;
+      if (mat && !Array.isArray(mat)) mats.add(mat);
       mesh.removeFromParent();
       mesh.geometry.dispose();
     }
+    for (const mat of mats) mat.dispose();
     this.meshes = [];
     while (this.group.children.length) this.group.remove(this.group.children[0]);
   }
