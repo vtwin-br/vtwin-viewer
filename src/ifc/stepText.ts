@@ -70,6 +70,16 @@ export function formatIfcDateTime(d: Date): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
+/** ExpressID da entidade cujo GlobalId (1.º argumento) é `guid`. */
+export function findExpressIdByGlobalId(text: string, guid: string): number | undefined {
+  const g = guid.trim();
+  if (!g) return undefined;
+  const escaped = g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`#(\\d+)\\s*=\\s*IFC[A-Z0-9]+\\s*\\(\\s*'${escaped}'`, "i");
+  const m = re.exec(text);
+  return m ? Number(m[1]) : undefined;
+}
+
 export function findEntity(text: string, expressId: number): StepEntity | null {
   const needle = `#${expressId}=`;
   let from = 0;

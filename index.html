@@ -15,11 +15,31 @@
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Vista 4D — IFC</title>
+    <script>
+      (function () {
+        var w = window.innerWidth;
+        document.documentElement.dataset.layout =
+          w <= 1099 ? "compact" : w <= 1279 ? "narrow" : w <= 1439 ? "medium" : "wide";
+      })();
+    </script>
   </head>
   <body>
     <div id="app">
       <header id="header" class="app-header">
         <div class="header-left">
+          <button
+            type="button"
+            class="icon-btn-plain header-menu"
+            id="btn-nav-menu"
+            title="Menu de módulos"
+            aria-label="Menu de módulos"
+            aria-controls="module-nav"
+            aria-expanded="false"
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M5 7h14M5 12h14M5 17h14" stroke-linecap="round" />
+            </svg>
+          </button>
           <div class="brand" aria-label="Vista 4D">
             <span class="brand-mark" aria-hidden="true">
               <svg viewBox="0 0 24 24" fill="none">
@@ -43,7 +63,14 @@
 
         <div class="header-right">
           <input type="file" id="ifc-file-input" class="sr-only" accept=".ifc,.IFC" />
-          <button type="button" class="btn-secondary" id="btn-import" title="Importar um arquivo IFC">
+          <input
+            type="file"
+            id="plan-file-input"
+            class="sr-only"
+            accept=".csv,.xml,.mpp,.pdf,.txt,.CSV,.XML,.MPP,.PDF,.TXT"
+            multiple
+          />
+          <button type="button" class="btn-primary" id="btn-import" title="Importar um arquivo IFC (Ctrl+O)">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <path d="M12 16V4" stroke-linecap="round" />
               <path d="M8 8l4-4 4 4" stroke-linecap="round" stroke-linejoin="round" />
@@ -65,7 +92,7 @@
             </svg>
             <span id="btn-export-label">Exportar IFC</span>
           </button>
-          <button type="button" class="btn-secondary" id="btn-share" title="Copiar o endereço desta página">
+          <button type="button" class="btn-ghost" id="btn-share" title="Copiar o endereço desta página">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <circle cx="18" cy="5" r="2.4" />
               <circle cx="6" cy="12" r="2.4" />
@@ -77,40 +104,27 @@
         </div>
       </header>
 
+      <div id="shell-scrim" class="shell-scrim" hidden></div>
+
       <div class="body-grid">
-        <nav class="rail" aria-label="Painéis">
-          <button
-            type="button"
-            class="rail-btn is-active"
-            id="toggle-schedule"
-            title="Cronograma (B)"
-            aria-pressed="true"
-            aria-controls="sidebar"
-          >
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-              <path d="M5 7h14M5 12h9M5 17h12" stroke-linecap="round" />
-            </svg>
-          </button>
-          <button
-            type="button"
-            class="rail-btn is-active"
-            id="toggle-inspector"
-            title="Propriedades (I)"
-            aria-pressed="true"
-            aria-controls="inspector"
-          >
-            <svg class="rail-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
-              <rect x="5" y="4" width="14" height="16" rx="2" />
-              <path d="M8 9h8M8 13h5" stroke-linecap="round" />
-            </svg>
-          </button>
-        </nav>
+        <nav id="module-nav" class="module-nav" aria-label="Módulos"></nav>
 
         <aside id="sidebar" class="panel panel-schedule">
           <div class="panel-head">
             <div class="panel-head-row">
-              <h2 class="panel-title">Cronograma</h2>
+              <h2 class="panel-title">Cronograma 4D</h2>
               <span class="panel-badge" id="schedule-count" title="Tarefas-folha">—</span>
+              <button
+                type="button"
+                class="panel-collapse"
+                id="toggle-schedule"
+                title="Ocultar cronograma (B)"
+                aria-controls="sidebar"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                  <path d="M14 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round" />
+                </svg>
+              </button>
             </div>
             <p class="panel-sub" id="schedule-name">—</p>
           </div>
@@ -151,16 +165,28 @@
         </aside>
 
         <section class="center-column">
+          <section id="project-workspace" class="project-workspace" aria-label="Planejamento de projeto"></section>
           <div id="viewport-wrapper" class="viewport-shell">
             <div class="viewport-stage">
               <div class="viewport-hud" aria-hidden="false">
-                <span class="hud-chip">Modelo 3D</span>
-                <div class="viewport-actions">
+                <button
+                  type="button"
+                  class="icon-btn btn-reveal-schedule"
+                  id="btn-reveal-schedule"
+                  title="Mostrar cronograma (B)"
+                  aria-label="Mostrar cronograma"
+                >
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                    <path d="M4 6h16M4 12h10M4 18h13" stroke-linecap="round"/>
+                  </svg>
+                </button>
+                <div class="viewport-toolbar" role="toolbar" aria-label="Visualização">
                   <button
                     type="button"
                     class="icon-btn icon-btn-toggle is-active"
                     id="btn-hud-cost"
                     title="Mostrar gráfico 5D"
+                    aria-label="Gráfico 5D"
                     aria-pressed="true"
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
@@ -173,6 +199,7 @@
                     class="icon-btn icon-btn-toggle"
                     id="btn-earth"
                     title="Mostrar contexto Google Earth"
+                    aria-label="Terreno"
                     aria-pressed="false"
                   >
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
@@ -186,6 +213,7 @@
                     class="icon-btn icon-btn-toggle"
                     id="btn-earth-settings"
                     title="Parâmetros do terreno"
+                    aria-label="Posição do modelo"
                     aria-pressed="false"
                     hidden
                   >
@@ -200,6 +228,7 @@
                     class="icon-btn icon-btn-toggle"
                     id="btn-walk"
                     title="Andar em 1ª pessoa (V)"
+                    aria-label="Andar em primeira pessoa"
                     aria-pressed="false"
                     disabled
                   >
@@ -209,7 +238,36 @@
                     </svg>
                     <span class="icon-btn-label">Andar</span>
                   </button>
-                  <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo (F)">
+                  <div class="viewport-toolbar-split plan-link-tools" role="group" aria-label="Seleção 4D">
+                    <button
+                      type="button"
+                      class="icon-btn icon-btn-toggle"
+                      id="btn-box-select"
+                      title="Caixa de seleção (Shift+arrastar)"
+                      aria-label="Caixa de seleção"
+                      aria-pressed="false"
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                        <rect x="5" y="5" width="14" height="14" rx="1.5" stroke-dasharray="3 2"/>
+                      </svg>
+                      <span class="icon-btn-label">Caixa</span>
+                    </button>
+                    <button type="button" class="icon-btn" id="btn-new-set" title="Criar conjunto IfcGroup a partir da seleção">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                        <rect x="4" y="7" width="16" height="12" rx="2"/>
+                        <path d="M8 7V5h8v2M12 11v6M9 14h6" stroke-linecap="round"/>
+                      </svg>
+                      <span class="icon-btn-label">Conjunto</span>
+                    </button>
+                    <button type="button" class="icon-btn" id="btn-assign-set" title="Ligar o conjunto selecionado à linha do Gantt">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                        <path d="M8 12h8M12 8v8" stroke-linecap="round"/>
+                        <rect x="4" y="4" width="16" height="16" rx="3"/>
+                      </svg>
+                      <span class="icon-btn-label">Ligar</span>
+                    </button>
+                  </div>
+                  <button type="button" class="icon-btn" id="btn-fit" title="Enquadrar modelo (F)" aria-label="Enquadrar modelo">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
                       <path d="M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
@@ -218,6 +276,9 @@
               </div>
 
               <div id="viewport" class="viewport-canvas"></div>
+              <p id="link-mode-hint" class="link-mode-hint" hidden>
+                Clique ou Ctrl+clique para selecionar · Shift+arrasto = caixa · crie um conjunto e ligue à linha do Gantt
+              </p>
               <div id="walk-overlay" class="walk-overlay" hidden>
                 <div class="walk-crosshair" aria-hidden="true"></div>
                 <p class="walk-hint" id="walk-hint">WASD / setas andar · Shift correr · Esc solta o rato · V sai</p>
@@ -277,7 +338,7 @@
 
                   <section class="ep-section">
                     <h3 class="ep-section-title">Mover e rotacionar</h3>
-                    <p class="ep-hint">Arraste o gizmo no modelo. O eixo Y é só um ajuste fino (metros). Valores de quilómetros significam que o terreno Google ainda não assentou — usa <strong>Assentar</strong>.</p>
+                    <p class="ep-hint">Arraste o gizmo no modelo. O eixo Y é só um ajuste fino (metros). Valores de quilómetros significam que o terreno Google ainda não assentou — usa <strong>Assentar</strong> e depois <strong>Exportar IFC</strong> para gravar a cota nativa (IfcSite.RefElevation).</p>
                     <div class="ep-mode" role="group" aria-label="Modo do gizmo">
                       <button type="button" class="ep-mode-btn is-active" id="ep-mode-move" data-mode="translate">Mover</button>
                       <button type="button" class="ep-mode-btn" id="ep-mode-rotate" data-mode="rotate">Rotacionar</button>
@@ -313,7 +374,7 @@
                     <div class="ep-row">
                       <div class="ep-label-row">
                         <label>Terreno Google</label>
-                        <span class="ep-unit">assenta o chão em Y=0</span>
+                        <span class="ep-unit">cota WGS84 gravada no IFC</span>
                       </div>
                       <div class="ep-terrain-row">
                         <span id="ep-terrain" class="ep-terrain-val">a amostrar…</span>
@@ -364,6 +425,30 @@
 
             <footer id="timeline" class="timeline-dock is-idle" aria-disabled="true"></footer>
           </div>
+          <aside id="model-sets" class="model-sets" hidden aria-label="Árvore IFC e conjuntos 4D">
+            <header class="model-sets-head">
+              <div>
+                <h2>Modelo IFC</h2>
+                <p id="model-sets-count">0 selecionados</p>
+              </div>
+            </header>
+            <div class="model-sets-tabs" role="tablist">
+              <button type="button" class="is-active" data-ms-tab="tree" role="tab" aria-selected="true">Árvore</button>
+              <button type="button" data-ms-tab="sets" role="tab" aria-selected="false">Conjuntos</button>
+            </div>
+            <div class="model-sets-search">
+              <input type="search" id="ifc-tree-search" placeholder="Filtrar elementos" autocomplete="off" />
+            </div>
+            <div class="model-sets-body" data-ms-pane="tree">
+              <div id="ifc-tree" class="ifc-tree"></div>
+            </div>
+            <div class="model-sets-body is-hidden" data-ms-pane="sets">
+              <div class="model-sets-actions">
+                <button type="button" class="btn-primary" id="btn-new-set-panel">Novo conjunto</button>
+              </div>
+              <div id="selection-sets" class="selection-sets"></div>
+            </div>
+          </aside>
         </section>
 
         <aside id="inspector" class="panel panel-inspector">
@@ -377,62 +462,86 @@
             tabindex="0"
           ></div>
           <div class="inspector-head">
-            <h2 class="panel-title">Tarefa</h2>
-            <span class="inspector-count" id="inspector-count" title="Elementos 3D associados">0</span>
+            <div class="inspector-head-main">
+              <h2 class="panel-title">Tarefa</h2>
+              <span class="inspector-count" id="inspector-count" title="Elementos 3D associados">0</span>
+            </div>
+            <button
+              type="button"
+              class="icon-btn-plain"
+              id="toggle-inspector-panel"
+              title="Ocultar propriedades (I)"
+              aria-label="Ocultar propriedades"
+              aria-controls="inspector"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+                <path d="M10 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round" />
+              </svg>
+            </button>
           </div>
           <div id="inspector-empty" class="inspector-empty">
             <div class="empty-visual" aria-hidden="true">
               <svg viewBox="0 0 64 64" fill="none">
-                <rect x="10" y="12" width="44" height="40" rx="8" stroke="currentColor" stroke-width="1.6" opacity="0.35"/>
+                <rect x="10" y="12" width="44" height="40" rx="4" stroke="currentColor" stroke-width="1.6" opacity="0.35"/>
                 <path d="M20 24h24M20 32h16M20 40h10" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" opacity="0.45"/>
-                <circle cx="46" cy="42" r="8" fill="#fff" stroke="currentColor" stroke-width="1.6"/>
-                <path d="M46 38.5v4.2l3 1.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
               </svg>
             </div>
-            <h3>Edite as propriedades aqui</h3>
-              <p>Clique numa tarefa do cronograma (ou num elemento 3D) para editar nome, datas e custo 5D. Também pode arrastar a barra do Gantt.</p>
+            <h3>Nenhuma tarefa selecionada</h3>
+            <p>Selecione uma tarefa no cronograma ou um elemento 3D para ver e editar as propriedades.</p>
           </div>
           <div id="inspector-body" class="inspector-body is-hidden">
-            <div id="prop-state" class="insp-status">—</div>
+            <div class="insp-hero">
+              <div id="prop-state" class="insp-status">—</div>
+            </div>
             <form id="inspector-form" class="insp-form" autocomplete="off">
-              <label class="insp-field">
-                <span>Nome</span>
-                <input id="prop-name" type="text" spellcheck="false" />
-              </label>
-              <label class="insp-field">
-                <span>Identificação</span>
-                <input id="prop-ident" type="text" spellcheck="false" placeholder="Opcional" />
-              </label>
-              <div class="insp-dates">
+              <section class="insp-section">
+                <h3 class="insp-section-title">Informações gerais</h3>
                 <label class="insp-field">
-                  <span>Início</span>
-                  <input id="prop-start" type="date" />
+                  <span>Nome</span>
+                  <input id="prop-name" type="text" spellcheck="false" />
                 </label>
                 <label class="insp-field">
-                  <span>Fim</span>
-                  <input id="prop-end" type="date" />
+                  <span>Identificação</span>
+                  <input id="prop-ident" type="text" spellcheck="false" placeholder="Opcional" />
                 </label>
-              </div>
-              <label class="insp-field">
-                <span>Custo 5D</span>
-                <input id="prop-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="IfcCostValue" />
-              </label>
+              </section>
+              <section class="insp-section">
+                <h3 class="insp-section-title">Cronograma</h3>
+                <div class="insp-dates">
+                  <label class="insp-field">
+                    <span>Início</span>
+                    <input id="prop-start" type="date" />
+                  </label>
+                  <label class="insp-field">
+                    <span>Fim</span>
+                    <input id="prop-end" type="date" />
+                  </label>
+                </div>
+                <div class="insp-readonly">
+                  <span class="insp-label">Duração</span>
+                  <span id="prop-duration" class="insp-value">—</span>
+                </div>
+              </section>
+              <section class="insp-section">
+                <h3 class="insp-section-title">Custos</h3>
+                <label class="insp-field">
+                  <span>Custo 5D</span>
+                  <input id="prop-cost" type="number" step="0.01" min="0" inputmode="decimal" placeholder="IfcCostValue" />
+                </label>
+                <div class="insp-readonly is-hidden" id="prop-cost-roll-row">
+                  <span class="insp-label">Custo com subtarefas</span>
+                  <span id="prop-cost-roll" class="insp-value">—</span>
+                </div>
+              </section>
+              <section class="insp-section">
+                <h3 class="insp-section-title">Modelo</h3>
+                <div class="insp-readonly">
+                  <span class="insp-label">Elementos 3D</span>
+                  <span id="prop-products" class="insp-value">—</span>
+                </div>
+              </section>
               <p id="prop-date-error" class="insp-error is-hidden" role="alert"></p>
-              <dl class="prop-list">
-                <div class="prop-row">
-                  <dt>Duração</dt>
-                  <dd id="prop-duration">—</dd>
-                </div>
-                <div class="prop-row is-hidden" id="prop-cost-roll-row">
-                  <dt>Custo com subtarefas</dt>
-                  <dd id="prop-cost-roll">—</dd>
-                </div>
-                <div class="prop-row">
-                  <dt>Elementos 3D</dt>
-                  <dd id="prop-products">—</dd>
-                </div>
-              </dl>
-              <p class="insp-hint">O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue (não no IfcTask). Exporte para gravar o arquivo.</p>
+              <p class="insp-hint">O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue. Exporte o IFC para persistir.</p>
             </form>
           </div>
         </aside>

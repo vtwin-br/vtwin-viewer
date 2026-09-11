@@ -48,6 +48,7 @@ export class ScheduleHighlighter {
   private currentActive = new Set<number>();
   /** LocalIds atualmente "selecionados" pelo usuario via UI. */
   private currentSelection = new Set<number>();
+  private workingGuids: string[] = [];
 
   constructor(
     model: FRAGS.FragmentsModel,
@@ -125,6 +126,12 @@ export class ScheduleHighlighter {
     await this.fragments.core.update(true);
   }
 
+  /** Mostra o modelo inteiro (sem filtro 4D) — usado no Gantt para ligar elementos. */
+  async revealAll(): Promise<void> {
+    await this.ready();
+    await this.showFullModel();
+  }
+
   private async showFullModel(): Promise<void> {
     if (this.currentActive.size > 0) {
       await this.model.resetHighlight([...this.currentActive]);
@@ -147,9 +154,64 @@ export class ScheduleHighlighter {
     }
   }
 
-  /** Destaca em azul os produtos de uma task. Substitui a selecao anterior. */
+  getModel(): FRAGS.FragmentsModel {
+    return this.model;
+  }
+
+  getWorkingGuids(): string[] {
+    return [...this.workingGuids];
+  }
+
+  async setWorkingSelection(guids: Iterable<string>): Promise<void> {
+    this.workingGuids = [...new Set(guids)];
+    await this.selectByGuids(this.workingGuids);
+  }
+
+  async toggleWorkingGuid(guid: string): Promise<string[]> {
+    const set = new Set(this.workingGuids);
+    if (set.has(guid)) set.delete(guid);
+    else set.add(guid);
+    await this.setWorkingSelection(set);
+    return this.getWorkingGuids();
+  }
+
+  async addWorkingGuids(guids: Iterable<string>): Promise<string[]> {
+    const set = new Set(this.workingGuids);
+    for (const g of guids) set.add(g);
+    await this.setWorkingSelection(set);
+    return this.getWorkingGuids();
+  }
+
+  async removeWorkingGuids(guids: Iterable<string>): Promise<string[]> {
+    const drop = new Set(guids);
+    await this.setWorkingSelection(this.workingGuids.filter((g) => !drop.has(g)));
+    return this.getWorkingGuids();
+  }
+
+  async guidsFromLocalIds(localIds: number[]): Promise<string[]> {
+    await this.ready();
+    const out: string[] = [];
+    const missing: number[] = [];
+    for (const id of localIds) {
+      const known = this.localToGuid.get(id);
+      if (known) out.push(known);
+      else missing.push(id);
+    }
+    if (missing.length) {
+      const found = await this.model.getGuidsByLocalIds(missing);
+      for (let i = 0; i < missing.length; i++) {
+        const guid = found[i];
+        if (!guid) continue;
+        this.registerGuid(guid, missing[i]);
+        out.push(guid);
+      }
+    }
+    return out;
+  }
   async selectByGuids(guids: Iterable<string>): Promise<void> {
     await this.ready();
+    await this.ensureGuidsMapped(guids);
+    this.workingGuids = [...new Set(guids)];
 
     // Limpa selecao anterior
     if (this.currentSelection.size > 0) {
@@ -174,6 +236,7 @@ export class ScheduleHighlighter {
 
   /** Limpa selecao ativa. */
   async clearSelection(): Promise<void> {
+    this.workingGuids = [];
     if (this.currentSelection.size === 0) return;
     const prev = [...this.currentSelection];
     this.currentSelection.clear();
@@ -186,14 +249,23 @@ export class ScheduleHighlighter {
   }
 
   /**
-   * Raycast no clique do rato. Devolve o GlobalId do produto atingido,
-   * ou null se o clique não acertar geometria do cronograma.
+   * Raycast no clique. Devolve o GlobalId do produto atingido (qualquer geometria
+   * do modelo, não só a já ligada ao cronograma).
    */
   async pickGuid(
     camera: THREE.Camera,
     event: PointerEvent | MouseEvent,
     dom: HTMLElement,
   ): Promise<string | null> {
+    const hit = await this.pickHit(camera, event, dom);
+    return hit?.guid ?? null;
+  }
+
+  async pickHit(
+    camera: THREE.Camera,
+    event: PointerEvent | MouseEvent,
+    dom: HTMLElement,
+  ): Promise<{ guid: string; localId: number } | null> {
     await this.ready();
     const mouse = new THREE.Vector2(event.clientX, event.clientY);
     const result = await this.model.raycast({
@@ -202,14 +274,52 @@ export class ScheduleHighlighter {
       dom: dom as HTMLCanvasElement,
     });
     if (!result) return null;
-    const known = this.localToGuid.get(result.localId);
-    if (known) return known;
-    const getter = this.model as unknown as {
-      getGuidsByLocalIds?: (ids: number[]) => Promise<(string | null | undefined)[]>;
-    };
-    if (typeof getter.getGuidsByLocalIds === "function") {
-      const guids = await getter.getGuidsByLocalIds([result.localId]);
-      return guids?.[0] ?? null;
+    const localId = result.localId;
+    const known = this.localToGuid.get(localId);
+    if (known) return { guid: known, localId };
+    const fromIndex = await this.model.getGuidsByLocalIds([localId]);
+    let guid = fromIndex?.[0] ?? null;
+    if (!guid) guid = await this.guidFromItemData(localId);
+    if (!guid) return null;
+    this.registerGuid(guid, localId);
+    return { guid, localId };
+  }
+
+  localIdOf(guid: string): number | undefined {
+    return this.guidToLocal.get(guid);
+  }
+
+  /** Passa a conhecer um GUID que ainda não estava no cronograma (associação nova). */
+  registerGuid(guid: string, localId: number): void {
+    this.guidToLocal.set(guid, localId);
+    this.localToGuid.set(localId, guid);
+  }
+
+  private async ensureGuidsMapped(guids: Iterable<string>): Promise<void> {
+    const missing = [...new Set(guids)].filter((g) => !this.guidToLocal.has(g));
+    if (missing.length === 0) return;
+    const locals = await this.model.getLocalIdsByGuids(missing);
+    for (let i = 0; i < missing.length; i++) {
+      const local = locals[i];
+      if (typeof local === "number") this.registerGuid(missing[i], local);
+    }
+  }
+
+  private async guidFromItemData(localId: number): Promise<string | null> {
+    try {
+      const rows = await this.model.getItemsData([localId], {
+        attributesDefault: false,
+        attributes: ["GlobalId"],
+        relationsDefault: { attributes: false, relations: false },
+      });
+      const raw = rows[0]?.GlobalId;
+      if (typeof raw === "string" && raw) return raw;
+      if (raw && typeof raw === "object" && "value" in raw) {
+        const v = (raw as { value: unknown }).value;
+        return typeof v === "string" && v ? v : null;
+      }
+    } catch {
+      return null;
     }
     return null;
   }

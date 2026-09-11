@@ -1,8 +1,27 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import { TilesRenderer } from "3d-tiles-renderer";
-import { GoogleCloudAuthPlugin } from "3d-tiles-renderer/plugins";
+import {
+  GoogleCloudAuthPlugin,
+  TileCompressionPlugin,
+  TilesFadePlugin,
+  UpdateOnChangePlugin,
+} from "3d-tiles-renderer/plugins";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
+import { hasStoredSiteElevation } from "../ifc/georef";
+
+/** 1 GiB em bytes — orçamento do LRU dos Photorealistic 3D Tiles. */
+const GIB = 2 ** 30;
+
+/**
+ * SSE (px) em repouso. Valores menores = mais detalhe. O plugin Google recomenda 20;
+ * perto do modelo baixamos para 14 para o LOD alto “grudar” como no Google Maps.
+ */
+const ERROR_STREET = 14;
+const ERROR_BLOCK = 18;
+const ERROR_CITY = 22;
+const ERROR_SNAP = 12;
+const ERROR_TELEPORT = 28;
 
 /** Latitude/longitude/altitude (graus, graus, metros sobre o elipsoide WGS84). */
 export interface AnchorLLA {
@@ -54,10 +73,19 @@ export class GoogleEarthLayer {
   private readonly rayDir = new THREE.Vector3(0, -1, 0);
   private readonly ecefHit = new THREE.Vector3();
   private readonly cartHit = { lat: 0, lon: 0, height: 0 };
-  private snapErrorTarget: number | null = null;
   private sky: Sky | null = null;
   private prevBackground: THREE.Color | THREE.Texture | null = null;
   private _enabled = false;
+  private walkQuality = false;
+  private smoothedError = ERROR_BLOCK;
+  private lastCamPos = new THREE.Vector3();
+  private lastCamQuat = new THREE.Quaternion();
+  private lastCamT = 0;
+  private lastResW = 0;
+  private lastResH = 0;
+  private prevPixelRatio: number | null = null;
+  private prevSortObjects: boolean | null = null;
+  private sseSettling = false;
 
   constructor(world: OBC.World, opts: EarthTilesOptions) {
     this.world = world;
@@ -83,7 +111,7 @@ export class GoogleEarthLayer {
     else this.detach();
   }
 
-  /** Reposiciona o anchor. Por omissão volta a assentar os tiles no terreno. */
+  /** Reposiciona o anchor. Por omissão só assenta se lat/lon mudaram. */
   setAnchor(anchor: AnchorLLA, opts?: { snap?: boolean }): void {
     const prev = this.opts.anchor;
     const moved =
@@ -98,10 +126,7 @@ export class GoogleEarthLayer {
     this.snapPending = true;
     this.snapStarted = performance.now();
     this.snapUntil = this.snapStarted + 45000;
-    if (this.tiles && this.snapErrorTarget == null) {
-      this.snapErrorTarget = this.tiles.errorTarget;
-      this.tiles.errorTarget = Math.min(this.tiles.errorTarget, 12);
-    }
+    if (this.tiles) this.tiles.errorTarget = ERROR_SNAP;
     this.tryTerrainSnap();
   }
 
@@ -130,6 +155,7 @@ export class GoogleEarthLayer {
     const ndir = dir.lengthSq() > 0 ? dir.clone().normalize() : dir;
     this.raycaster.near = 0;
     this.raycaster.far = far;
+    this.raycaster.firstHitOnly = true;
     this.raycaster.set(origin, ndir);
     const found = this.raycaster.intersectObject(this.tiles.group, true);
     for (const h of found) {
@@ -142,8 +168,11 @@ export class GoogleEarthLayer {
 
   /** Mais detalhe nos tiles quando se anda (melhor hitbox no chão). */
   setWalkQuality(on: boolean): void {
-    if (!this.tiles) return;
-    this.tiles.errorTarget = on ? 16 : 32;
+    this.walkQuality = on;
+    if (this.tiles && !this.snapPending) {
+      this.smoothedError = on ? ERROR_STREET : ERROR_BLOCK;
+      this.tiles.errorTarget = this.smoothedError;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -160,30 +189,59 @@ export class GoogleEarthLayer {
         autoRefreshToken: true,
       }),
     );
+    // Menos VRAM (sem mipmaps) e índices compactos — sem comprimir posições
+    // (artefactos visíveis na malha fotorrealista).
+    tiles.registerPlugin(
+      new TileCompressionPlugin({
+        disableMipmaps: true,
+        compressIndex: true,
+        compressPosition: false,
+        compressNormals: false,
+        compressUvs: false,
+      }),
+    );
+    tiles.registerPlugin({
+      name: "UNLIT_GOOGLE_TILES",
+      priority: -50,
+      processTileModel(scene: THREE.Object3D) {
+        makeTilesUnlit(scene);
+      },
+      doTilesNeedUpdate: () => this.snapPending || this.sseSettling,
+    });
+    tiles.registerPlugin(new TilesFadePlugin({ fadeDuration: 180, maximumFadeOutTiles: 40 }));
+    tiles.registerPlugin(new UpdateOnChangePlugin());
 
     // ---- Tuning de performance --------------------------------------------
-    // Estes valores aplicam-se DEPOIS do plugin Google (que sobrepoe o
-    // errorTarget para 20). Subir o errorTarget perde algum detalhe mas
-    // reduz drasticamente o numero de tiles a baixar / desenhar.
-    tiles.errorTarget = 32;
-    tiles.downloadQueue.maxJobs = 10; // HTTP/2 paraleliza bem ate ~10
-    tiles.parseQueue.maxJobs = 4;
-    // Cache mais generoso para nao reciclar tiles em panoramicas pequenas.
-    tiles.lruCache.minSize = 600;
-    tiles.lruCache.maxSize = 1200;
+    // O plugin Google põe errorTarget=20. Perto do modelo usamos 14 para o
+    // LOD alto ficar estável; o LRU grande evita descarregar a malha ao orbitar.
+    this.smoothedError = ERROR_BLOCK;
+    tiles.errorTarget = ERROR_BLOCK;
+    tiles.downloadQueue.maxJobs = 12;
+    tiles.parseQueue.maxJobs = 3;
+    tiles.processNodeQueue.maxJobs = 12;
+    tiles.maxTilesProcessed = 120;
+    // Defaults da lib: 6000/8000 tiles e ~0.3–0.4 GiB. O cache anterior
+    // (600/1200) despejava tiles a cada pan — parecia “recarregar o LOD”.
+    tiles.lruCache.minSize = 2800;
+    tiles.lruCache.maxSize = 5500;
+    tiles.lruCache.minBytesSize = 0.55 * GIB;
+    tiles.lruCache.maxBytesSize = 0.95 * GIB;
+    tiles.lruCache.unloadPercent = 0.04;
 
-    // Camera ativa do OrthoPerspectiveCamera
     const activeCam = (cam as any).three as THREE.Camera;
     tiles.setCamera(activeCam);
     tiles.setResolutionFromRenderer(activeCam, renderer);
+    this.lastResW = renderer.domElement.clientWidth;
+    this.lastResH = renderer.domElement.clientHeight;
+    this.lastCamPos.copy(activeCam.position);
+    this.lastCamQuat.copy(activeCam.quaternion);
+    this.lastCamT = performance.now();
 
-    // Adiciona ao mesmo grafo de cena
     scene.add(tiles.group);
     this.tiles = tiles;
 
-    // Ceu procedural (Hosek-Wilkie). Sem isto o fundo continua a cor da app
-    // e a malha do Google fica "flutuando" no nada, sem horizonte.
     this.installSky();
+    this.applyRendererBudget(true);
 
     this.applyAnchorTransform();
     this.refreshClipBox();
@@ -196,11 +254,10 @@ export class GoogleEarthLayer {
     tiles.addEventListener("load-model", onLoadModel);
     this.loadModelUnsub = () => tiles.removeEventListener("load-model", onLoadModel);
 
-    this.requestTerrainSnap();
+    if (!hasStoredSiteElevation(this.opts.anchor.altitude)) {
+      this.requestTerrainSnap();
+    }
 
-    // Update por frame. Mantemos a camera ativa do TilesRenderer sincronizada com
-    // a do viewer (perspectiva <-> ortografica), pois o OrthoPerspectiveCamera
-    // troca a referencia interna sem emitir evento.
     let lastCamRef: THREE.Camera = activeCam;
     const updateFn = () => {
       if (!this.tiles) return;
@@ -209,8 +266,17 @@ export class GoogleEarthLayer {
         for (const oldCam of [...this.tiles.cameras]) this.tiles.deleteCamera(oldCam);
         this.tiles.setCamera(c);
         lastCamRef = c;
+        this.lastCamPos.copy(c.position);
+        this.lastCamQuat.copy(c.quaternion);
       }
-      this.tiles.setResolutionFromRenderer(c, renderer);
+      const w = renderer.domElement.clientWidth;
+      const h = renderer.domElement.clientHeight;
+      if (w !== this.lastResW || h !== this.lastResH) {
+        this.lastResW = w;
+        this.lastResH = h;
+        this.tiles.setResolution(c, w, h);
+      }
+      this.updateAdaptiveError(c, performance.now());
       this.tiles.update();
       if (this.snapPending) this.tryTerrainSnap();
     };
@@ -227,7 +293,6 @@ export class GoogleEarthLayer {
     this.loadModelUnsub?.();
     this.loadModelUnsub = null;
     this.snapPending = false;
-    this.restoreSnapErrorTarget();
 
     this.world.scene.three.remove(this.tiles.group);
     if (this.clipBox) {
@@ -237,8 +302,10 @@ export class GoogleEarthLayer {
       this.clipBox = null;
     }
     this.uninstallSky();
+    this.applyRendererBudget(false);
     this.tiles.dispose();
     this.tiles = null;
+    this.walkQuality = false;
     this._enabled = false;
   }
 
@@ -327,16 +394,65 @@ export class GoogleEarthLayer {
 
   private finishSnap(ok: boolean): void {
     this.snapPending = false;
-    this.restoreSnapErrorTarget();
     if (ok) this.opts.onTerrainSnap?.(this.opts.anchor.altitude);
     else this.opts.onTerrainSnapFail?.();
   }
 
-  private restoreSnapErrorTarget(): void {
-    if (this.tiles && this.snapErrorTarget != null) {
-      this.tiles.errorTarget = this.snapErrorTarget;
+  /**
+   * SSE adaptativo: mais detalhe quando a câmara está perto (como o Maps ao
+   * aproximar). Só sobe o erro após um salto grande de câmara, para não
+   * despejar o LOD alto a cada órbita.
+   */
+  private updateAdaptiveError(camera: THREE.Camera, now: number): void {
+    if (!this.tiles) return;
+    if (this.snapPending) {
+      this.smoothedError = ERROR_SNAP;
+      this.tiles.errorTarget = ERROR_SNAP;
+      this.sseSettling = true;
+      this.lastCamPos.copy(camera.position);
+      this.lastCamQuat.copy(camera.quaternion);
+      this.lastCamT = now;
+      return;
     }
-    this.snapErrorTarget = null;
+
+    const dt = Math.max(1 / 120, (now - this.lastCamT) / 1000);
+    const jump = camera.position.distanceTo(this.lastCamPos);
+    this.lastCamPos.copy(camera.position);
+    this.lastCamQuat.copy(camera.quaternion);
+    this.lastCamT = now;
+
+    const dist = camera.position.distanceTo(this.clipCenter);
+    let rest = ERROR_CITY;
+    if (this.walkQuality || dist < 90) rest = ERROR_STREET;
+    else if (dist < 280) rest = ERROR_BLOCK;
+
+    const teleported = jump > 80 && jump / dt > 120;
+    const target = teleported ? Math.max(rest, ERROR_TELEPORT) : rest;
+    const k = target > this.smoothedError ? 6 : 2.2;
+    this.smoothedError += (target - this.smoothedError) * Math.min(1, dt * k);
+    this.tiles.errorTarget = this.smoothedError;
+    this.sseSettling = teleported || Math.abs(this.smoothedError - target) > 0.2;
+  }
+
+  private applyRendererBudget(on: boolean): void {
+    const gl = this.world.renderer?.three;
+    if (!gl) return;
+    if (on) {
+      this.prevPixelRatio = gl.getPixelRatio();
+      this.prevSortObjects = gl.sortObjects;
+      const cap = Math.min(window.devicePixelRatio || 1, 1.15);
+      if (this.prevPixelRatio > cap) gl.setPixelRatio(cap);
+      gl.sortObjects = false;
+      return;
+    }
+    if (this.prevPixelRatio != null) {
+      gl.setPixelRatio(this.prevPixelRatio);
+      this.prevPixelRatio = null;
+    }
+    if (this.prevSortObjects != null) {
+      gl.sortObjects = this.prevSortObjects;
+      this.prevSortObjects = null;
+    }
   }
 
   /**
@@ -467,4 +583,41 @@ function makeRadialFadeTexture(): THREE.Texture {
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.needsUpdate = true;
   return tex;
+}
+
+/**
+ * As texturas do Google Photorealistic 3D Tiles já vêm com iluminação baked.
+ * MeshStandardMaterial em centenas de tiles mata o FPS; MeshBasicMaterial
+ * fica visualmente próximo do Maps e é muito mais barato.
+ */
+function makeTilesUnlit(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    mesh.matrixAutoUpdate = false;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    const next = mats.map(toUnlitMaterial);
+    mesh.material = Array.isArray(mesh.material) ? next : next[0]!;
+  });
+}
+
+function toUnlitMaterial(mat: THREE.Material): THREE.Material {
+  const std = mat as THREE.MeshStandardMaterial;
+  if (!std.isMeshStandardMaterial && !(mat as THREE.MeshPhysicalMaterial).isMeshPhysicalMaterial) {
+    return mat;
+  }
+  const basic = new THREE.MeshBasicMaterial();
+  basic.map = std.map;
+  basic.color.copy(std.color);
+  basic.vertexColors = std.vertexColors;
+  basic.transparent = std.transparent;
+  basic.opacity = std.opacity;
+  basic.alphaTest = std.alphaTest;
+  basic.side = std.side;
+  basic.fog = false;
+  basic.toneMapped = false;
+  std.dispose();
+  return basic;
 }

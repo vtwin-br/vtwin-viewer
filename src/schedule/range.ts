@@ -34,6 +34,34 @@ export function recomputeScheduleRange(schedule: ScheduleData): void {
   schedule.leafTaskCount = leafTaskCount;
 }
 
+/** GUIDs próprios da tarefa + membros dos IfcGroup ligados. */
+export function ownAndGroupGuids(schedule: ScheduleData, t: Task): string[] {
+  const set = new Set<string>(t.productGuids);
+  if (!t.groupIds?.length || !schedule.groups?.length) return [...set];
+  const byId = new Map(schedule.groups.map((g) => [g.id, g]));
+  for (const gid of t.groupIds) {
+    const group = byId.get(gid);
+    if (!group) continue;
+    for (const guid of group.productGuids) set.add(guid);
+  }
+  return [...set];
+}
+
+/** Recalcula GUIDs agregados (tarefa + conjuntos + descendentes) após ligar/desligar produtos. */
+export function recomputeProductGuidsByTask(schedule: ScheduleData): void {
+  const walk = (t: Task): string[] => {
+    const set = new Set<string>(ownAndGroupGuids(schedule, t));
+    for (const c of t.children) {
+      for (const g of walk(c)) set.add(g);
+    }
+    const all = [...set];
+    schedule.productGuidsByTask.set(t.id, all);
+    return all;
+  };
+  schedule.productGuidsByTask.clear();
+  for (const r of schedule.roots) walk(r);
+}
+
 /** Cronograma vazio para a UI antes de importar um IFC. */
 export function emptySchedule(): ScheduleData {
   const minDate = new Date();
@@ -42,9 +70,11 @@ export function emptySchedule(): ScheduleData {
   maxDate.setDate(maxDate.getDate() + 30);
   return {
     name: "—",
+    documents: [],
     roots: [],
     byId: new Map(),
     productGuidsByTask: new Map(),
+    groups: [],
     minDate,
     maxDate,
     leafTaskCount: 0,

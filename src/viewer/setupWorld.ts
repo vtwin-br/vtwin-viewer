@@ -32,6 +32,7 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
     // sem perder precisao de profundidade no IFC (que esta perto da camara).
     logarithmicDepthBuffer: true,
     antialias: true,
+    powerPreference: "high-performance",
   });
   world.camera = new OBC.OrthoPerspectiveCamera(components);
   world.scene.setup();

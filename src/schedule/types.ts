@@ -23,10 +23,12 @@ export interface Task {
   predefinedType?: string;
   /** Subtarefas (via IfcRelNests). */
   children: Task[];
-  /** ExpressIDs de IfcProduct associados (via IfcRelAssignsToProcess). */
+  /** ExpressIDs de IfcProduct associados (via IfcRelAssignsToProduct / ToProcess). */
   productIds: number[];
   /** GlobalIds dos produtos associados. */
   productGuids: string[];
+  /** ExpressIDs de IfcGroup (conjuntos 4D) ligados a esta tarefa. */
+  groupIds: number[];
   /**
    * Custo próprio 5D (IfcCostValue.AppliedValue do IfcCostItem ligado à tarefa).
    * Não inclui subtarefas — use treeCost() para o acumulado da hierarquia.
@@ -38,17 +40,51 @@ export interface Task {
   costValueId?: number;
   /** True se o IfcCostItem tem várias IfcCostValue (edição grava um total Category '*'). */
   costIsBreakdown?: boolean;
+  /** Predecessores (IfcRelSequence). */
+  predecessors: Array<{ taskId: number; type: "FS" | "SS" | "FF" | "SF" }>;
+}
+
+/** ObjectType gravado nos IfcGroup criados por esta app (selection sets 4D). */
+export const VISTA4D_SET_TYPE = "VISTA4D_SET";
+
+/** Conjunto nomeado de elementos 3D — IfcGroup + IfcRelAssignsToGroup. */
+export interface SelectionGroup {
+  /** ExpressID do IfcGroup. */
+  id: number;
+  globalId: string;
+  name: string;
+  objectType: string;
+  productIds: number[];
+  productGuids: string[];
+  /** IfcTask ligadas via IfcRelAssignsToProcess. */
+  taskIds: number[];
+  /** ExpressID de IfcRelAssignsToGroup, se já existir no ficheiro. */
+  assignRelId?: number;
+}
+
+/** Documento externo ou interno associado via IfcRelAssociatesDocument. */
+export interface IfcAssociatedDocument {
+  name: string;
+  identification?: string;
+  location?: string;
+  description?: string;
 }
 
 export interface ScheduleData {
-  /** Nome da IfcWorkSchedule (ou WorkPlan). */
+  /** Nome da IfcWorkSchedule. */
   name: string;
+  /** Nome da IfcWorkPlan, se existir. */
+  workPlanName?: string;
+  /** IfcDocumentReference / IfcDocumentInformation ligados ao projeto ou ao cronograma. */
+  documents: IfcAssociatedDocument[];
   /** Tarefas raiz. */
   roots: Task[];
   /** Mapa de id (expressID do IfcTask) -> Task. */
   byId: Map<number, Task>;
-  /** Mapa task.id -> GUIDs dos produtos associados (recursivamente, incluindo filhos). */
+  /** Mapa task.id -> GUIDs dos produtos associados (recursivamente, incluindo filhos e conjuntos). */
   productGuidsByTask: Map<number, string[]>;
+  /** Conjuntos 4D nativos (IfcGroup). */
+  groups: SelectionGroup[];
   /** Range global do cronograma. */
   minDate: Date;
   maxDate: Date;

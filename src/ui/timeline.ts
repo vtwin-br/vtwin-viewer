@@ -23,6 +23,7 @@ const ICON_PLAY = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="tru
 const ICON_PAUSE = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><rect x="7" y="6" width="3.4" height="12" rx="0.8"/><rect x="13.6" y="6" width="3.4" height="12" rx="0.8"/></svg>`;
 const ICON_NEXT = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M2.2 6.1v11.8L11.6 12 2.2 6.1z"/><path d="M12.4 6.1v11.8L21.8 12 12.4 6.1z"/></svg>`;
 const ICON_END = `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M5 6.1v11.8L15 12 5 6.1z"/><rect x="16.8" y="6" width="2.2" height="12" rx="0.5"/></svg>`;
+const ICON_MORE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>`;
 
 export class TimelineUI {
   private opts: TimelineOptions;
@@ -119,24 +120,18 @@ export class TimelineUI {
   private build() {
     const root = this.opts.container;
     root.innerHTML = "";
+    this.speedBtns = [];
 
-    const meta = document.createElement("div");
-    meta.className = "t-meta";
-
+    const date = document.createElement("div");
+    date.className = "t-date";
     this.nowLabel = document.createElement("span");
     this.nowLabel.className = "t-now";
-
     this.dayCounter = document.createElement("span");
     this.dayCounter.className = "t-counter";
-
-    meta.append(this.nowLabel, this.dayCounter);
-
-    const transport = document.createElement("div");
-    transport.className = "t-transport";
+    date.append(this.nowLabel, this.dayCounter);
 
     const controls = document.createElement("div");
     controls.className = "timeline-controls";
-
     const btnStart = makeBtn(ICON_START, "Início da obra", () => this.jumpToStart());
     const btnPrev = makeBtn(ICON_PREV, "Recuar 7 dias", () => this.nudgeDays(-7));
     this.playBtn = makeBtn(ICON_PLAY, "Reproduzir", () => this.togglePlay(), "primary");
@@ -147,7 +142,6 @@ export class TimelineUI {
 
     const sliderWrap = document.createElement("div");
     sliderWrap.className = "t-slider-wrap";
-
     this.slider = document.createElement("input");
     this.slider.type = "range";
     this.slider.className = "t-slider";
@@ -159,7 +153,6 @@ export class TimelineUI {
     this.slider.addEventListener("input", () => {
       this.seek(Number(this.slider.value));
     });
-
     const labels = document.createElement("div");
     labels.className = "t-range-labels";
     this.rangeStartLabel = document.createElement("span");
@@ -167,25 +160,24 @@ export class TimelineUI {
     this.rangeEndLabel = document.createElement("span");
     this.rangeEndLabel.textContent = fmtDate(new Date(this.endMs));
     labels.append(this.rangeStartLabel, this.rangeEndLabel);
-
     sliderWrap.append(this.slider, labels);
 
     const speedWrap = document.createElement("div");
     speedWrap.className = "t-speed";
     const speedLabel = document.createElement("span");
     speedLabel.className = "t-speed-label";
-    speedLabel.textContent = "Vel.";
+    speedLabel.textContent = "Dias / s";
     const seg = document.createElement("div");
     seg.className = "t-speed-seg";
     seg.setAttribute("role", "group");
-    seg.setAttribute("aria-label", "Velocidade da simulação");
-
+    seg.setAttribute("aria-label", "Velocidade da simulação em dias por segundo");
     for (const s of SPEEDS) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.className = "t-speed-btn" + (s.daysPerSec === this.speedDpS ? " is-active" : "");
       btn.textContent = s.label;
       btn.title = s.title;
+      btn.setAttribute("aria-label", s.title);
       btn.setAttribute("aria-pressed", s.daysPerSec === this.speedDpS ? "true" : "false");
       btn.addEventListener("click", () => this.setSpeed(s.daysPerSec));
       this.speedBtns.push(btn);
@@ -193,8 +185,27 @@ export class TimelineUI {
     }
     speedWrap.append(speedLabel, seg);
 
-    transport.append(controls, sliderWrap, speedWrap);
-    root.append(meta, transport);
+    const more = document.createElement("div");
+    more.className = "t-more";
+    const moreBtn = makeBtn(ICON_MORE, "Velocidade da simulação", () => {
+      more.classList.toggle("is-open");
+    });
+    moreBtn.classList.add("t-more-btn");
+    moreBtn.setAttribute("aria-haspopup", "true");
+    more.append(moreBtn, speedWrap);
+
+    const top = document.createElement("div");
+    top.className = "t-top";
+    top.append(date, controls);
+
+    const bottom = document.createElement("div");
+    bottom.className = "t-bottom";
+    bottom.append(sliderWrap, more);
+
+    root.append(top, bottom);
+    document.addEventListener("pointerdown", (e) => {
+      if (!more.contains(e.target as Node)) more.classList.remove("is-open");
+    });
   }
 
   private setSpeed(daysPerSec: number) {

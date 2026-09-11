@@ -58,6 +58,14 @@ export function extraIsIdentity(t: ModelExtraTransform, eps = 1e-6): boolean {
   return Math.abs(t.x) < eps && Math.abs(t.y) < eps && Math.abs(t.z) < eps && Math.abs(t.yaw) < eps;
 }
 
+/**
+ * Cota gravada em IfcSite.RefElevation / IfcMapConversion.OrthogonalHeight.
+ * `0` (e quase-zero) é o default STEP de muitos IFCs e não serve como elipsoide.
+ */
+export function hasStoredSiteElevation(elevation?: number): boolean {
+  return elevation != null && Number.isFinite(elevation) && Math.abs(elevation) >= 0.5;
+}
+
 export function extractGeoref(ifcApi: WebIFC.IfcAPI, modelId: number): IfcGeoref {
   const georef: IfcGeoref = { source: "none", heading: 0 };
 
@@ -89,7 +97,7 @@ export function extractGeoref(ifcApi: WebIFC.IfcAPI, modelId: number): IfcGeoref
     if (map.xAbs != null && map.xOrd != null) {
       georef.heading = Math.atan2(map.xOrd, map.xAbs);
     }
-    if (map.height != null) georef.elevation = map.height;
+    if (map.height != null && hasStoredSiteElevation(map.height)) georef.elevation = map.height;
     const ll = projectedToWgs84(map.eastings, map.northings, map.crsName, map.mapZone);
     if (ll) {
       georef.lat = ll.lat;
@@ -113,7 +121,7 @@ export function extractGeoref(ifcApi: WebIFC.IfcAPI, modelId: number): IfcGeoref
         georef.source = "ifc-site";
       }
     }
-    if (elev != null && georef.elevation == null) georef.elevation = elev;
+    if (elev != null && !hasStoredSiteElevation(georef.elevation)) georef.elevation = elev;
     georef.placement = readPlacement(ifcApi, modelId, ref(site?.ObjectPlacement));
   }
 

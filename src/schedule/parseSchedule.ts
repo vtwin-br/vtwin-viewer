@@ -1,6 +1,6 @@
 import * as WebIFC from "web-ifc";
 import { extractGeoref } from "../ifc/georef";
-import type { ScheduleData, Task } from "./types";
+import { VISTA4D_SET_TYPE, type ScheduleData, type SelectionGroup, type Task } from "./types";
 
 /**
  * Le o IFC com web-ifc (instancia dedicada) e extrai a estrutura de cronograma:
@@ -8,7 +8,8 @@ import type { ScheduleData, Task } from "./types";
  *  - IfcWorkSchedule (raiz 4D)
  *  - IfcTask  +  IfcRelNests  ->  hierarquia
  *  - IfcTaskTime  ->  ScheduleStart / ScheduleFinish
- *  - IfcRelAssignsToProcess  ->  task -> produtos 3D
+ *  - IfcRelAssignsToProcess  ->  task -> produtos 3D / IfcGroup
+ *  - IfcGroup + IfcRelAssignsToGroup  ->  conjuntos 4D (selection sets)
  *  - IfcCostSchedule / IfcCostItem / IfcCostValue  ->  5D
  *  - IfcRelAssignsToControl  ->  IfcCostItem <-> IfcTask (ou produto)
  *
@@ -70,6 +71,8 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
       children: [],
       productIds: [],
       productGuids: [],
+      groupIds: [],
+      predecessors: [],
     });
   }
 
@@ -100,7 +103,27 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     }
   }
 
-  // Tambem alguns exporters usam IfcRelAggregates para a raiz - vamos ignorar por enquanto.
+  // Bonsai / IFC4: a raiz do cronograma liga-se à IfcWorkSchedule por IfcRelAssignsToControl
+  // (RelatingControl = schedule, RelatedObjects = IfcTask), não só por IfcRelNests.
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOCONTROL)) {
+    const rel = ifcApi.GetLine(modelId, id) as any;
+    const control = ref(rel?.RelatingControl);
+    if (control == null || control !== workScheduleId) continue;
+    for (const rid of refs(rel?.RelatedObjects)) {
+      if (allTasks.has(rid)) scheduleChildIds.add(rid);
+    }
+  }
+
+  // IfcRelSequence: RelatingProcess = predecessor, RelatedProcess = sucessor
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELSEQUENCE)) {
+    const rel = ifcApi.GetLine(modelId, id) as any;
+    const predId = ref(rel?.RelatingProcess);
+    const succId = ref(rel?.RelatedProcess);
+    if (predId == null || succId == null) continue;
+    const succ = allTasks.get(succId);
+    if (!succ || !allTasks.has(predId)) continue;
+    succ.predecessors.push({ taskId: predId, type: sequenceType(enumStr(rel?.SequenceType)) });
+  }
 
   // ---------- 5) Task -> Produtos ----------
   // No padrao Bonsai (IfcOpenShell), a relacao 4D usada eh IfcRelAssignsToProduct
@@ -146,7 +169,9 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     }
   }
 
-  // (b) IfcRelAssignsToProcess (forma padrao, caso o IFC tambem tenha)
+  const groups = extractSelectionGroups(ifcApi, modelId, allTasks);
+
+  // (b) IfcRelAssignsToProcess (forma padrao: process -> products OU IfcGroup)
   for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOPROCESS)) {
     const rel = ifcApi.GetLine(modelId, id) as any;
     const taskId = ref(rel?.RelatingProcess);
@@ -154,7 +179,16 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     const objIds = arr(rel?.RelatedObjects)
       .map(ref)
       .filter((x): x is number => x != null);
-    for (const oid of objIds) linkProductToTask(taskId, oid);
+    const task = allTasks.get(taskId);
+    for (const oid of objIds) {
+      const group = groups.find((g) => g.id === oid);
+      if (group && task) {
+        if (!task.groupIds.includes(oid)) task.groupIds.push(oid);
+        if (!group.taskIds.includes(taskId)) group.taskIds.push(taskId);
+        continue;
+      }
+      linkProductToTask(taskId, oid);
+    }
   }
 
   // Deduplica produtos por task (pode haver overlap entre as duas relacoes)
@@ -194,8 +228,14 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
   let maxTime = Number.NEGATIVE_INFINITY;
   let leafTaskCount = 0;
 
+  const groupById = new Map(groups.map((g) => [g.id, g]));
   const aggregateGuids = (t: Task): string[] => {
     const set = new Set<string>(t.productGuids);
+    for (const gid of t.groupIds) {
+      const group = groupById.get(gid);
+      if (!group) continue;
+      for (const guid of group.productGuids) set.add(guid);
+    }
     for (const c of t.children) {
       for (const g of aggregateGuids(c)) set.add(g);
     }
@@ -222,11 +262,17 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     maxTime = now + 30 * 24 * 3600 * 1000;
   }
 
+  const workPlanName = firstWorkPlanName(ifcApi, modelId);
+  const documents = extractDocuments(ifcApi, modelId);
+
   return {
     name: scheduleName,
+    workPlanName,
+    documents,
     roots,
     byId: allTasks,
     productGuidsByTask,
+    groups,
     minDate: new Date(minTime),
     maxDate: new Date(maxTime),
     leafTaskCount,
@@ -234,6 +280,125 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     currency,
     georef: extractGeoref(ifcApi, modelId),
   };
+}
+
+function extractSelectionGroups(
+  ifcApi: WebIFC.IfcAPI,
+  modelId: number,
+  allTasks: Map<number, Task>,
+): SelectionGroup[] {
+  const groups = new Map<number, SelectionGroup>();
+  const takeGroup = (id: number, raw: any) => {
+    if (groups.has(id)) return;
+    const objectType = str(raw?.ObjectType) ?? "";
+    groups.set(id, {
+      id,
+      globalId: str(raw?.GlobalId) ?? "",
+      name: str(raw?.Name) ?? "(sem nome)",
+      objectType,
+      productIds: [],
+      productGuids: [],
+      taskIds: [],
+    });
+  };
+
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCGROUP)) {
+    let raw: any;
+    try {
+      raw = ifcApi.GetLine(modelId, id);
+    } catch {
+      continue;
+    }
+    takeGroup(id, raw);
+  }
+
+  for (const id of idsOfType(ifcApi, modelId, WebIFC.IFCRELASSIGNSTOGROUP)) {
+    const rel = ifcApi.GetLine(modelId, id) as any;
+    const groupId = ref(rel?.RelatingGroup);
+    if (groupId == null) continue;
+    if (!groups.has(groupId)) {
+      try {
+        takeGroup(groupId, ifcApi.GetLine(modelId, groupId));
+      } catch {
+        continue;
+      }
+    }
+    const group = groups.get(groupId);
+    if (!group) continue;
+    group.assignRelId = id;
+    for (const pid of refs(rel?.RelatedObjects)) {
+      if (allTasks.has(pid) || groups.has(pid)) continue;
+      let obj: any;
+      try {
+        obj = ifcApi.GetLine(modelId, pid);
+      } catch {
+        continue;
+      }
+      const guid = str(obj?.GlobalId);
+      if (!guid) continue;
+      if (obj?.ObjectPlacement === undefined && obj?.Representation === undefined) continue;
+      if (group.productIds.includes(pid)) continue;
+      group.productIds.push(pid);
+      group.productGuids.push(guid);
+    }
+  }
+
+  const out: SelectionGroup[] = [];
+  for (const g of groups.values()) {
+    const ours = g.objectType === VISTA4D_SET_TYPE;
+    if (!ours && g.productGuids.length === 0) continue;
+    out.push(g);
+  }
+  return out;
+}
+
+function sequenceType(raw?: string): "FS" | "SS" | "FF" | "SF" {
+  const s = (raw || "").toUpperCase().replace(/\./g, "");
+  if (s.includes("START_START") || s === "SS") return "SS";
+  if (s.includes("FINISH_FINISH") || s === "FF") return "FF";
+  if (s.includes("START_FINISH") || s === "SF") return "SF";
+  return "FS";
+}
+
+function firstWorkPlanName(ifcApi: WebIFC.IfcAPI, modelId: number): string | undefined {
+  const ids = idsOfType(ifcApi, modelId, WebIFC.IFCWORKPLAN);
+  if (!ids.length) return undefined;
+  const raw = ifcApi.GetLine(modelId, ids[0]) as any;
+  return str(raw?.Name) ?? str(raw?.LongName);
+}
+
+function extractDocuments(ifcApi: WebIFC.IfcAPI, modelId: number): import("./types").IfcAssociatedDocument[] {
+  const out: import("./types").IfcAssociatedDocument[] = [];
+  const seen = new Set<string>();
+
+  const push = (raw: any) => {
+    const name = str(raw?.Name) ?? str(raw?.Identification) ?? "";
+    const identification = str(raw?.Identification);
+    const location = str(raw?.Location) ?? str(raw?.ItemReference);
+    const description = str(raw?.Description) ?? str(raw?.Purpose);
+    const key = `${name}|${location ?? ""}|${identification ?? ""}`;
+    if (seen.has(key)) return;
+    const untitled = !name || /^untitled$/i.test(name) || name === "A01";
+    if (untitled && !location) return;
+    seen.add(key);
+    out.push({
+      name: name || location || "Documento IFC",
+      identification,
+      location,
+      description,
+    });
+  };
+
+  for (const type of [WebIFC.IFCDOCUMENTINFORMATION, WebIFC.IFCDOCUMENTREFERENCE]) {
+    for (const id of idsOfType(ifcApi, modelId, type)) {
+      try {
+        push(ifcApi.GetLine(modelId, id));
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return out;
 }
 
 /**

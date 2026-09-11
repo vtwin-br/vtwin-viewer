@@ -124,4 +124,36 @@ export function initPanelSplitters(): void {
       edge: "start",
     });
   }
+
+  constrainPanelWidths();
+  window.addEventListener("resize", () => constrainPanelWidths());
+}
+
+/** Impede que os painéis laterais comprimam a área central abaixo de ~480px. */
+export function constrainPanelWidths(): void {
+  const grid = document.querySelector(".body-grid") as HTMLElement | null;
+  if (!grid) return;
+  const layout = document.documentElement.dataset.layout;
+  if (layout === "compact" || layout === "narrow") return;
+  if (grid.getAttribute("data-workspace") === "project-plan") return;
+  if (grid.classList.contains("schedule-collapsed") && grid.classList.contains("inspector-collapsed")) return;
+
+  const navW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-w")) || 0;
+  const avail = grid.clientWidth - navW;
+  const minCenter = 480;
+  const scheduleOpen = !grid.classList.contains("schedule-collapsed");
+  const inspectorOpen = !grid.classList.contains("inspector-collapsed");
+  let s = scheduleOpen ? currentVar("--schedule-w", DEFAULTS.schedule) : 0;
+  let i = inspectorOpen ? currentVar("--inspector-w", DEFAULTS.inspector) : 0;
+  const overflow = s + i + minCenter - avail;
+  if (overflow <= 0) return;
+  if (inspectorOpen) {
+    const nextI = clamp(i - overflow, 240, 520);
+    applyVar("--inspector-w", nextI);
+    i = nextI;
+  }
+  const still = s + i + minCenter - avail;
+  if (still > 0 && scheduleOpen) {
+    applyVar("--schedule-w", clamp(s - still, 220, 640));
+  }
 }
