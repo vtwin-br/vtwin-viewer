@@ -1,6 +1,22 @@
 import type { IfcGeoref } from "../ifc/georef";
+import type { SiteLimit } from "../logistics/types";
 
 export type TaskState = "pending" | "active" | "done";
+
+/** Tipo de IfcRelSequence.SequenceType (FINISH_START, START_START, …). */
+export type SequenceType = "FS" | "SS" | "FF" | "SF";
+
+/** Ligação nativa IfcRelSequence (RelatingProcess → RelatedProcess). */
+export interface TaskPredecessor {
+  taskId: number;
+  type: SequenceType;
+  /** Folga em dias de calendário (IfcLagTime / IfcTimeMeasure). Negativo = antecipação. */
+  lagDays?: number;
+  /** ExpressID de IfcRelSequence. */
+  relId?: number;
+  /** ExpressID de IfcLagTime (IFC4), se TimeLag for entidade. */
+  lagTimeId?: number;
+}
 
 export interface Task {
   /** ExpressID do IfcTask no IFC, ou id federado na vista com vários modelos. */
@@ -45,7 +61,7 @@ export interface Task {
   /** True se o IfcCostItem tem várias IfcCostValue (edição grava um total Category '*'). */
   costIsBreakdown?: boolean;
   /** Predecessores (IfcRelSequence). */
-  predecessors: Array<{ taskId: number; type: "FS" | "SS" | "FF" | "SF" }>;
+  predecessors: TaskPredecessor[];
   /** Modelo de origem na vista federada (vários IFC). */
   sourceModelId?: string;
   /** Nome do ficheiro IFC de origem (vista federada). */
@@ -120,4 +136,6 @@ export interface ScheduleData {
   currency: string;
   /** Origem / orientação / CRS da hierarquia IfcProject → IfcSite. */
   georef?: IfcGeoref;
+  /** Limite de intervenção do canteiro (`IfcAnnotation` VISTA4D_SITE_LIMIT). */
+  siteLimit?: import("../logistics/types").SiteLimit;
 }

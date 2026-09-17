@@ -1,6 +1,8 @@
 import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
+import { requestFragmentsUpdate } from "./fragmentsUpdate";
+import { configureOpenBimSemanticProfile } from "../ifc/semanticProfile";
 
 export interface ViewerHandles {
   components: OBC.Components;
@@ -17,6 +19,12 @@ export interface LoadedModel {
  * Cria o mundo 3D (cena, camera, renderer, grid) e configura o IfcLoader.
  * Aponta o web-ifc para os WASMs em /wasm/ (servidos por Vite a partir de public/).
  */
+export function setWorldGridVisible(world: OBC.World, visible: boolean): void {
+  world.scene.three.traverse((obj) => {
+    if (obj.type === "GridHelper") obj.visible = visible;
+  });
+}
+
 export async function createViewer(container: HTMLElement): Promise<ViewerHandles> {
   const components = new OBC.Components();
   const worlds = components.get(OBC.Worlds);
@@ -31,7 +39,7 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
     // Necessario para coexistir com tiles globais (Google Photorealistic 3D Tiles)
     // sem perder precisao de profundidade no IFC (que esta perto da camara).
     logarithmicDepthBuffer: true,
-    antialias: true,
+    antialias: !isWeakGpu(),
     powerPreference: "high-performance",
   });
   world.camera = new OBC.OrthoPerspectiveCamera(components);
@@ -45,11 +53,12 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
   // a malha global do Google. O log depth buffer cuida da precisao perto.
   const cam = world.camera as OBC.OrthoPerspectiveCamera;
   cam.threePersp.far = 1e7;
-  cam.threePersp.near = 0.1;
+  cam.threePersp.near = 0.05;
   cam.threePersp.updateProjectionMatrix();
   cam.threeOrtho.far = 1e7;
   cam.threeOrtho.near = -1e7;
   cam.threeOrtho.updateProjectionMatrix();
+  configureOrbitNavigation(cam);
 
   // Grid para referencia espacial
   const grids = components.get(OBC.Grids);
@@ -70,18 +79,20 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
   const fragments = components.get(OBC.FragmentsManager);
   fragments.init(workerUrl);
 
-  world.camera.controls.addEventListener("update", () => fragments.core.update());
+  world.camera.controls.addEventListener("update", () => {
+    void requestFragmentsUpdate(fragments);
+  });
   world.onCameraChanged.add((camera) => {
     for (const [, model] of fragments.list) {
       model.useCamera(camera.three);
     }
-    fragments.core.update(true);
+    void requestFragmentsUpdate(fragments, true);
   });
 
   fragments.list.onItemSet.add(({ value: model }) => {
     model.useCamera(world.camera.three);
     world.scene.three.add(model.object);
-    fragments.core.update(true);
+    void requestFragmentsUpdate(fragments, true);
   });
 
   // Reduz z-fighting com pequeno offset por material
@@ -104,13 +115,14 @@ export async function loadIfc(
   handles: ViewerHandles,
   buffer: Uint8Array,
   modelId = "main",
-  onProgress?: (p: number) => void,
+  onProgress?: (p: number, phase?: string) => void,
 ): Promise<LoadedModel> {
   const { ifcLoader, fragments, world } = handles;
 
   await ifcLoader.load(buffer, false, modelId, {
+    instanceCallback: configureOpenBimSemanticProfile,
     processData: {
-      progressCallback: (p: number) => onProgress?.(p),
+      progressCallback: (p, data) => onProgress?.(p, data.process),
     },
   });
 
@@ -142,9 +154,33 @@ async function finishLoadedModel(
 ): Promise<LoadedModel> {
   const model = handles.fragments.list.get(modelId);
   if (!model) throw new Error("Falha ao carregar o modelo 3D: não apareceu em fragments.list");
-  await fragments.core.update(true);
+  applyModelQuality(model);
+  await requestFragmentsUpdate(fragments, true);
   await fitCameraToModel(world, model);
   return { model };
+}
+
+export function deviceGraphicsQuality(): number {
+  const cores = navigator.hardwareConcurrency || 4;
+  const mem = (navigator as Navigator & { deviceMemory?: number }).deviceMemory;
+  if (mem != null && mem <= 4) return 0.35;
+  if (cores <= 4) return 0.5;
+  if (cores <= 8) return 0.75;
+  return 1;
+}
+
+export function isWeakGpu(): boolean {
+  return deviceGraphicsQuality() <= 0.5;
+}
+
+export function applyModelQuality(model: FRAGS.FragmentsModel, quality = deviceGraphicsQuality()): void {
+  model.graphicsQuality = Math.max(0, Math.min(1, quality));
+}
+
+export function setAllModelsQuality(fragments: OBC.FragmentsManager, quality: number): void {
+  const q = Math.max(0, Math.min(1, quality));
+  for (const [, model] of fragments.list) applyModelQuality(model, q);
+  void requestFragmentsUpdate(fragments);
 }
 
 /** Remove o modelo IFC atual para permitir importar outro ficheiro. */
@@ -167,7 +203,7 @@ export async function unloadIfc(handles: ViewerHandles, modelId = "main"): Promi
   }
   fragments.list.delete(modelId);
   try {
-    await fragments.core.update(true);
+    await requestFragmentsUpdate(fragments, true);
   } catch {
     // worker pode já ter libertado o modelo
   }
@@ -179,7 +215,7 @@ export async function refitViewerCamera(handles: ViewerHandles, modelId?: string
     const model = handles.fragments.list.get(modelId);
     if (!model || model.object.visible === false) return;
     await fitCameraToModel(handles.world, model);
-    await handles.fragments.core.update(true);
+    await requestFragmentsUpdate(handles.fragments, true);
     return;
   }
   await fitCameraToVisibleModels(handles);
@@ -197,7 +233,7 @@ export async function fitCameraToVisibleModels(handles: ViewerHandles): Promise<
   }
   if (!any) return;
   await lookAtBox(handles.world, box, 1.5);
-  await handles.fragments.core.update(true);
+  await requestFragmentsUpdate(handles.fragments, true);
 }
 
 /** Enquadra a câmara nos itens selecionados (conjunto / grupo espacial). */
@@ -241,7 +277,7 @@ export async function fitCameraToItemSets(
   }
   if (!any) return;
   await lookAtBox(handles.world, worldBox, 2.15);
-  await handles.fragments.core.update(true);
+  await requestFragmentsUpdate(handles.fragments, true);
 }
 
 async function fitCameraToModel(world: OBC.World, model: FRAGS.FragmentsModel) {
@@ -262,6 +298,7 @@ async function lookAtBox(world: OBC.World, box: THREE.Box3, distanceScale: numbe
   const maxDim = Math.max(size.x, size.y, size.z, 0.6);
   const dist = maxDim * distanceScale || 30;
   const cam = world.camera as OBC.OrthoPerspectiveCamera;
+  applyOrbitNavigation(cam);
   await cam.controls.setLookAt(
     center.x + dist * 0.85,
     center.y + dist * 0.55,
@@ -271,4 +308,41 @@ async function lookAtBox(world: OBC.World, box: THREE.Box3, distanceScale: numbe
     center.z,
     true,
   );
+}
+
+/**
+ * O OrbitMode do That Open impõe maxDistance=300 e infinityDolly=true.
+ * Depois de orbitar / zoom / gizmo, o alvo é empurrado e a órbita fica num
+ * raio de ~1 m: o rato quase não mexe e o zoom parece morto.
+ */
+const ORBIT_MIN_DISTANCE = 0.08;
+const ORBIT_MAX_DISTANCE = 1e7;
+
+type OrbitModePatch = {
+  id?: string;
+  activateOrbitControls?: () => void;
+};
+
+function applyOrbitNavigation(cam: OBC.OrthoPerspectiveCamera): void {
+  const controls = cam.controls;
+  controls.minDistance = ORBIT_MIN_DISTANCE;
+  controls.maxDistance = ORBIT_MAX_DISTANCE;
+  controls.infinityDolly = false;
+  controls.dollyToCursor = true;
+  controls.smoothTime = 0.12;
+  controls.draggingSmoothTime = 0.05;
+  controls.dollySpeed = 1.35;
+  controls.truckSpeed = 2;
+}
+
+function configureOrbitNavigation(cam: OBC.OrthoPerspectiveCamera): void {
+  applyOrbitNavigation(cam);
+  try {
+    const orbit = cam.mode as unknown as OrbitModePatch;
+    if (orbit.id === "Orbit") {
+      orbit.activateOrbitControls = () => applyOrbitNavigation(cam);
+    }
+  } catch {
+    // câmara ainda sem NavigationMode
+  }
 }

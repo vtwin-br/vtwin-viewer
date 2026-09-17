@@ -53,9 +53,15 @@ export function parseMspdi(xml: string, fileName: string): ProjectPlan {
       const predUid = directText(link, "PredecessorUID");
       if (!predUid) continue;
       const typeIdx = Number(directText(link, "Type") || "1");
+      const lagTenths = Number(directText(link, "LinkLag") || "0");
+      const lagDays =
+        Number.isFinite(lagTenths) && lagTenths !== 0 && Number.isFinite(minutesPerDay) && minutesPerDay > 0
+          ? lagTenths / 10 / minutesPerDay
+          : undefined;
       predecessors.push({
         id: predUid,
         type: PRED_TYPE[typeIdx] ?? "FS",
+        lagDays,
       });
     }
 

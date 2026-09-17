@@ -23,6 +23,7 @@ interface TaskNodeRefs {
   childrenWrap: HTMLElement | null;
   toggle: HTMLElement;
   collapsed: boolean;
+  depth: number;
 }
 
 export class TaskTreeUI {
@@ -123,7 +124,7 @@ export class TaskTreeUI {
       childrenWrap.className = "task-children";
       const collapse = depth >= 2;
       if (collapse) childrenWrap.classList.add("collapsed");
-      for (const c of task.children) childrenWrap.appendChild(this.buildNode(c, depth + 1));
+      else this.mountChildren(task, childrenWrap, depth);
     }
 
     const collapsed = !!childrenWrap?.classList.contains("collapsed");
@@ -136,6 +137,7 @@ export class TaskTreeUI {
         toggle.classList.toggle("is-collapsed", isCollapsed);
         const ref = this.nodes.get(task.id);
         if (ref) ref.collapsed = isCollapsed;
+        if (!isCollapsed) this.ensureChildren(task, childrenWrap, depth);
         e.stopPropagation();
         return;
       }
@@ -158,9 +160,19 @@ export class TaskTreeUI {
       childrenWrap,
       toggle,
       collapsed,
+      depth,
     });
 
     return wrap;
+  }
+
+  private mountChildren(task: Task, wrap: HTMLElement, depth: number): void {
+    if (wrap.childElementCount > 0) return;
+    for (const c of task.children) wrap.appendChild(this.buildNode(c, depth + 1));
+  }
+
+  private ensureChildren(task: Task, wrap: HTMLElement, depth: number): void {
+    this.mountChildren(task, wrap, depth);
   }
 
   /** Filtra a árvore por texto (nome ou identificação); expande ramos com correspondência. */
@@ -343,15 +355,24 @@ export class TaskTreeUI {
   }
 
   private expandAncestors(taskId: number): void {
+    const chain: Task[] = [];
     let current = this.opts.schedule.byId.get(taskId);
     while (current?.parentId != null) {
-      const parent = this.nodes.get(current.parentId);
-      if (parent?.childrenWrap?.classList.contains("collapsed")) {
+      const parentTask = this.opts.schedule.byId.get(current.parentId);
+      if (!parentTask) break;
+      chain.push(parentTask);
+      current = parentTask;
+    }
+    for (let i = chain.length - 1; i >= 0; i--) {
+      const parentTask = chain[i]!;
+      const parent = this.nodes.get(parentTask.id);
+      if (!parent?.childrenWrap) continue;
+      this.ensureChildren(parentTask, parent.childrenWrap, parent.depth);
+      if (parent.childrenWrap.classList.contains("collapsed")) {
         parent.childrenWrap.classList.remove("collapsed");
         parent.toggle.classList.remove("is-collapsed");
         parent.collapsed = false;
       }
-      current = this.opts.schedule.byId.get(current.parentId);
     }
   }
 }

@@ -18,7 +18,7 @@ export type WorkspaceId =
   | "coordination"
   | "editor";
 
-export type WorkspaceShell = "schedule" | "plan" | "placeholder";
+export type WorkspaceShell = "schedule" | "plan" | "logistics" | "placeholder";
 
 export type NavIconId =
   | "dashboard"
@@ -30,7 +30,6 @@ export type NavIconId =
   | "logistics"
   | "coordination"
   | "editor"
-  | "inspector"
   | "collapse"
   | "expand";
 
@@ -103,31 +102,30 @@ export const APP_MODULES: AppModule[] = [
   },
   {
     id: "planning",
-    label: "Planejamento e Orçamento",
-    description: "Cronograma, Gantt, 5D e logística",
+    label: "Planejamento",
+    description: "Relatório 4D, editor Gantt e logística",
     icon: "planning",
     tools: [
       {
         id: "schedule-4d",
-        label: "Cronograma 4D",
-        description: "Simulação 4D — resultado do cronograma (somente visualização)",
+        label: "4D",
+        description: "Relatório e simulação do cronograma",
         workspace: "schedule-4d",
         icon: "schedule4d",
       },
       {
         id: "project-plan",
-        label: "Planejamento de projeto",
-        description: "Gantt = editor de IfcTask",
+        label: "Gantt",
+        description: "Editor do cronograma (IfcTask)",
         workspace: "project-plan",
         icon: "projectPlan",
       },
       {
         id: "logistics",
         label: "Logística",
-        description: "Canteiro, fluxos e recursos no modelo IFC",
+        description: "Canteiro, limite de intervenção e platô no IFC",
         workspace: "logistics",
         icon: "logistics",
-        placeholder: true,
       },
     ],
   },
@@ -176,7 +174,13 @@ export function isWorkspaceId(v: string | null | undefined): v is WorkspaceId {
 export function workspaceShell(id: WorkspaceId): WorkspaceShell {
   if (id === "schedule-4d") return "schedule";
   if (id === "project-plan") return "plan";
+  if (id === "logistics") return "logistics";
   return "placeholder";
+}
+
+export function workspaceHasEarth(id: WorkspaceId): boolean {
+  const shell = workspaceShell(id);
+  return shell === "schedule" || shell === "logistics";
 }
 
 export function findTool(toolId: string): AppTool | undefined {

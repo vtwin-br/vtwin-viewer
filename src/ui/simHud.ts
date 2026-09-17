@@ -47,18 +47,18 @@ export class SimHud {
       <nav class="hud-phases" aria-label="Fases da obra"></nav>
       <aside class="hud-cost" aria-label="Custo 5D">
         <div class="hud-cost-head">
-          <p class="hud-cost-kicker">Projeção mensal de custo</p>
+          <p class="hud-cost-kicker">5D</p>
           <button type="button" class="hud-cost-close" data-hud-cost-close title="Ocultar gráfico 5D" aria-label="Ocultar gráfico 5D">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>
           </button>
         </div>
         <div class="hud-cost-totals">
-          <span><em>Orçamento</em><strong data-hud-budget>—</strong></span>
-          <span><em>Realizado</em><strong data-hud-realized>—</strong></span>
+          <span><em>Orç.</em><strong data-hud-budget>—</strong></span>
+          <span><em>Real.</em><strong data-hud-realized>—</strong></span>
         </div>
-        <p class="hud-cost-empty">Sem custos 5D neste IFC</p>
+        <p class="hud-cost-empty">5D</p>
         <div class="hud-chart">
-          <span class="hud-months-label">mês</span>
+          <span class="hud-months-label"></span>
           <div class="hud-chart-plot" data-hud-plot>
             <div class="hud-chart-rows" data-hud-rows></div>
             <svg class="hud-chart-lines" data-hud-lines aria-hidden="true">
@@ -66,7 +66,7 @@ export class SimHud {
             </svg>
           </div>
           <div class="hud-chart-axis" data-hud-axis></div>
-          <p class="hud-axis-title">percentual do orçamento</p>
+          <p class="hud-axis-title"></p>
         </div>
       </aside>
     `;

@@ -14,8 +14,6 @@ const LS_GROUPS = "vista4d.navGroups";
 
 export interface ModuleNavOptions {
   onWorkspaceChange: (id: WorkspaceId) => void;
-  onToggleInspector: () => void;
-  inspectorOpen: () => boolean;
   /** Reabrir o painel de tarefas do cronograma 4D. */
   onRevealSchedule?: () => void;
 }
@@ -23,7 +21,6 @@ export interface ModuleNavOptions {
 export interface ModuleNavApi {
   getWorkspace: () => WorkspaceId;
   setWorkspace: (id: WorkspaceId, opts?: { silent?: boolean }) => void;
-  refreshInspectorToggle: () => void;
   setCollapsed: (collapsed: boolean) => void;
   isCollapsed: () => boolean;
 }
@@ -34,7 +31,6 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     return {
       getWorkspace: () => DEFAULT_WORKSPACE,
       setWorkspace: () => {},
-      refreshInspectorToggle: () => {},
       setCollapsed: () => {},
       isCollapsed: () => false,
     };
@@ -48,18 +44,15 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     const collapsed = root.classList.contains("is-collapsed");
     root.innerHTML = `
       <div class="module-nav-top">
-        <span class="module-nav-kicker">Módulos</span>
-        <button type="button" class="module-nav-collapse" id="module-nav-collapse" title="${collapsed ? "Expandir menu" : "Recolher menu"}" aria-label="${collapsed ? "Expandir menu" : "Recolher menu"}">
+        <div class="brand module-brand" aria-label="vtwin">
+          <img class="brand-mark brand-mark-lockup" src="/brand/logo-inverse.svg" width="120" height="22" alt="" />
+          <img class="brand-mark brand-mark-symbol" src="/brand/symbol-inverse.svg" width="28" height="21" alt="" />
+        </div>
+        <button type="button" class="module-nav-collapse" id="module-nav-collapse" title="${collapsed ? "Expandir" : "Recolher"}" aria-label="${collapsed ? "Expandir" : "Recolher"}">
           ${collapsed ? navIcon("expand") : navIcon("collapse")}
         </button>
       </div>
       <div class="module-nav-scroll"></div>
-      <div class="module-nav-footer">
-        <button type="button" class="module-footer-btn" id="toggle-inspector" title="Propriedades (I)" data-tooltip="Propriedades" aria-pressed="false" aria-controls="inspector">
-          ${navIcon("inspector")}
-          <span>Propriedades</span>
-        </button>
-      </div>
     `;
 
     const scroll = root.querySelector(".module-nav-scroll")!;
@@ -126,7 +119,6 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
       const next = !root.classList.contains("is-collapsed");
       setCollapsed(next);
       render();
-      refreshInspectorToggle();
     });
 
     root.querySelectorAll(".module-group-btn").forEach((btn) => {
@@ -156,10 +148,6 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
         setWorkspace(tool.workspace);
       });
     });
-
-    const insp = root.querySelector("#toggle-inspector");
-    insp?.addEventListener("click", () => opts.onToggleInspector());
-    refreshInspectorToggle();
   };
 
   const setCollapsed = (collapsed: boolean) => {
@@ -201,13 +189,6 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     if (!extra?.silent && prev !== id) opts.onWorkspaceChange(id);
   };
 
-  const refreshInspectorToggle = () => {
-    const btn = root.querySelector("#toggle-inspector");
-    const open = opts.inspectorOpen();
-    btn?.classList.toggle("is-active", open);
-    btn?.setAttribute("aria-pressed", open ? "true" : "false");
-  };
-
   setCollapsed(collapsedStored);
   applyWorkspaceAttr();
   render();
@@ -215,11 +196,9 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
   return {
     getWorkspace: () => workspace,
     setWorkspace,
-    refreshInspectorToggle,
     setCollapsed: (collapsed) => {
       setCollapsed(collapsed);
       render();
-      refreshInspectorToggle();
     },
     isCollapsed: () => root.classList.contains("is-collapsed"),
   };

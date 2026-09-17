@@ -56,12 +56,13 @@ O IFC é um **esquema**. A troca oficial mais usada é o **STEP Physical File**
 |---|---|---|
 | Canónico (contrato BIM) | **IFC-SPF (`.ifc`)** | Importar, editar, exportar. Fonte da verdade. |
 | Arquivo / envio | `.ifcZIP` | Compressão do mesmo STEP. |
-| Visualização 3D | **Fragments** (That Open) | Runtime no viewport; não substitui o IFC. |
-| Índice interno (futuro) | SQLite ou similar | Queries rápidas; **derivado** do IFC, não o substitui. |
+| Visualização 3D | **Fragments** (That Open) | Runtime no viewport; cache IndexedDB versionado. Não substitui o IFC. |
+| Índice interno | Manifesto + offset STEP + GUID + snapshot semântico; bytes IFC em **OPFS** | Cache quente, queries e export; **derivado** do IFC, não o substitui. |
 | API (futuro) | ifcJSON | Troca web entre serviços; o ficheiro mestre continua `.ifc`. |
 
-Não adotar ifcXML, HDF5 ou “IFC só em SQL” como formato mestre. SQLite, se
-vier, é índice para escala — o utilizador continua a receber e a entregar `.ifc`.
+Não adotar ifcXML, HDF5, `.frag` ou “IFC só em SQL” como formato mestre.
+O utilizador continua a receber e a entregar `.ifc`. Cache Fragments / OPFS /
+índices podem apagar-se — a app volta a converter a partir do STEP.
 
 ---
 
@@ -76,7 +77,7 @@ como entrada direta.
 | Dashboard | Dashboard | Placeholder — indicadores + interação 3D |
 | Visualizador | Visualizador | Placeholder — vista 3D dedicada |
 | Documentação | Documentação | Placeholder — documentos, folhas 2D, tabelas (`IfcDocumentReference`, etc.) |
-| Planejamento e Orçamento | Cronograma 4D · Planejamento de projeto · Logística | 4D/Gantt ativos; Logística em placeholder |
+| Planejamento | 4D · Gantt · Logística | 4D = relatório/simulação; Gantt = editor `IfcTask`; Logística = limite de canteiro |
 | Coordenação | Coordenação | Placeholder — BCF, clash |
 | Editor | Editor | Placeholder — modelagem IFC |
 
@@ -103,7 +104,8 @@ IfcProject
                  ├─ IfcGroup        conjunto 4D (IfcRelAssignsToGroup + ligação à tarefa)
                  └─ IfcCostItem     5D (IfcCostValue, IfcRelAssignsToControl)
 IfcSite / IfcMapConversion          georreferência
-IfcRelSequence                      predecessoras
+IfcAnnotation VISTA4D_SITE_LIMIT    limite de canteiro (polilinha + Pset de recorte)
+IfcRelSequence                      predecessoras (FS/SS/FF/SF + folga)
 IfcDocumentReference                documentos associados (leitura)
 ```
 
@@ -116,12 +118,17 @@ IfcDocumentReference                documentos associados (leitura)
 | Tarefa nova no Gantt | `IfcTask`; IFC4: `IfcTaskTime`; IFC2X3: `IfcScheduleTimeControl` + `IfcRelAssignsTasks`; `IfcRelNests` / `IfcRelAssignsToControl` | Sim |
 | Apagar tarefa (e subtarefas) | comenta `IfcTask` / `IfcTaskTime` / `IfcRelSequence` e atualiza ninhos | Sim |
 | Datas, nome e WBS | IFC4: `IfcTaskTime`, `Identification`; IFC2X3: `IfcCalendarDate` / `IfcDateAndTime`, `TaskId` | Sim |
+| Arrastar / redimensionar barras | as mesmas datas `IfcTaskTime` | Sim |
+| Ligações FS / SS / FF / SF + folga | `IfcRelSequence`, `IfcLagTime` (IFC4) ou `IfcTimeMeasure` (IFC2X3) | Sim |
 | CSV / XML Project | mapeador de colunas → as mesmas entidades (casa por WBS/nome; cria o resto) | Sim |
 | Predecessores na importação | `IfcRelSequence` | Sim (import); leitura no Gantt |
+| Ligar / desligar / editar predecessoras no Gantt | `IfcRelSequence` + `IfcLagTime` | Sim |
 | Ligar/desligar elemento 3D à tarefa | `IfcRelAssignsToProduct` (Bonsai) | Sim |
 | Conjuntos tipo Navis («Estacas») | `IfcGroup` (`ObjectType = VISTA4D_SET`), `IfcRelAssignsToGroup`, `IfcRelAssignsToProcess` | Sim |
 | Custo 5D em tarefa existente | `IfcCostItem`, `IfcCostValue`, `IfcRelAssignsToControl` | Sim |
 | Georreferência / extra de posição | `IfcSite`, `IfcMapConversion`, … | Sim |
+| Limite de canteiro | `IfcAnnotation` (`ObjectType = VISTA4D_SITE_LIMIT`) + `IfcPolyline` + `Pset_Vista4dSiteLimit`; `IfcRelContainedInSpatialStructure` no `IfcSite` | Sim |
+| Recorte Google / platô | vista (shader + malha) sobre o polígono e a cota gravados | — |
 | Simulação 4D no viewport | calculada a partir de datas + GUIDs | — |
 
 Código de escrita: `src/ifc/ifcSession.ts` (patches STEP; o resto do ficheiro
@@ -136,23 +143,31 @@ O Gantt (`src/ui/projectWorkspace.ts`) é uma **vista** desse grafo, não um seg
 | `.mpp` binário / PDF no Gantt | aviso na sessão | XML/CSV para tarefas; documentos → `IfcDocumentReference` |
 | Árvore espacial | Fragments `getSpatialStructure()` | Edição de `IfcRelContainedInSpatialStructure` / agregação |
 | Search sets por propriedade | — | `IfcGroup` + query; ainda não há |
-| Indentação / predecessoras no Gantt | hierarquia na criação/import | editar `IfcRelNests` / `IfcRelSequence` à mão no ecrã |
 
 Cada linha do Gantt é uma `IfcTask`. Sem modelo IFC aberto não há cronograma para editar.
 
 ---
 
-## 6. Como o 4D e o 5D se encaixam
+## 6. Como o 4D, o Gantt e o 5D se encaixam
 
-Não são bases de dados à parte. São **vistas** sobre o mesmo grafo:
+Não são bases de dados à parte. São **vistas** sobre o mesmo grafo IFC:
 
-- **4D** — a data da simulação classifica cada `IfcTask` (pendente / em
-  execução / concluído) e aplica isso aos `IfcProduct` ligados (ocultar,
-  amarelo, cor original).
-- **5D** — `IfcCostItem` / `IfcCostValue` ligados à mesma tarefa; o HUD
-  acumula no tempo.
-- **Conjuntos** — `IfcGroup` nomeado; ligar o grupo à tarefa expande os
-  membros para a simulação e grava as relações no STEP.
+- **4D** — relatório e visualização do resultado. A data da simulação classifica
+  cada `IfcTask` (pendente / em execução / concluído) e aplica isso aos
+  `IfcProduct` ligados (ocultar, amarelo, cor original). Google Earth, caminhada
+  em 1ª pessoa, linha do tempo e HUD 5D vivem aqui. O inspector é só leitura;
+  a edição do cronograma não é nesta ferramenta.
+- **Gantt** — planejador e editor das mesmas `IfcTask` (datas, WBS, predecessoras,
+  conjuntos, ligação ao 3D). Sem simulação, terreno ou caminhada. O viewport 3D,
+  quando aberto, é pré-visualização BIM para ligar produtos e conjuntos às tarefas.
+- **Logística** — limite de intervenção no `IfcSite` (polígono + cota). O Google
+  Photorealistic 3D Tiles é recortado em prisma nesse polígono; o platô é vista
+  sobre a mesma curva. Terreno e caminhada estão disponíveis. Equipamento e
+  rotas ainda não.
+- **5D** — `IfcCostItem` / `IfcCostValue` ligados à mesma tarefa; o HUD da
+  ferramenta 4D acumula no tempo.
+- **Conjuntos** — `IfcGroup` nomeado; ligar o grupo à tarefa no Gantt expande os
+  membros para a simulação 4D e grava as relações no STEP.
 
 Um IFC só com geometria (sem `IfcWorkSchedule`) abre o 3D; o Gantt cria o
 cronograma nativo no próprio ficheiro (ou importa CSV/XML para `IfcTask`).
@@ -162,19 +177,38 @@ cronograma nativo no próprio ficheiro (ou importa CSV/XML para `IfcTask`).
 ## 7. Arquitetura de runtime (hoje)
 
 ```
-.ifc (SPF)
-  ├─ web-ifc          → ScheduleData (tarefas, custos, grupos, georef)
-  ├─ IfcLoader        → Fragments (malha 3D)
-  └─ IfcSession       → texto STEP em memória + patches no export
+.ifc (SPF)  — ficheiro canónico original, em OPFS enquanto a sessão está aberta
+  ├─ IfcLoader / cache .frag versionado  → Fragments (malha + perfil semântico)
+  ├─ snapshot / índice expressId+GUID     → ScheduleData e queries lazy
+  └─ IfcSession + IfcChangeSet            → alterações canónicas; export em worker
            ↓
 UI (módulos)  ←→  IfcModelSet (vários IfcSession) / modelos 3D visíveis
 ```
 
 - Uma sessão = um ficheiro IFC. A vista pode **federar vários** (cada um com o seu `IfcSession` / STEP).
+- O cache é identificado por hash do IFC + versão do pipeline + perfil semântico.
+- Cache quente: abre `.frag` + snapshot sem preparar STEP nem executar `OpenModel`.
+- A thread principal não mantém a string STEP integral. O export worker lê o IFC
+  original do OPFS, aplica o `IfcChangeSet`, valida a estrutura STEP e gera uma
+  nova revisão/hash.
+- Disciplina oculta: a malha Fragments sai da VRAM; o IFC fica em OPFS e volta pelo cache `.frag`.
 - Ligar/desligar um IFC filtra o 3D, o cronograma 4D, o Gantt, os custos 5D e os gráficos — só entram os modelos visíveis.
-- GlobalId liga cronograma (web-ifc) à geometria (Fragments).
+- `modelId + GlobalId` liga o domínio semântico à geometria; `localId` fica
+  restrito ao adaptador Fragments.
+- A simulação 4D só altera produtos com datas; volumes espaciais sem tarefa
+  (`IfcSpace`, ambientes, aberturas, anotações) ficam ocultos. O resto da
+  construção sem data permanece como contexto.
 - Não persistir estado da app em `localStorage` como substituto do IFC
   (preferências de UI podem; o modelo BIM não).
+
+### Backend
+
+A aplicação continua **local-first/offline**. Um backend não é requisito de
+openBIM e não melhora o FPS depois do modelo carregado. Só deve ser introduzido
+se os benchmarks de hardware-alvo exigirem tirar do cliente a primeira conversão
+IFC → Fragments, ou se vários utilizadores precisarem compartilhar os mesmos
+artefatos. Nesse caso o serviço executa o mesmo pipeline e publica apenas
+artefatos derivados; o IFC continua sendo a fonte e a saída interoperável.
 
 ---
 
@@ -185,11 +219,17 @@ UI (módulos)  ←→  IfcModelSet (vários IfcSession) / modelos 3D visíveis
 | `src/app/catalog.ts` | Módulos visíveis no menu |
 | `src/ifc/ifcSession.ts` | Única porta de **escrita** STEP |
 | `src/ifc/stepText.ts` | Parse/serialize de entidades STEP |
+| `src/ifc/stepIndex.ts` | Índice expressId / GlobalId / tipo |
+| `src/ifc/stepStore.ts` | Bytes IFC em OPFS |
+| `src/ifc/fragCache.ts` | Cache IndexedDB de `.frag` + cronograma |
 | `src/schedule/parseSchedule.ts` | Leitura nativa 4D/5D/grupos |
+| `src/schedule/links.ts` | FS/SS/FF/SF, folga e recálculo à frente |
 | `src/schedule/types.ts` | `Task`, `SelectionGroup`, `ScheduleData` |
 | `src/ifc/scheduleWrite.ts` | Serialize de `IfcWorkSchedule` / `IfcTask` / `IfcRelNests` / `IfcRelSequence` |
 | `src/projectPlan/` | Vista Gantt e mapeamento CSV/XML → outline IFC |
-| `src/viewer/` | Viewport, highlight, caixa de seleção |
+| `src/logistics/` | Limite de canteiro (parse/serialize `IfcAnnotation`) |
+| `src/viewer/` | Viewport, highlight, caixa de seleção, recorte Google |
+| `src/ui/logisticsWorkspace.ts` | Painel do módulo Logística |
 | `4D.ifc` | Modelo de demo (Bonsai / IfcOpenShell), cronograma já no ficheiro |
 
 ---

@@ -25,6 +25,8 @@ export interface FirstPersonOptions {
   earth: GoogleEarthLayer;
   onEnabledChange?: (on: boolean) => void;
   onCameraMove?: () => void;
+  /** A caminhada só existe na simulação 4D. */
+  canEnable?: () => boolean;
 }
 
 /**
@@ -76,7 +78,12 @@ export class FirstPersonController {
 
   async setModel(model: FRAGS.FragmentsModel | FRAGS.FragmentsModel[] | null): Promise<void> {
     this.pendingModels = !model ? [] : Array.isArray(model) ? model : [model];
-    this.collider.detach();
+    if (this._enabled) {
+      this.collider.detach();
+      if (this.pendingModels.length) await this.collider.attach(this.pendingModels);
+    } else {
+      this.collider.detach();
+    }
     if (!this.pendingModels.length) {
       if (this._enabled) this.disable();
       this.opts.button.disabled = true;
@@ -94,6 +101,7 @@ export class FirstPersonController {
 
   async enable(): Promise<void> {
     if (this._enabled) return;
+    if (this.opts.canEnable && !this.opts.canEnable()) return;
     if (this.building) return;
     if (!this.collider.ready) {
       if (!this.pendingModels.length) return;

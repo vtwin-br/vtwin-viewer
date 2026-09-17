@@ -26,6 +26,7 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
         predecessors: (t.predecessors ?? []).map((p) => ({
           id: `ifc-${p.taskId}`,
           type: p.type,
+          lagDays: p.lagDays,
         })),
         linkedIfcTaskId: t.id,
         linkedProductGuids: [...(schedule.productGuidsByTask.get(t.id) ?? t.productGuids)],
@@ -79,7 +80,7 @@ export function planToOutlineRows(plan: ProjectPlan): OutlineRowInput[] {
         if (n >= 1 && n <= plan.tasks.length) index = n - 1;
       }
       if (index == null || index < 0) return [];
-      return [{ index, type: p.type }];
+      return [{ index, type: p.type, lagDays: p.lagDays }];
     }),
   }));
 }

@@ -39,6 +39,8 @@ export class InspectorUI {
   private productCount = 0;
   private syncing = false;
   private readOnly = false;
+  /** 4D é relatório: o workspace bloqueia edição mesmo ao refrescar a tarefa. */
+  private workspaceReadOnly = false;
   currency = "BRL";
 
   constructor(opts: InspectorOptions) {
@@ -58,6 +60,12 @@ export class InspectorUI {
   }
 
   setReadOnly(readOnly: boolean): void {
+    this.workspaceReadOnly = readOnly;
+    this.applyFieldLock();
+  }
+
+  private applyFieldLock(): void {
+    const readOnly = this.workspaceReadOnly || !!this.task?.isFederationRoot;
     this.readOnly = readOnly;
     const { name, ident, start, end, cost, form } = this.opts.els;
     for (const el of [name, ident, start, end, cost]) {
@@ -73,17 +81,19 @@ export class InspectorUI {
     }
     form.setAttribute("aria-readonly", readOnly ? "true" : "false");
     form.closest("#inspector")?.classList.toggle("is-readonly", readOnly);
+    const emptyTitle = document.querySelector("#inspector-empty h3");
+    if (emptyTitle) emptyTitle.textContent = this.workspaceReadOnly ? "Relatório" : "Seleção";
     const emptyCopy = document.getElementById("inspector-empty-copy");
     if (emptyCopy) {
-      emptyCopy.textContent = readOnly
-        ? "Selecione uma tarefa no cronograma ou um elemento 3D para ver as propriedades."
-        : "Selecione uma tarefa no cronograma ou um elemento 3D para ver e editar as propriedades.";
+      emptyCopy.textContent = this.workspaceReadOnly
+        ? "Selecione uma tarefa para ver o estado da simulação. A edição é no Gantt."
+        : "";
+      emptyCopy.classList.toggle("sr-only", !this.workspaceReadOnly);
     }
     const hint = document.getElementById("insp-hint");
     if (hint) {
-      hint.textContent = readOnly
-        ? "O Cronograma 4D é o resultado da simulação. A edição de dados fica no Planejamento de projeto."
-        : "O custo 5D grava em IfcCostItem → IfcCostValue.AppliedValue. Exporte o IFC para persistir.";
+      hint.textContent = this.workspaceReadOnly ? "Relatório 4D — edite datas e ligações no Gantt." : "";
+      hint.classList.toggle("sr-only", !this.workspaceReadOnly);
     }
   }
 
@@ -107,19 +117,20 @@ export class InspectorUI {
           els.ident.value = task.sourceFileName ?? "";
           els.state.textContent = "Modelo IFC";
           els.products.textContent = "Pasta do ficheiro na vista federada";
-          this.setReadOnly(true);
+          this.applyFieldLock();
           return;
         }
       els.empty.style.display = "";
       els.body.classList.add("is-hidden");
       els.count.textContent = "0";
+      this.applyFieldLock();
       return;
     }
 
     els.empty.style.display = "none";
     els.body.classList.remove("is-hidden");
     els.count.textContent = String(this.productCount);
-    this.setReadOnly(false);
+    this.applyFieldLock();
 
     const st = getTaskState(task, this.currentDate);
     els.state.className = `insp-status is-${st}`;

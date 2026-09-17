@@ -38,6 +38,8 @@ export class TimelineUI {
   private isPlaying = false;
   private rafId: number | null = null;
   private lastTs = 0;
+  /** Dia civil já emitido — no play só dispara onDateChange quando muda. */
+  private lastEmittedDay = Number.NaN;
 
   private slider!: HTMLInputElement;
   private playBtn!: HTMLButtonElement;
@@ -53,8 +55,9 @@ export class TimelineUI {
     this.endMs = opts.schedule.maxDate.getTime();
     this.totalDays = Math.max(1, Math.round((this.endMs - this.startMs) / 86400000));
     this.currentDay = 0;
+    this.lastEmittedDay = Number.NaN;
     this.build();
-    this.emit();
+    this.emit(true);
   }
 
   /** Liga um cronograma novo (IFC importado) e volta ao primeiro dia. */
@@ -168,7 +171,7 @@ export class TimelineUI {
     speedWrap.className = "t-speed";
     const speedLabel = document.createElement("span");
     speedLabel.className = "t-speed-label";
-    speedLabel.textContent = "Dias / s";
+    speedLabel.textContent = "";
     const seg = document.createElement("div");
     seg.className = "t-speed-seg";
     seg.setAttribute("role", "group");
@@ -247,7 +250,7 @@ export class TimelineUI {
         this.pause();
       }
       this.slider.value = String(this.currentDay);
-      this.emit();
+      this.emit(false);
       this.rafId = requestAnimationFrame(step);
     };
     this.rafId = requestAnimationFrame(step);
@@ -267,16 +270,18 @@ export class TimelineUI {
   seek(day: number) {
     this.currentDay = Math.max(0, Math.min(this.totalDays, day));
     this.slider.value = String(this.currentDay);
-    this.emit();
+    this.emit(true);
   }
 
-  private emit() {
+  private emit(force: boolean) {
     const date = new Date(this.startMs + this.currentDay * 86400000);
+    const dayInt = Math.floor(this.currentDay + 1e-9);
     this.nowLabel.textContent = fmtDateLong(date);
-    const dayInt = Math.round(this.currentDay);
-    this.dayCounter.innerHTML = `Dia <strong>${dayInt}</strong><span class="t-counter-sep">/</span><strong>${this.totalDays}</strong>`;
+    this.dayCounter.innerHTML = `Dia <strong>${Math.round(this.currentDay)}</strong><span class="t-counter-sep">/</span><strong>${this.totalDays}</strong>`;
     const p = (this.currentDay / this.totalDays) * 100;
     this.slider.style.setProperty("--p", `${p}%`);
+    if (!force && this.isPlaying && dayInt === this.lastEmittedDay) return;
+    this.lastEmittedDay = dayInt;
     this.opts.onDateChange(date);
   }
 }

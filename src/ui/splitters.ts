@@ -208,10 +208,9 @@ export function constrainPanelWidths(): void {
 
   if (grid.classList.contains("schedule-collapsed") && grid.classList.contains("inspector-collapsed")) return;
 
-  const navW = parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--nav-w")) || 0;
-  const avail = grid.clientWidth - navW;
+  const avail = grid.clientWidth;
   const minCenter = 480;
-  const scheduleOpen = shellKind === "schedule" && !grid.classList.contains("schedule-collapsed");
+  const scheduleOpen = (shellKind === "schedule" || shellKind === "logistics") && !grid.classList.contains("schedule-collapsed");
   const inspectorOpen = !grid.classList.contains("inspector-collapsed");
   let s = scheduleOpen ? currentVar("--schedule-w", DEFAULTS.schedule) : 0;
   let i = inspectorOpen ? currentVar("--inspector-w", DEFAULTS.inspector) : 0;

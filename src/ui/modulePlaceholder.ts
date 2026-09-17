@@ -28,7 +28,7 @@ export function renderModulePlaceholder(id: WorkspaceId): void {
       <span class="module-placeholder-icon">${navIcon(tool?.icon ?? "dashboard")}</span>
       ${kicker ? `<p class="module-placeholder-kicker">${escapeHtml(kicker)}</p>` : ""}
       <h2>${escapeHtml(title)}</h2>
-      <p>${escapeHtml(description)}</p>
+      <p class="sr-only">${escapeHtml(description)}</p>
       <span class="module-placeholder-badge">Em breve</span>
     </div>
   `;

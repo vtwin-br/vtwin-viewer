@@ -8,6 +8,9 @@
     "postinstall": "node scripts/setup-public.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
+    "benchmark:ifc": "esbuild scripts/benchmark-ifc.ts --bundle --platform=node --format=esm --outfile=dist/benchmark-ifc.mjs && node dist/benchmark-ifc.mjs",
+    "benchmark:import": "esbuild scripts/benchmark-import.ts --bundle --platform=node --format=esm --external:@thatopen/fragments --external:web-ifc --outfile=dist/benchmark-import.mjs && node dist/benchmark-import.mjs",
+    "test:ifc-session": "esbuild scripts/validate-ifc-session.ts --bundle --platform=node --format=esm --external:web-ifc --outfile=dist/validate-ifc-session.mjs && node dist/validate-ifc-session.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

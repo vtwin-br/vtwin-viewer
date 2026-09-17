@@ -2,9 +2,15 @@ import * as THREE from "three";
 import * as OBC from "@thatopen/components";
 import * as FRAGS from "@thatopen/fragments";
 import type { SimulationStateBuckets } from "../schedule/simulation";
+import { bucketsFingerprint } from "../schedule/simulation";
+import type { ViewportElementRef } from "../bim/elementRef";
+import { requestFragmentsUpdate } from "./fragmentsUpdate";
+import { recordMetric } from "./perfStats";
 
 const COLOR_ACTIVE = new THREE.Color(0xf59e0b);
 const COLOR_SELECTION = new THREE.Color(0x38bdf8);
+const COLOR_GHOST = new THREE.Color(0xd8dee6);
+const GHOST_OPACITY = 0.055;
 
 function activeMaterial(): FRAGS.MaterialDefinition {
   return {
@@ -21,6 +27,19 @@ function selectionMaterial(): FRAGS.MaterialDefinition {
     opacity: 1,
     transparent: false,
     renderedFaces: FRAGS.RenderedFaces.TWO,
+    depthWrite: true,
+  };
+}
+
+/** Cinza neutro e quase invisível — o elemento selecionado fica a ler-se sozinho. */
+function ghostMaterial(): FRAGS.MaterialDefinition {
+  return {
+    color: COLOR_GHOST,
+    opacity: GHOST_OPACITY,
+    transparent: true,
+    renderedFaces: FRAGS.RenderedFaces.TWO,
+    depthWrite: false,
+    _explicitProps: ["color", "opacity", "transparent", "depthWrite"],
   };
 }
 
@@ -31,19 +50,19 @@ interface HighlightLayer {
   guidToLocal: Map<string, number>;
   localToGuid: Map<number, string>;
   allGuids: string[];
+  guidSet: Set<string>;
   allGeomIds: number[];
+  /** IfcSpace, aberturas, grelhas, etc. — ocultos na 4D se não tiverem tarefa. */
+  contextHideIds: number[];
   readyDone: boolean;
   currentHidden: Set<number>;
   currentActive: Set<number>;
   currentSelection: Set<number>;
+  /** Itens translúcidos pelo isolamento (não 4D). */
   currentGhost: Set<number>;
 }
 
-export interface GuidHit {
-  guid: string;
-  localId: number;
-  modelId: string;
-}
+export type GuidHit = ViewportElementRef;
 
 export interface ModelSelection {
   modelId: string;
@@ -53,38 +72,49 @@ export interface ModelSelection {
 
 /**
  * Visibilidade 4D em um ou mais FragmentsModel:
- *   - Pré-play / início parado: mostra o modelo inteiro.
- *   - Play, pause a meio ou fim: só produtos COM início e fim.
+ *   - Pré-play / início parado: produtos do cronograma visíveis; volumes
+ *     espaciais sem tarefa (IfcSpace, ambientes) ocultos.
+ *   - Play / pause a meio: só produtos COM datas mudam.
  *     pending oculto, active amarelo, done cor original.
- *     Sem data fica oculto.
- * Modelos com a camada desligada ficam de fora do pick, da simulação e da seleção.
+ *     Construção sem data fica visível; IfcSpace / aberturas / anotações
+ *     sem tarefa ficam ocultos.
+ * Isolamento deixa o resto cinza e quase transparente (seleção opaca).
  */
 export class ScheduleHighlighter {
   private fragments: OBC.FragmentsManager;
   private layers = new Map<string, HighlightLayer>();
   private workingGuids: string[] = [];
+  private lastApplyKey = "";
 
   constructor(fragments: OBC.FragmentsManager) {
     this.fragments = fragments;
   }
 
+  invalidateApply(): void {
+    this.lastApplyKey = "";
+  }
+
   async addModel(modelId: string, model: FRAGS.FragmentsModel, allGuids: Iterable<string>): Promise<void> {
     const prev = this.layers.get(modelId);
     if (prev) await this.removeModel(modelId);
+    const guids = [...new Set(allGuids)];
     this.layers.set(modelId, {
       modelId,
       model,
       visible: true,
       guidToLocal: new Map(),
       localToGuid: new Map(),
-      allGuids: [...new Set(allGuids)],
+      allGuids: guids,
+      guidSet: new Set(guids),
       allGeomIds: [],
+      contextHideIds: [],
       readyDone: false,
       currentHidden: new Set(),
       currentActive: new Set(),
       currentSelection: new Set(),
       currentGhost: new Set(),
     });
+    this.lastApplyKey = "";
     await this.ready(modelId);
   }
 
@@ -92,8 +122,9 @@ export class ScheduleHighlighter {
     const layer = this.layers.get(modelId);
     if (!layer) return;
     this.layers.delete(modelId);
+    this.lastApplyKey = "";
     try {
-      await this.fragments.core.update(true);
+      await requestFragmentsUpdate(this.fragments, true);
     } catch {
       /* modelo já libertado */
     }
@@ -107,19 +138,26 @@ export class ScheduleHighlighter {
     if (!visible) {
       this.workingGuids = this.workingGuids.filter((g) => this.guidModelId(g) !== modelId);
     }
-    await this.fragments.core.update(true);
+    this.lastApplyKey = "";
+    await requestFragmentsUpdate(this.fragments, true);
   }
 
   visibleModels(): Array<{ id: string; model: FRAGS.FragmentsModel }> {
     return [...this.layers.values()].filter((l) => l.visible).map((l) => ({ id: l.modelId, model: l.model }));
   }
 
-  /** Primeiro modelo visível — compatível com código que espera um só IFC. */
+  geomIdsOf(modelId: string): number[] | undefined {
+    const layer = this.layers.get(modelId);
+    return layer?.readyDone ? layer.allGeomIds : undefined;
+  }
+
   getModel(): FRAGS.FragmentsModel | null {
     return this.visibleLayers()[0]?.model ?? null;
   }
 
   async ready(modelId?: string): Promise<void> {
+    const started = performance.now();
+    let prepared = 0;
     const list = modelId ? [this.layers.get(modelId)].filter((l): l is HighlightLayer => !!l) : [...this.layers.values()];
     for (const layer of list) {
       if (layer.readyDone) continue;
@@ -136,35 +174,48 @@ export class ScheduleHighlighter {
         }
       }
       layer.allGeomIds = await layer.model.getItemsIdsWithGeometry();
+      layer.contextHideIds = await collectContextHideIds(layer.model, layer.allGeomIds);
+      prepared += 1;
+    }
+    if (prepared) {
+      recordMetric("vista:highlighter:ready", performance.now() - started, {
+        models: prepared,
+      });
     }
   }
 
   /**
-   * @param previewAll true no início, sem play — modelo completo visível.
+   * @param previewAll true no início, sem play — cronograma visível, sem cor de execução.
+   * @returns false se o estado 4D já estava aplicado (nada a fazer).
    */
   async apply(
     buckets: SimulationStateBuckets,
     opts: { previewAll: boolean } = { previewAll: false },
-  ): Promise<void> {
+  ): Promise<boolean> {
+    const started = performance.now();
     await this.ready();
+    const key = opts.previewAll ? "preview" : bucketsFingerprint(buckets);
+    if (key === this.lastApplyKey) return false;
+
     const layers = this.visibleLayers();
-    if (opts.previewAll) {
-      for (const layer of layers) await this.showFullLayer(layer);
-      await this.fragments.core.update(true);
-      return;
-    }
+    await this.ensureGuidsMapped([...buckets.active, ...buckets.done, ...buckets.pending]);
 
     for (const layer of layers) {
       if (layer.currentGhost.size > 0) continue;
       await this.clearGhostLayer(layer);
 
-      const nextActive = new Set(this.guidsToLocals(layer, buckets.active));
-      const nextDone = new Set(this.guidsToLocals(layer, buckets.done));
-      const nextVisible = new Set<number>([...nextActive, ...nextDone]);
-
+      const scheduled = new Set(
+        this.guidsToLocals(layer, [...buckets.active, ...buckets.done, ...buckets.pending]),
+      );
+      const nextActive = opts.previewAll
+        ? new Set<number>()
+        : new Set(this.guidsToLocals(layer, buckets.active));
       const nextHidden = new Set<number>();
-      for (const id of layer.allGeomIds) {
-        if (!nextVisible.has(id)) nextHidden.add(id);
+      for (const id of layer.contextHideIds) {
+        if (!scheduled.has(id)) nextHidden.add(id);
+      }
+      if (!opts.previewAll) {
+        for (const id of this.guidsToLocals(layer, buckets.pending)) nextHidden.add(id);
       }
 
       const activeToReset = diff(layer.currentActive, nextActive);
@@ -185,13 +236,23 @@ export class ScheduleHighlighter {
       }
     }
 
-    await this.fragments.core.update(true);
+    this.lastApplyKey = key;
+    await requestFragmentsUpdate(this.fragments);
+    recordMetric("vista:highlighter:apply", performance.now() - started, {
+      preview: opts.previewAll,
+      models: layers.length,
+      pending: buckets.pending.size,
+      active: buckets.active.size,
+      done: buckets.done.size,
+    });
+    return true;
   }
 
   async revealAll(): Promise<void> {
     await this.ready();
     for (const layer of this.visibleLayers()) await this.showFullLayer(layer);
-    await this.fragments.core.update(true);
+    this.lastApplyKey = "reveal-all";
+    await requestFragmentsUpdate(this.fragments);
   }
 
   private async showFullLayer(layer: HighlightLayer): Promise<void> {
@@ -255,7 +316,7 @@ export class ScheduleHighlighter {
 
   async clearIsolation(): Promise<void> {
     for (const layer of this.visibleLayers()) await this.clearGhostLayer(layer);
-    await this.fragments.core.update(true);
+    await requestFragmentsUpdate(this.fragments);
   }
 
   async toggleWorkingGuid(guid: string): Promise<string[]> {
@@ -321,24 +382,20 @@ export class ScheduleHighlighter {
 
       const newSel = this.guidsToLocals(layer, this.workingGuids);
       if (newSel.length > 0) {
-        await layer.model.resetOpacity(newSel);
         await layer.model.highlight(newSel, selectionMaterial());
         layer.currentSelection = new Set(newSel);
       }
 
       if (isolate) {
-        if (newSel.length > 0) {
-          await this.setGhostExcept(layer, newSel);
-          await layer.model.highlight(newSel, selectionMaterial());
-        } else {
-          await this.setGhostExcept(layer, []);
-        }
-      } else {
+        await this.setGhostExcept(layer, newSel);
+        if (newSel.length > 0) await layer.model.highlight(newSel, selectionMaterial());
+      } else if (layer.currentGhost.size > 0) {
         await this.clearGhostLayer(layer);
+        if (newSel.length > 0) await layer.model.highlight(newSel, selectionMaterial());
       }
     }
 
-    await this.fragments.core.update(true);
+    await requestFragmentsUpdate(this.fragments);
   }
 
   async clearSelection(): Promise<void> {
@@ -352,7 +409,7 @@ export class ScheduleHighlighter {
       const stillActive = prev.filter((id) => layer.currentActive.has(id));
       if (stillActive.length > 0) await layer.model.highlight(stillActive, activeMaterial());
     }
-    await this.fragments.core.update(true);
+    await requestFragmentsUpdate(this.fragments);
   }
 
   private async setGhostExcept(layer: HighlightLayer, keep: number[]): Promise<void> {
@@ -362,17 +419,33 @@ export class ScheduleHighlighter {
       if (keepSet.has(id) || layer.currentHidden.has(id)) continue;
       next.add(id);
     }
-    const toReset = diff(layer.currentGhost, next);
-    const toAdd = diff(next, layer.currentGhost);
-    if (toReset.length) await this.forChunks(toReset, (slice) => layer.model.resetOpacity(slice));
-    if (toAdd.length) await this.forChunks(toAdd, (slice) => layer.model.setOpacity(slice, 0.16));
+    const toRestore = diff(layer.currentGhost, next);
+    const toGhost = diff(next, layer.currentGhost);
+    if (toRestore.length) await this.restoreGhosted(layer, toRestore);
+    if (toGhost.length) await this.ghostMany(layer, toGhost);
     layer.currentGhost = next;
   }
 
   private async clearGhostLayer(layer: HighlightLayer): Promise<void> {
     if (layer.currentGhost.size === 0) return;
-    await this.forChunks([...layer.currentGhost], (slice) => layer.model.resetOpacity(slice));
+    const ids = [...layer.currentGhost];
     layer.currentGhost.clear();
+    await this.restoreGhosted(layer, ids);
+  }
+
+  private async ghostMany(layer: HighlightLayer, ids: number[]): Promise<void> {
+    const material = ghostMaterial();
+    await this.forChunks(ids, (slice) => layer.model.highlight(slice, material));
+  }
+
+  private async restoreGhosted(layer: HighlightLayer, ids: number[]): Promise<void> {
+    const visible = ids.filter((id) => !layer.currentHidden.has(id));
+    if (!visible.length) return;
+    await this.forChunks(visible, (slice) => layer.model.resetHighlight(slice));
+    const stillActive = visible.filter((id) => layer.currentActive.has(id) && !layer.currentSelection.has(id));
+    if (stillActive.length) await layer.model.highlight(stillActive, activeMaterial());
+    const stillSelected = visible.filter((id) => layer.currentSelection.has(id));
+    if (stillSelected.length) await layer.model.highlight(stillSelected, selectionMaterial());
   }
 
   async pickGuid(
@@ -381,7 +454,7 @@ export class ScheduleHighlighter {
     dom: HTMLElement,
   ): Promise<string | null> {
     const hit = await this.pickHit(camera, event, dom);
-    return hit?.guid ?? null;
+    return hit?.globalId ?? null;
   }
 
   async pickHit(
@@ -418,7 +491,9 @@ export class ScheduleHighlighter {
       if (!guid) guid = await this.guidFromItemData(layer, localId);
       if (!guid) continue;
       this.registerGuid(guid, localId, layer.modelId);
-      if (!best || dist < best.dist) best = { hit: { guid, localId, modelId: layer.modelId }, dist };
+      if (!best || dist < best.dist) {
+        best = { hit: { globalId: guid, localId, modelId: layer.modelId }, dist };
+      }
     }
     return best?.hit ?? null;
   }
@@ -436,15 +511,20 @@ export class ScheduleHighlighter {
     for (const layer of this.visibleLayers()) {
       if (layer.guidToLocal.has(guid)) return layer.modelId;
     }
+    for (const layer of this.layers.values()) {
+      if (layer.guidToLocal.has(guid)) return layer.modelId;
+    }
     return undefined;
   }
 
-  refsOf(guids: Iterable<string>): Array<{ guid: string; modelId: string; localId: number }> {
-    const out: Array<{ guid: string; modelId: string; localId: number }> = [];
+  refsOf(guids: Iterable<string>): ViewportElementRef[] {
+    const out: ViewportElementRef[] = [];
     for (const guid of guids) {
       for (const layer of this.visibleLayers()) {
         const localId = layer.guidToLocal.get(guid);
-        if (typeof localId === "number") out.push({ guid, modelId: layer.modelId, localId });
+        if (typeof localId === "number") {
+          out.push({ globalId: guid, modelId: layer.modelId, localId });
+        }
       }
     }
     return out;
@@ -455,12 +535,16 @@ export class ScheduleHighlighter {
     if (!layer) return;
     layer.guidToLocal.set(guid, localId);
     layer.localToGuid.set(localId, guid);
-    if (!layer.allGuids.includes(guid)) layer.allGuids.push(guid);
+    if (!layer.guidSet.has(guid)) {
+      layer.guidSet.add(guid);
+      layer.allGuids.push(guid);
+    }
   }
 
   async includeGuids(guids: Iterable<string>): Promise<void> {
     await this.ready();
     await this.ensureGuidsMapped(guids);
+    this.lastApplyKey = "";
   }
 
   private async ensureGuidsMapped(guids: Iterable<string>): Promise<void> {
@@ -513,4 +597,34 @@ function diff(a: Iterable<number>, b: Set<number>): number[] {
   const out: number[] = [];
   for (const v of a) if (!b.has(v)) out.push(v);
   return out;
+}
+
+/** Volumes de ambiente e anotações — não são obra, a não ser que a tarefa os ligue. */
+const CONTEXT_HIDE_CATEGORY =
+  /IFCSPACE|IFCSPATIALZONE|IFCEXTERNALSPATIALELEMENT|IFCZONE|IFCOPENINGELEMENT|IFCANNOTATION|IFCGRID|IFCVIRTUALELEMENT|IFCVOIDINGFEATURE/i;
+
+async function collectContextHideIds(model: FRAGS.FragmentsModel, geomIds: number[]): Promise<number[]> {
+  if (!geomIds.length) return [];
+  try {
+    const cats = (await model.getCategories()).filter((c): c is string => !!c && CONTEXT_HIDE_CATEGORY.test(c));
+    if (!cats.length) return [];
+    const map = await model.getItemsOfCategories(cats.map((c) => new RegExp(`^${escapeRe(c)}$`, "i")));
+    const geom = new Set(geomIds);
+    const out: number[] = [];
+    const seen = new Set<number>();
+    for (const ids of Object.values(map)) {
+      for (const id of ids) {
+        if (typeof id !== "number" || seen.has(id) || !geom.has(id)) continue;
+        seen.add(id);
+        out.push(id);
+      }
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function escapeRe(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

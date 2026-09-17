@@ -1,3 +1,5 @@
+import type { StepIndex } from "./stepIndex";
+
 /** Leitura/escrita pontual de entidades STEP (ISO-10303-21) sem regravar o IFC inteiro. */
 
 export interface StepEntity {
@@ -29,7 +31,8 @@ export function prepareIfcForOpen(buffer: Uint8Array): { text: string; bytes: Ui
   return { text: prepared, bytes: latin1ToBytes(prepared) };
 }
 
-export function maxExpressId(text: string): number {
+export function maxExpressId(text: string, index?: StepIndex | null): number {
+  if (index && index.maxId > 0) return index.maxId;
   let max = 0;
   const re = /#(\d+)\s*=/g;
   let m: RegExpExecArray | null;
@@ -82,6 +85,14 @@ export function ifcOptionalString(value: string | undefined): string {
   return v ? ifcString(v) : "$";
 }
 
+/** Remove aspas STEP (`'` / `''`). */
+export function parseIfcString(arg: string | undefined): string {
+  if (!arg || arg === "$") return "";
+  let s = arg.trim();
+  if (s.startsWith("'") && s.endsWith("'") && s.length >= 2) s = s.slice(1, -1);
+  return s.replace(/''/g, "'");
+}
+
 const IFC_GUID_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_$";
 
 /** GlobalId IFC de 22 caracteres (único; não precisa ser UUID comprimido oficial). */
@@ -115,16 +126,27 @@ export function formatIfcDateTime(d: Date): string {
 }
 
 /** ExpressID da entidade cujo GlobalId (1.º argumento) é `guid`. */
-export function findExpressIdByGlobalId(text: string, guid: string): number | undefined {
+export function findExpressIdByGlobalId(
+  text: string,
+  guid: string,
+  index?: StepIndex | null,
+): number | undefined {
   const g = guid.trim();
   if (!g) return undefined;
+  const indexed = index?.guidToId.get(g);
+  if (indexed != null) return indexed;
   const escaped = g.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const re = new RegExp(`#(\\d+)\\s*=\\s*IFC[A-Z0-9]+\\s*\\(\\s*'${escaped}'`, "i");
   const m = re.exec(text);
   return m ? Number(m[1]) : undefined;
 }
 
-export function findEntity(text: string, expressId: number): StepEntity | null {
+export function findEntity(text: string, expressId: number, index?: StepIndex | null): StepEntity | null {
+  const indexed = index?.offset.get(expressId);
+  if (indexed != null) {
+    const parsed = parseEntityAt(text, indexed, expressId);
+    if (parsed) return parsed;
+  }
   const needle = `#${expressId}`;
   let from = 0;
   while (from < text.length) {
@@ -155,21 +177,48 @@ export function findEntity(text: string, expressId: number): StepEntity | null {
     }
     const close = findMatchingParen(text, i);
     if (close < 0) return null;
-    const argsRaw = text.slice(i + 1, close);
-    let j = skipWs(text, close + 1);
-    if (text[j] !== ";") {
-      from = hash + 1;
-      continue;
-    }
-    return {
-      expressId,
-      type,
-      args: splitStepArgs(argsRaw),
-      start: hash,
-      end: j + 1,
-    };
+    const parsed = parseEntitySpan(text, hash, type, i, close, expressId);
+    if (parsed) return parsed;
+    from = hash + 1;
   }
   return null;
+}
+
+function parseEntityAt(text: string, hash: number, expressId: number): StepEntity | null {
+  let i = hash + String(expressId).length + 1;
+  if (hash > 0 && isDigit(text.charCodeAt(hash - 1))) return null;
+  if (i < text.length && isDigit(text.charCodeAt(i))) return null;
+  i = skipWs(text, i);
+  if (text[i] !== "=") return null;
+  i = skipWs(text, i + 1);
+  const typeStart = i;
+  while (i < text.length && isIdentChar(text.charCodeAt(i))) i++;
+  const type = text.slice(typeStart, i);
+  i = skipWs(text, i);
+  if (text[i] !== "(") return null;
+  const close = findMatchingParen(text, i);
+  if (close < 0) return null;
+  return parseEntitySpan(text, hash, type, i, close, expressId);
+}
+
+function parseEntitySpan(
+  text: string,
+  hash: number,
+  type: string,
+  openParen: number,
+  close: number,
+  expressId: number,
+): StepEntity | null {
+  const argsRaw = text.slice(openParen + 1, close);
+  const j = skipWs(text, close + 1);
+  if (text[j] !== ";") return null;
+  return {
+    expressId,
+    type,
+    args: splitStepArgs(argsRaw),
+    start: hash,
+    end: j + 1,
+  };
 }
 
 export function serializeEntity(expressId: number, type: string, args: string[]): string {
@@ -189,19 +238,26 @@ export function parseStepSetIds(arg: string | undefined): number[] {
   return out;
 }
 
-export function findFirstExpressIdByType(text: string, type: string): number | undefined {
+export function findFirstExpressIdByType(
+  text: string,
+  type: string,
+  index?: StepIndex | null,
+): number | undefined {
+  const indexed = index?.typeIds.get(type.toUpperCase())?.[0];
+  if (indexed != null) return indexed;
   const re = new RegExp(`#(\\d+)\\s*=\\s*${type}\\s*\\(`, "i");
   const m = re.exec(text);
   return m ? Number(m[1]) : undefined;
 }
 
-export type IfcSchemaKind = "IFC2X3" | "IFC4";
+export type IfcSchemaKind = "IFC2X3" | "IFC4" | "IFC4X3";
 
 /** Lê FILE_SCHEMA do cabeçalho STEP. */
 export function detectIfcSchema(text: string): IfcSchemaKind {
   const m = /FILE_SCHEMA\s*\(\s*\(\s*'([^']+)'/i.exec(text);
   const raw = (m?.[1] ?? "IFC4").toUpperCase();
   if (raw.includes("2X3") || raw.includes("2X_3") || raw.includes("2X2")) return "IFC2X3";
+  if (raw.includes("4X3") || raw.includes("4.3") || raw.includes("4_3")) return "IFC4X3";
   return "IFC4";
 }
 
@@ -282,17 +338,22 @@ export function applyReplacements(
   text: string,
   replacements: Array<{ start: number; end: number; text: string }>,
 ): string {
-  const ordered = [...replacements].sort((a, b) => b.start - a.start);
-  let out = text;
-  let lastStart = Infinity;
+  if (replacements.length === 0) return text;
+  const ordered = [...replacements].sort((a, b) => a.start - b.start);
+  const parts: string[] = [];
+  let cursor = 0;
+  let lastEnd = -1;
   for (const r of ordered) {
-    if (r.end > lastStart) {
+    if (r.start < lastEnd) {
       throw new Error("Substituições STEP sobrepostas — abortando para não corromper o IFC.");
     }
-    out = out.slice(0, r.start) + r.text + out.slice(r.end);
-    lastStart = r.start;
+    parts.push(text.slice(cursor, r.start));
+    parts.push(r.text);
+    cursor = r.end;
+    lastEnd = r.end;
   }
-  return out;
+  parts.push(text.slice(cursor));
+  return parts.join("");
 }
 
 export function splitStepArgs(argsRaw: string): string[] {

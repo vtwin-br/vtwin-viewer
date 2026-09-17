@@ -151,7 +151,7 @@ export class BoxSelectController {
     for (const { id, model } of models) {
       let ids: number[] = [];
       try {
-        ids = await model.getItemsIdsWithGeometry();
+        ids = hl.geomIdsOf(id) ?? (await model.getItemsIdsWithGeometry());
       } catch {
         continue;
       }

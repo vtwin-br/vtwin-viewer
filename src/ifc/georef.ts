@@ -148,6 +148,71 @@ export function threeToIfcPoint(p: { x: number; y: number; z: number }): { x: nu
   return { x: p.x, y: -p.z, z: p.y };
 }
 
+/** Aplica o extra de sessão (translação Y-up + yaw) sobre um ponto IFC já convertido. */
+export function applyExtraToThree(
+  ifc: { x: number; y: number; z: number },
+  extra: ModelExtraTransform,
+): { x: number; y: number; z: number } {
+  const p = ifcToThreePoint(ifc);
+  const c = Math.cos(extra.yaw);
+  const s = Math.sin(extra.yaw);
+  return {
+    x: p.x * c + p.z * s + extra.x,
+    y: p.y + extra.y,
+    z: -p.x * s + p.z * c + extra.z,
+  };
+}
+
+/** Inverso de `applyExtraToThree`. */
+export function threeWorldToIfc(
+  world: { x: number; y: number; z: number },
+  extra: ModelExtraTransform,
+): { x: number; y: number; z: number } {
+  const dx = world.x - extra.x;
+  const dy = world.y - extra.y;
+  const dz = world.z - extra.z;
+  const c = Math.cos(extra.yaw);
+  const s = Math.sin(extra.yaw);
+  return threeToIfcPoint({
+    x: dx * c - dz * s,
+    y: dy,
+    z: dx * s + dz * c,
+  });
+}
+
+/** IFC (Z-up) → mundo Three.js já com o extra do gizmo. */
+export function ifcPointToWorld(
+  p: { x: number; y: number; z: number },
+  extra: ModelExtraTransform,
+): { x: number; y: number; z: number } {
+  const local = ifcToThreePoint(p);
+  const c = Math.cos(extra.yaw);
+  const s = Math.sin(extra.yaw);
+  return {
+    x: c * local.x + s * local.z + extra.x,
+    y: local.y + extra.y,
+    z: -s * local.x + c * local.z + extra.z,
+  };
+}
+
+/** Mundo Three.js → IFC (Z-up), invertendo o extra do gizmo. */
+export function worldPointToIfc(
+  p: { x: number; y: number; z: number },
+  extra: ModelExtraTransform,
+): { x: number; y: number; z: number } {
+  const dx = p.x - extra.x;
+  const dy = p.y - extra.y;
+  const dz = p.z - extra.z;
+  const c = Math.cos(extra.yaw);
+  const s = Math.sin(extra.yaw);
+  const local = {
+    x: c * dx - s * dz,
+    y: dy,
+    z: s * dx + c * dz,
+  };
+  return threeToIfcPoint(local);
+}
+
 export function rotateIfcZ(
   p: { x: number; y: number; z: number },
   yaw: number,

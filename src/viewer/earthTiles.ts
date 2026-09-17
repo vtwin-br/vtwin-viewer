@@ -9,6 +9,8 @@ import {
 } from "3d-tiles-renderer/plugins";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { hasStoredSiteElevation } from "../ifc/georef";
+import { pointInPolygonXZ, type XzPoint } from "../logistics/polygon";
+import { SITE_LIMIT_MAX_POINTS } from "../logistics/types";
 
 /** 1 GiB em bytes — orçamento do LRU dos Photorealistic 3D Tiles. */
 const GIB = 2 ** 30;
@@ -48,6 +50,8 @@ export interface EarthTilesOptions {
   onTerrainSnap?: (ellipsoidMeters: number) => void;
   /** Chamado se a malha não der um ponto de chão credível. */
   onTerrainSnapFail?: () => void;
+  /** Tiles novos carregaram — o talude pode reamostrar a cota do Google. */
+  onTilesReady?: () => void;
 }
 
 /**
@@ -86,6 +90,11 @@ export class GoogleEarthLayer {
   private prevPixelRatio: number | null = null;
   private prevSortObjects: boolean | null = null;
   private sseSettling = false;
+  private ifcModelCount = 0;
+  private siteClipPts: XzPoint[] = [];
+  private siteClipYMin = -50;
+  private siteClipYMax = 80;
+  private tilesReadyTimer = 0;
 
   constructor(world: OBC.World, opts: EarthTilesOptions) {
     this.world = world;
@@ -102,6 +111,12 @@ export class GoogleEarthLayer {
 
   getHideRadius(): number {
     return this.opts.hideRadiusMeters ?? 0;
+  }
+
+  /** Divide o orçamento de VRAM entre os tiles e as disciplinas IFC visíveis. */
+  setIfcModelCount(count: number): void {
+    this.ifcModelCount = Math.max(0, Math.floor(count));
+    this.applyTileMemoryBudget();
   }
 
   /** Liga ou desliga a camada. */
@@ -121,7 +136,16 @@ export class GoogleEarthLayer {
     if (opts?.snap ?? moved) this.requestTerrainSnap();
   }
 
-  /** Assenta o chão do Google em Y=0 (origem do IFC), sem mexer no modelo. */
+  /** Sobe a malha Google na vista (metros). O modelo IFC não mexe. */
+  raiseTerrain(sceneMeters: number): void {
+    if (!Number.isFinite(sceneMeters) || Math.abs(sceneMeters) < 1e-9) return;
+    this.setAnchor(
+      { ...this.opts.anchor, altitude: this.opts.anchor.altitude - sceneMeters },
+      { snap: false },
+    );
+  }
+
+  /** Assenta o chão do Google em Y=0, sem mexer no modelo IFC. */
   requestTerrainSnap(): void {
     this.snapPending = true;
     this.snapStarted = performance.now();
@@ -133,6 +157,56 @@ export class GoogleEarthLayer {
   setHideRadius(meters: number): void {
     this.opts.hideRadiusMeters = meters;
     this.refreshClipBox();
+  }
+
+  /**
+   * Recorte em prisma: dentro do polígono XZ e entre yMin/yMax os tiles não desenham
+   * (árvores, casas e relevo do Google desaparecem no lote).
+   */
+  setSiteClip(poly: XzPoint[] | null, yMin = -50, yMax = 80): void {
+    this.siteClipPts = poly && poly.length >= 3 ? poly.slice(0, SITE_LIMIT_MAX_POINTS) : [];
+    this.siteClipYMin = yMin;
+    this.siteClipYMax = yMax;
+    const u = SITE_CLIP_UNIFORMS;
+    u.enabled.value = this.siteClipPts.length >= 3 ? 1 : 0;
+    u.count.value = this.siteClipPts.length;
+    u.yMin.value = yMin;
+    u.yMax.value = yMax;
+    for (let i = 0; i < SITE_LIMIT_MAX_POINTS; i++) {
+      const p = this.siteClipPts[i];
+      u.pts.value[i]!.set(p?.x ?? 0, p?.z ?? 0);
+    }
+  }
+
+  siteClipContains(world: THREE.Vector3): boolean {
+    if (this.siteClipPts.length < 3) return false;
+    if (world.y > this.siteClipYMax) return false;
+    return pointInPolygonXZ({ x: world.x, z: world.z }, this.siteClipPts);
+  }
+
+  /**
+   * Cota Y (Three) da malha Google visível em (x, z). Ignora globo de LOD
+   * baixo e o prisma do canteiro; cruza um pequeno offset para não cair
+   * só num pico (muro / copa).
+   */
+  sampleGroundY(x: number, z: number, aroundY: number): number | null {
+    if (!this.tiles) return null;
+    let best: number | null = null;
+    const consider = (hx: number, hz: number) => {
+      this.rayOrigin.set(hx, aroundY + 160, hz);
+      const hit = this.raycast(this.rayOrigin, this.rayDir, 900);
+      if (!hit) return;
+      if (this.hitToEllipsoidHeight(hit.point) == null) return;
+      const hy = hit.point.y;
+      if (hy > aroundY + 40 || hy < aroundY - 60) return;
+      if (best == null || hy < best) best = hy;
+    };
+    consider(x, z);
+    consider(x + 1.6, z);
+    consider(x - 1.6, z);
+    consider(x, z + 1.6);
+    consider(x, z - 1.6);
+    return best;
   }
 
   /** Reposiciona o disco de oclusão (segue o modelo quando ele é arrastado). */
@@ -161,6 +235,7 @@ export class GoogleEarthLayer {
     for (const h of found) {
       if (h.object === this.clipBox) continue;
       if (!Number.isFinite(h.distance) || h.distance > far) continue;
+      if (this.siteClipContains(h.point)) continue;
       return h;
     }
     return null;
@@ -205,6 +280,7 @@ export class GoogleEarthLayer {
       priority: -50,
       processTileModel(scene: THREE.Object3D) {
         makeTilesUnlit(scene);
+        bindSiteClipMaterials(scene);
       },
       doTilesNeedUpdate: () => this.snapPending || this.sseSettling,
     });
@@ -224,9 +300,8 @@ export class GoogleEarthLayer {
     // (600/1200) despejava tiles a cada pan — parecia “recarregar o LOD”.
     tiles.lruCache.minSize = 2800;
     tiles.lruCache.maxSize = 5500;
-    tiles.lruCache.minBytesSize = 0.55 * GIB;
-    tiles.lruCache.maxBytesSize = 0.95 * GIB;
     tiles.lruCache.unloadPercent = 0.04;
+    this.applyTileMemoryBudget();
 
     const activeCam = (cam as any).three as THREE.Camera;
     tiles.setCamera(activeCam);
@@ -239,6 +314,7 @@ export class GoogleEarthLayer {
 
     scene.add(tiles.group);
     this.tiles = tiles;
+    this.applyTileMemoryBudget();
 
     this.installSky();
     this.applyRendererBudget(true);
@@ -247,9 +323,11 @@ export class GoogleEarthLayer {
     this.refreshClipBox();
 
     const onLoadModel = () => {
-      if (!this.snapPending) return;
-      this.snapUntil = Math.min(this.snapUntil + 6000, this.snapStarted + 90000);
-      this.tryTerrainSnap();
+      if (this.snapPending) {
+        this.snapUntil = Math.min(this.snapUntil + 6000, this.snapStarted + 90000);
+        this.tryTerrainSnap();
+      }
+      if (this.siteClipPts.length >= 3) this.scheduleTilesReady();
     };
     tiles.addEventListener("load-model", onLoadModel);
     this.loadModelUnsub = () => tiles.removeEventListener("load-model", onLoadModel);
@@ -286,8 +364,30 @@ export class GoogleEarthLayer {
     this._enabled = true;
   }
 
+  private applyTileMemoryBudget(): void {
+    if (!this.tiles) return;
+    const deviceMemory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? 8;
+    const base = deviceMemory <= 4 ? 0.28 : deviceMemory <= 8 ? 0.42 : 0.55;
+    const reserved = Math.min(0.34, this.ifcModelCount * 0.065);
+    const maxGib = Math.max(0.16, base - reserved);
+    this.tiles.lruCache.maxBytesSize = maxGib * GIB;
+    this.tiles.lruCache.minBytesSize = Math.max(0.1, maxGib * 0.58) * GIB;
+  }
+
+  private scheduleTilesReady(): void {
+    if (this.tilesReadyTimer) return;
+    this.tilesReadyTimer = window.setTimeout(() => {
+      this.tilesReadyTimer = 0;
+      this.opts.onTilesReady?.();
+    }, 900);
+  }
+
   private detach(): void {
     if (!this.tiles) return;
+    if (this.tilesReadyTimer) {
+      window.clearTimeout(this.tilesReadyTimer);
+      this.tilesReadyTimer = 0;
+    }
     this.updateUnsub?.();
     this.updateUnsub = null;
     this.loadModelUnsub?.();
@@ -620,4 +720,79 @@ function toUnlitMaterial(mat: THREE.Material): THREE.Material {
   basic.toneMapped = false;
   std.dispose();
   return basic;
+}
+
+const SITE_CLIP_UNIFORMS = {
+  enabled: { value: 0 },
+  count: { value: 0 },
+  yMin: { value: -50 },
+  yMax: { value: 80 },
+  pts: { value: Array.from({ length: SITE_LIMIT_MAX_POINTS }, () => new THREE.Vector2()) },
+};
+
+function bindSiteClipMaterials(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+    for (const mat of mats) bindSiteClipMaterial(mat);
+  });
+}
+
+function bindSiteClipMaterial(mat: THREE.Material): void {
+  if (mat.userData.vista4dSiteClip) return;
+  mat.userData.vista4dSiteClip = true;
+  const prev = mat.onBeforeCompile;
+  mat.onBeforeCompile = (shader, renderer) => {
+    prev?.call(mat, shader, renderer);
+    shader.uniforms.uSiteClipEnabled = SITE_CLIP_UNIFORMS.enabled;
+    shader.uniforms.uSiteClipCount = SITE_CLIP_UNIFORMS.count;
+    shader.uniforms.uSiteClipYMin = SITE_CLIP_UNIFORMS.yMin;
+    shader.uniforms.uSiteClipYMax = SITE_CLIP_UNIFORMS.yMax;
+    shader.uniforms.uSiteClipPts = SITE_CLIP_UNIFORMS.pts;
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vSiteWorldPos;")
+      .replace(
+        "#include <fog_vertex>",
+        "vSiteWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;\n#include <fog_vertex>",
+      );
+    if (!shader.vertexShader.includes("vSiteWorldPos = ")) {
+      shader.vertexShader = shader.vertexShader.replace(
+        "void main() {",
+        "void main() {\n  vSiteWorldPos = (modelMatrix * vec4(position, 1.0)).xyz;",
+      );
+    }
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        "#include <common>",
+        `#include <common>
+uniform float uSiteClipEnabled;
+uniform int uSiteClipCount;
+uniform float uSiteClipYMin;
+uniform float uSiteClipYMax;
+uniform vec2 uSiteClipPts[${SITE_LIMIT_MAX_POINTS}];
+varying vec3 vSiteWorldPos;`,
+      )
+      .replace(
+        "void main() {",
+        `void main() {
+  if (uSiteClipEnabled > 0.5) {
+    vec2 p = vSiteWorldPos.xz;
+    bool inside = false;
+    for (int i = 0; i < ${SITE_LIMIT_MAX_POINTS}; i++) {
+      if (i >= uSiteClipCount) break;
+      int j = i == 0 ? uSiteClipCount - 1 : i - 1;
+      vec2 a = uSiteClipPts[i];
+      vec2 b = uSiteClipPts[j];
+      if (((a.y > p.y) != (b.y > p.y)) && (p.x < (b.x - a.x) * (p.y - a.y) / ((b.y - a.y) + 1e-8) + a.x)) {
+        inside = !inside;
+      }
+    }
+    if (inside && vSiteWorldPos.y <= uSiteClipYMax) discard;
+  }
+`,
+      );
+  };
+  mat.customProgramCacheKey = () => "vista4d-site-clip";
+  mat.needsUpdate = true;
 }

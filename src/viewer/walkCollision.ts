@@ -37,6 +37,7 @@ export class WalkCollider {
   private localRay = new THREE.Ray();
   private worldNormal = new THREE.Vector3();
   private earth: GoogleEarthLayer | null = null;
+  private siteGround: THREE.Object3D | null = null;
   private gen = 0;
   ready = false;
 
@@ -49,6 +50,10 @@ export class WalkCollider {
 
   setEarth(earth: GoogleEarthLayer | null): void {
     this.earth = earth;
+  }
+
+  setSiteGround(mesh: THREE.Object3D | null): void {
+    this.siteGround = mesh;
   }
 
   async attach(model: FRAGS.FragmentsModel | FRAGS.FragmentsModel[]): Promise<void> {
@@ -108,6 +113,18 @@ export class WalkCollider {
       normal.transformDirection(mesh.matrixWorld).normalize();
       if (!best || distance < best.distance) {
         best = { point, distance, normal, source: "ifc" };
+      }
+    }
+
+    if (this.siteGround) {
+      this.siteGround.updateWorldMatrix(true, false);
+      const hits = this.raycaster.intersectObject(this.siteGround, true);
+      const hit = hits[0];
+      if (hit && hit.distance <= far && (!best || hit.distance < best.distance)) {
+        const normal = hit.face?.normal
+          ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld).normalize()
+          : new THREE.Vector3(0, 1, 0);
+        best = { point: hit.point.clone(), distance: hit.distance, normal, source: "ifc" };
       }
     }
 

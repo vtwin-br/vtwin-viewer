@@ -23,7 +23,8 @@ export interface SimulationStateBuckets {
  * (uma task ainda em execucao "trava" o produto em amarelo).
  *
  * Produtos só ligados a tarefas SEM data não entram na simulação 4D:
- * ficam sempre visíveis (contexto do modelo).
+ * ficam visíveis se forem construção; volumes espaciais (IfcSpace, etc.)
+ * são ocultados pelo highlighter.
  */
 export function computeStateBuckets(
   schedule: ScheduleData,
@@ -66,6 +67,19 @@ export function computeStateBuckets(
   }
 
   return { pending, active, done };
+}
+
+/** Chave barata para saltar `apply` quando o dia / conjuntos não mudaram. */
+export function bucketsFingerprint(buckets: SimulationStateBuckets): string {
+  return `${buckets.pending.size}:${buckets.active.size}:${buckets.done.size}:${hashGuids(buckets.pending)}:${hashGuids(buckets.active)}:${hashGuids(buckets.done)}`;
+}
+
+function hashGuids(set: Set<string>): number {
+  let h = 0;
+  for (const g of set) {
+    for (let i = 0; i < g.length; i++) h = (Math.imul(h, 31) + g.charCodeAt(i)) | 0;
+  }
+  return h;
 }
 
 /** Para cada task da arvore, retorna o estado naquela data (usado pela UI da arvore). */

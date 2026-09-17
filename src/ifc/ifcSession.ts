@@ -9,13 +9,24 @@ import {
 } from "./georef";
 import { patchIfcGeoref, type GeoAnchorWrite } from "./georefWrite";
 import {
+  buildStepIndex,
+  deserializeStepIndex,
+  firstIdOfType,
+  idsOfType,
+  serializeStepIndex,
+  type StepIndex,
+  type StepIndexWire,
+} from "./stepIndex";
+import { loadIfcBytes, saveIfcBytes } from "./stepStore";
+import { IfcChangeSet } from "./changeSet";
+import { hashIfcBytes } from "./fragCache";
+import {
   applyReplacements,
   bytesToLatin1,
   commentEntity,
   createIfcGuid,
   detectIfcSchema,
   findEntity,
-  findExpressIdByGlobalId,
   findFirstExpressIdByType,
   formatIfcDateTime,
   formatMonetaryMeasure,
@@ -44,13 +55,21 @@ import {
   serializeRelAggregates,
   serializeRelAssignsTasks,
   serializeRelDeclares,
+  serializeIfcLagTime,
   serializeRelNests,
   serializeRelSequence,
   sequenceInvolves,
+  rewriteIfcLagTime,
+  rewriteRelSequence,
+  ifcTimeMeasureDays,
   type NewTaskInput,
   type OutlineRowInput,
   type SequenceType,
 } from "./scheduleWrite";
+import { wouldCreateIfcCycle } from "../schedule/links";
+import { cloneSiteLimit, type SiteLimit } from "../logistics/types";
+import { parseSiteLimitFromStep } from "../logistics/parseSiteLimit";
+import { serializeSiteLimit } from "../logistics/serializeSiteLimit";
 
 export type { NewTaskInput, OutlineRowInput, SequenceType };
 
@@ -61,22 +80,66 @@ export interface TaskPatch {
   end?: Date;
   /** Custo 5D (IfcCostValue.AppliedValue). */
   cost?: number;
+  isMilestone?: boolean;
+}
+
+export interface SequenceRelRecord {
+  relId: number;
+  predId: number;
+  succId: number;
+  type: SequenceType;
+  lagDays: number;
+  lagTimeId?: number;
+}
+
+export interface IfcSessionOptions {
+  index?: StepIndex;
+  storeHash?: string;
+  schema?: IfcSchemaKind;
+  wasmPath?: string;
+}
+
+export interface IfcSessionExportSnapshot {
+  fileName: string;
+  schedule: ScheduleData;
+  schema: IfcSchemaKind;
+  index: StepIndex;
+  nextExpressId?: number;
+  sets: Record<string, number[]>;
+  maps: Record<string, Array<[unknown, unknown]>>;
+  createdSequenceRels: SequenceRelRecord[];
+  dirtySequenceRels: SequenceRelRecord[];
+  createdDateLines: string[];
+  flags: Record<string, boolean>;
+  ids: Record<string, number | undefined>;
+  extra: ModelExtraTransform;
+  geoWrite: GeoAnchorWrite | null;
+  wasmPath?: string;
+}
+
+interface ExportWorkerResult {
+  bytes?: ArrayBuffer;
+  index?: StepIndexWire;
+  error?: string;
 }
 
 /**
- * Mantém o IFC original em memória e aplica só as linhas alteradas
- * (IfcTask / IfcTaskTime / IfcWorkSchedule / IfcRelNests / IfcRelSequence /
- * IfcCostItem / IfcCostValue / IfcGroup / IfcRelAssignsToGroup /
- * IfcRelAssignsToProduct / IfcSite)
- * na exportação — o resto do ficheiro fica intacto.
+ * Mantém o IFC original (texto em RAM enquanto visível, bytes em OPFS) e aplica
+ * só as linhas alteradas na exportação — o resto do ficheiro fica intacto.
  */
 export class IfcSession {
   readonly fileName: string;
   readonly schedule: ScheduleData;
-  private readonly originalText: string;
+  readonly changeSet = new IfcChangeSet();
+  private stepText: string | null;
+  private index: StepIndex;
+  private storeHash?: string;
+  private readonly wasmPath?: string;
   /** Preenchido na primeira alocação — evita varrer o STEP inteiro só para abrir. */
   private nextExpressId: number | undefined;
   private readonly identityEdited = new Set<number>();
+  private readonly elementNameEdited = new Map<number, { globalId: string; name: string }>();
+  private readonly propertyValueEdited = new Map<number, string | number | boolean | null>();
   private readonly timeEdited = new Set<number>();
   private readonly costEdited = new Set<number>();
   private readonly createdTaskTimeIds = new Set<number>();
@@ -88,6 +151,8 @@ export class IfcSession {
   /** key = `${taskId}:${productId}` */
   private readonly createdProductRels = new Map<string, { relId: number; taskId: number; productId: number }>();
   private readonly removedExistingAssignRels = new Map<number, { taskId: number; productId: number }>();
+  /** Desassociações descobertas no export; evita carregar STEP durante a edição. */
+  private readonly removedProductLinks = new Map<string, { taskId: number; productId: number }>();
   private readonly createdGroupIds = new Set<number>();
   private readonly createdGroupAssignRel = new Map<number, number>();
   private readonly createdGroupTaskRels = new Map<string, { relId: number; taskId: number; groupId: number }>();
@@ -95,17 +160,16 @@ export class IfcSession {
   private readonly dirtyGroupMemberIds = new Set<number>();
   private readonly deletedGroupIds = new Set<number>();
   private readonly removedGroupTaskRels = new Map<number, { taskId: number; groupId: number }>();
+  private readonly removedGroupTaskLinks = new Map<string, { taskId: number; groupId: number }>();
   private readonly createdTaskIds = new Set<number>();
   private readonly deletedTaskIds = new Set<number>();
   private readonly deletedEntityIds = new Set<number>();
   private readonly createdNestsRelIds = new Set<number>();
   private readonly dirtyNestsParentIds = new Set<number>();
-  private readonly createdSequenceRels: Array<{
-    relId: number;
-    predId: number;
-    succId: number;
-    type: SequenceType;
-  }> = [];
+  private readonly createdSequenceRels: SequenceRelRecord[] = [];
+  private readonly dirtySequenceRels = new Map<number, SequenceRelRecord>();
+  private readonly createdLagTimeIds = new Set<number>();
+  private readonly dirtyLagTimeIds = new Set<number>();
   private createdWorkPlan = false;
   private createdWorkSchedule = false;
   private createdDeclaresRelId: number | undefined;
@@ -126,25 +190,124 @@ export class IfcSession {
   private extra = emptyExtraTransform();
   private geoWrite: GeoAnchorWrite | null = null;
   private geoChanged = false;
+  private siteLimitDirty = false;
+  private removedSiteLimitCluster: number[] = [];
   dirty = false;
 
-  constructor(source: Uint8Array | string, fileName: string, schedule: ScheduleData) {
-    this.originalText = typeof source === "string" ? source : bytesToLatin1(source);
+  constructor(source: Uint8Array | string | null, fileName: string, schedule: ScheduleData, opts?: IfcSessionOptions) {
+    this.stepText = source == null ? null : typeof source === "string" ? source : bytesToLatin1(source);
     this.fileName = fileName;
     this.schedule = schedule;
     if (!this.schedule.groups) this.schedule.groups = [];
-    this.schema = detectIfcSchema(this.originalText);
-    const oh = findFirstExpressIdByType(this.originalText, "IFCOWNERHISTORY");
+    this.storeHash = opts?.storeHash;
+    this.wasmPath = opts?.wasmPath;
+    if (!opts?.index && this.stepText == null) {
+      throw new Error("Uma sessão IFC lazy precisa de um índice persistido.");
+    }
+    this.index = opts?.index ?? buildStepIndex(this.stepText!);
+    this.schema = opts?.schema ?? (this.stepText != null ? detectIfcSchema(this.stepText) : "IFC4");
+    const oh =
+      firstIdOfType(this.index, "IFCOWNERHISTORY") ??
+      (this.stepText != null
+        ? findFirstExpressIdByType(this.stepText, "IFCOWNERHISTORY", this.index)
+        : undefined);
     this.ownerHistoryRef = oh != null ? `#${oh}` : "$";
+    this.nextExpressId = this.index.maxId > 0 ? this.index.maxId + 1 : undefined;
+  }
+
+  private step(): string {
+    if (this.stepText == null) {
+      throw new Error("O STEP deste modelo não está em memória (disciplina oculta).");
+    }
+    return this.stepText;
+  }
+
+  private find(expressId: number | undefined): StepEntity | null {
+    if (expressId == null) return null;
+    return findEntity(this.step(), expressId, this.index);
+  }
+
+  async ensureText(): Promise<string> {
+    if (this.stepText != null) return this.stepText;
+    if (!this.storeHash) throw new Error("Não há cópia OPFS do IFC para recarregar o STEP.");
+    const bytes = await loadIfcBytes(this.storeHash);
+    if (!bytes) throw new Error("Falha a ler o IFC do armazenamento local.");
+    this.stepText = bytesToLatin1(bytes);
+    if (this.index.offset.size === 0) this.index = buildStepIndex(this.stepText);
+    return this.stepText;
+  }
+
+  /** Liberta a string STEP; o change set e o índice bastam até ao export. */
+  dropText(): void {
+    if (!this.storeHash) return;
+    this.stepText = null;
   }
 
   get georef(): IfcGeoref | undefined {
     return this.schedule.georef;
   }
 
+  get ifcSchema(): IfcSchemaKind {
+    return this.schema;
+  }
+
+  get stepIndex(): StepIndex {
+    return this.index;
+  }
+
+  get sourceHash(): string | undefined {
+    return this.storeHash;
+  }
+
+  getExtraTransform(): ModelExtraTransform {
+    return { ...this.extra };
+  }
+
   setExtraTransform(extra: ModelExtraTransform): void {
     this.extra = { ...extra };
-    if (!extraIsIdentity(extra)) this.dirty = true;
+    if (!extraIsIdentity(extra)) {
+      this.changeSet.append({ kind: "georef:transform", value: extra });
+      this.dirty = true;
+    }
+  }
+
+  getSiteLimit(): SiteLimit | null {
+    const limit = this.schedule.siteLimit;
+    if (!limit?.points.length) return null;
+    return cloneSiteLimit(limit);
+  }
+
+  async hydrateSiteLimit(): Promise<SiteLimit | null> {
+    if (this.schedule.siteLimit?.points.length) return this.getSiteLimit();
+    if (!this.index.typeIds.get("IFCANNOTATION")?.length) return null;
+    const text = await this.ensureText();
+    const parsed = parseSiteLimitFromStep(text, this.index);
+    if (parsed) this.schedule.siteLimit = parsed;
+    return this.getSiteLimit();
+  }
+
+  setSiteLimit(limit: SiteLimit): SiteLimit {
+    if (limit.points.length < 3) throw new Error("O limite do canteiro precisa de pelo menos 3 vértices.");
+    const prev = this.schedule.siteLimit;
+    const next = cloneSiteLimit(limit);
+    if (!next.globalId) next.globalId = prev?.globalId || createIfcGuid();
+    if (next.annotationId == null) next.annotationId = prev?.annotationId;
+    if (!next.clusterIds?.length && prev?.clusterIds?.length) next.clusterIds = [...prev.clusterIds];
+    this.schedule.siteLimit = next;
+    this.siteLimitDirty = true;
+    this.changeSet.append({ kind: "siteLimit:set", value: cloneSiteLimit(next) });
+    this.dirty = true;
+    return cloneSiteLimit(next);
+  }
+
+  clearSiteLimit(): void {
+    const prev = this.schedule.siteLimit;
+    if (!prev && !this.siteLimitDirty) return;
+    if (prev?.clusterIds?.length) this.removedSiteLimitCluster = [...prev.clusterIds];
+    this.schedule.siteLimit = undefined;
+    this.siteLimitDirty = true;
+    this.changeSet.append({ kind: "siteLimit:clear" });
+    this.dirty = true;
   }
 
   setGeoAnchor(geo: GeoAnchorWrite, markDirty = true): void {
@@ -155,7 +318,39 @@ export class IfcSession {
       this.schedule.georef.lon = geo.lon;
       this.schedule.georef.elevation = geo.elevation;
     }
-    if (markDirty) this.dirty = true;
+    if (markDirty) {
+      this.changeSet.append({ kind: "georef:anchor", value: geo });
+      this.dirty = true;
+    }
+  }
+
+  /** Edita IfcRoot.Name de um produto sem depender do localId do renderer. */
+  setElementName(globalId: string, name: string): void {
+    const expressId = this.index.guidToId.get(globalId);
+    const next = name.trim();
+    if (expressId == null) throw new Error("GlobalId não encontrado no IFC.");
+    if (!next) throw new Error("O elemento precisa de um nome.");
+    this.elementNameEdited.set(expressId, { globalId, name: next });
+    this.changeSet.append({
+      kind: "element:rename",
+      expressId,
+      globalId,
+      name: next,
+    });
+    this.dirty = true;
+  }
+
+  /** Edita o NominalValue de um IfcPropertySingleValue existente. */
+  setPropertySingleValue(
+    propertyId: number,
+    value: string | number | boolean | null,
+  ): void {
+    if (!this.index.offset.has(propertyId)) {
+      throw new Error(`Propriedade #${propertyId} não encontrada no IFC.`);
+    }
+    this.propertyValueEdited.set(propertyId, value);
+    this.changeSet.append({ kind: "property:update", propertyId, value });
+    this.dirty = true;
   }
 
   applyTaskEdit(taskId: number, patch: TaskPatch): { task: Task; changed: boolean; timeChanged: boolean } {
@@ -188,6 +383,10 @@ export class IfcSession {
       task.end = patch.end;
       time = true;
     }
+    if (patch.isMilestone !== undefined && !!task.isMilestone !== !!patch.isMilestone) {
+      task.isMilestone = patch.isMilestone;
+      identity = true;
+    }
 
     if (time && this.schema === "IFC2X3" && task.start && task.end) {
       this.attachIfc2x3Time(task);
@@ -216,7 +415,15 @@ export class IfcSession {
     if (identity) this.identityEdited.add(taskId);
     if (time) this.timeEdited.add(taskId);
     if (cost) this.costEdited.add(taskId);
-    if (identity || time || cost) this.dirty = true;
+    if (identity || time || cost) {
+      const fields = [
+        ...(identity ? ["identity"] : []),
+        ...(time ? ["time"] : []),
+        ...(cost ? ["cost"] : []),
+      ];
+      this.changeSet.append({ kind: "task:update", taskId, fields });
+      this.dirty = true;
+    }
     recomputeScheduleRange(this.schedule);
     return { task, changed: identity || time || cost, timeChanged: time };
   }
@@ -228,6 +435,7 @@ export class IfcSession {
     if (this.schedule.name === next) return;
     this.schedule.name = next;
     this.renamedSchedule = true;
+    this.changeSet.append({ kind: "schedule:rename", name: next });
     this.dirty = true;
   }
 
@@ -239,8 +447,7 @@ export class IfcSession {
     if (this.schedule.workScheduleId != null) {
       return { created: false };
     }
-    const projectId =
-      this.schedule.projectId ?? findFirstExpressIdByType(this.originalText, "IFCPROJECT");
+    const projectId = this.schedule.projectId ?? firstIdOfType(this.index, "IFCPROJECT");
     if (projectId == null) {
       throw new Error("Este IFC não tem IfcProject — não dá para gravar um cronograma nativo.");
     }
@@ -317,6 +524,7 @@ export class IfcSession {
     }
     recomputeScheduleRange(this.schedule);
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({ kind: "task:create", taskId: id });
     this.dirty = true;
     return task;
   }
@@ -364,6 +572,7 @@ export class IfcSession {
     }
     recomputeScheduleRange(this.schedule);
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({ kind: "task:delete", taskId });
     this.dirty = true;
   }
 
@@ -413,6 +622,7 @@ export class IfcSession {
       insertSibling(this.schedule.roots, task, afterId);
       this.touchScheduleControl();
     }
+    this.changeSet.append({ kind: "task:reparent", taskId, parentId });
     this.dirty = true;
   }
 
@@ -472,7 +682,7 @@ export class IfcSession {
       for (const pred of rows[i].predecessorIndexes ?? []) {
         const predId = idByIndex[pred.index];
         if (predId == null || predId === succId) continue;
-        this.addSequence(predId, succId, pred.type);
+        this.linkSequence(predId, succId, pred.type, pred.lagDays ?? 0);
       }
     }
     return { created, updated };
@@ -491,24 +701,136 @@ export class IfcSession {
     return siblings.find((t) => t.name === name);
   }
 
-  private addSequence(predId: number, succId: number, type: SequenceType): void {
-    const succ = this.schedule.byId.get(succId);
+  /**
+   * Cria ou atualiza IfcRelSequence (RelatingProcess = predecessora).
+   * Folga grava-se em IfcLagTime (IFC4) ou IfcTimeMeasure (IFC2X3).
+   */
+  linkSequence(predId: number, succId: number, type: SequenceType = "FS", lagDays = 0): void {
     const pred = this.schedule.byId.get(predId);
-    if (!succ || !pred) return;
-    if (succ.predecessors.some((p) => p.taskId === predId)) return;
-    succ.predecessors.push({ taskId: predId, type });
-    this.createdSequenceRels.push({ relId: this.allocId(), predId, succId, type });
+    const succ = this.schedule.byId.get(succId);
+    if (!pred || !succ) throw new Error("Tarefa da ligação não encontrada.");
+    const existing = succ.predecessors.find((p) => p.taskId === predId);
+    if (existing) {
+      this.setSequence(predId, succId, type, lagDays);
+      return;
+    }
+    if (wouldCreateIfcCycle(this.schedule.byId, predId, succId)) {
+      throw new Error("Esta ligação criaria um ciclo entre as tarefas.");
+    }
+    const lag = Math.round(lagDays || 0);
+    const relId = this.allocId();
+    const lagTimeId = this.allocLagTime(lag);
+    succ.predecessors.push({
+      taskId: predId,
+      type,
+      lagDays: lag || undefined,
+      relId,
+      lagTimeId,
+    });
+    this.createdSequenceRels.push({ relId, predId, succId, type, lagDays: lag, lagTimeId });
+    this.changeSet.append({ kind: "sequence:link", predId, succId });
     this.dirty = true;
   }
 
+  setSequence(predId: number, succId: number, type: SequenceType, lagDays = 0): void {
+    const succ = this.schedule.byId.get(succId);
+    const entry = succ?.predecessors.find((p) => p.taskId === predId);
+    if (!succ || !entry) {
+      this.linkSequence(predId, succId, type, lagDays);
+      return;
+    }
+    const lag = Math.round(lagDays || 0);
+    if (entry.type === type && (entry.lagDays ?? 0) === lag) return;
+    entry.type = type;
+    entry.lagDays = lag || undefined;
+    const record: SequenceRelRecord = {
+      relId: entry.relId ?? this.allocId(),
+      predId,
+      succId,
+      type,
+      lagDays: lag,
+      lagTimeId: entry.lagTimeId,
+    };
+    if (entry.relId == null) {
+      entry.relId = record.relId;
+      record.lagTimeId = this.allocLagTime(lag);
+      entry.lagTimeId = record.lagTimeId;
+      this.createdSequenceRels.push(record);
+    } else {
+      const created = this.createdSequenceRels.find((r) => r.relId === entry.relId);
+      record.lagTimeId = this.syncLagTime(entry.lagTimeId, lag, created != null);
+      entry.lagTimeId = record.lagTimeId;
+      if (created) {
+        created.type = type;
+        created.lagDays = lag;
+        created.lagTimeId = record.lagTimeId;
+      } else {
+        this.dirtySequenceRels.set(record.relId, record);
+      }
+    }
+    this.changeSet.append({ kind: "sequence:update", predId, succId });
+    this.dirty = true;
+  }
+
+  unlinkSequence(predId: number, succId: number): void {
+    const succ = this.schedule.byId.get(succId);
+    if (!succ) return;
+    const entry = succ.predecessors.find((p) => p.taskId === predId);
+    if (!entry) return;
+    succ.predecessors = succ.predecessors.filter((p) => p.taskId !== predId);
+    this.forgetSequence(entry.relId, entry.lagTimeId);
+    this.changeSet.append({ kind: "sequence:unlink", predId, succId });
+    this.dirty = true;
+  }
+
+  private allocLagTime(lagDays: number): number | undefined {
+    if (!lagDays || this.schema === "IFC2X3") return undefined;
+    const id = this.allocId();
+    this.createdLagTimeIds.add(id);
+    return id;
+  }
+
+  private syncLagTime(currentId: number | undefined, lagDays: number, createdRel: boolean): number | undefined {
+    if (this.schema === "IFC2X3" || !lagDays) {
+      if (currentId != null) {
+        if (this.createdLagTimeIds.has(currentId)) this.createdLagTimeIds.delete(currentId);
+        else this.deletedEntityIds.add(currentId);
+        this.dirtyLagTimeIds.delete(currentId);
+      }
+      return undefined;
+    }
+    if (currentId == null) return this.allocLagTime(lagDays);
+    if (createdRel || this.createdLagTimeIds.has(currentId)) return currentId;
+    this.dirtyLagTimeIds.add(currentId);
+    return currentId;
+  }
+
+  private forgetSequence(relId?: number, lagTimeId?: number): void {
+    if (relId == null) return;
+    const createdIdx = this.createdSequenceRels.findIndex((r) => r.relId === relId);
+    if (createdIdx >= 0) this.createdSequenceRels.splice(createdIdx, 1);
+    else this.deletedEntityIds.add(relId);
+    this.dirtySequenceRels.delete(relId);
+    if (lagTimeId == null) return;
+    if (this.createdLagTimeIds.has(lagTimeId)) this.createdLagTimeIds.delete(lagTimeId);
+    else this.deletedEntityIds.add(lagTimeId);
+    this.dirtyLagTimeIds.delete(lagTimeId);
+  }
+
+  private timeLagArg(rel: SequenceRelRecord): string {
+    if (!rel.lagDays) return "$";
+    if (this.schema === "IFC2X3") return ifcTimeMeasureDays(rel.lagDays);
+    return rel.lagTimeId != null ? `#${rel.lagTimeId}` : "$";
+  }
+
   private dropSequencesInvolving(taskId: number): void {
+    const pairs: Array<{ predId: number; succId: number }> = [];
     for (const t of this.schedule.byId.values()) {
-      t.predecessors = t.predecessors.filter((p) => p.taskId !== taskId);
+      for (const p of t.predecessors) {
+        if (p.taskId === taskId || t.id === taskId) pairs.push({ predId: p.taskId, succId: t.id });
+      }
     }
-    for (let i = this.createdSequenceRels.length - 1; i >= 0; i--) {
-      const rel = this.createdSequenceRels[i];
-      if (rel.predId === taskId || rel.succId === taskId) this.createdSequenceRels.splice(i, 1);
-    }
+    for (const pair of pairs) this.unlinkSequence(pair.predId, pair.succId);
   }
 
   private touchNests(parent: Task): void {
@@ -579,7 +901,7 @@ export class IfcSession {
   }
 
   private allocId(): number {
-    if (this.nextExpressId == null) this.nextExpressId = maxExpressId(this.originalText) + 1;
+    if (this.nextExpressId == null) this.nextExpressId = this.index.maxId + 1;
     return this.nextExpressId++;
   }
 
@@ -599,6 +921,12 @@ export class IfcSession {
     if (already) this.removeProductLink(task, guid, productId);
     else this.addProductLink(task, guid, productId);
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({
+      kind: "product:assign",
+      taskId,
+      globalId: guid,
+      assigned: !already,
+    });
     this.dirty = true;
     return {
       added: !already,
@@ -634,6 +962,7 @@ export class IfcSession {
     this.schedule.groups.push(group);
     this.createdGroupIds.add(groupId);
     if (assignRelId != null) this.createdGroupAssignRel.set(groupId, assignRelId);
+    this.changeSet.append({ kind: "group:create", groupId });
     this.dirty = true;
     return group;
   }
@@ -644,6 +973,7 @@ export class IfcSession {
     if (!next) throw new Error("O conjunto precisa de um nome.");
     group.name = next;
     if (!this.createdGroupIds.has(groupId)) this.renamedGroupIds.add(groupId);
+    this.changeSet.append({ kind: "group:update", groupId, fields: ["name"] });
     this.dirty = true;
     return group;
   }
@@ -688,6 +1018,7 @@ export class IfcSession {
       for (const p of removed) this.removeProductLink(task, p.guid, p.id);
     }
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({ kind: "group:update", groupId, fields: ["members"] });
     this.dirty = true;
     return group;
   }
@@ -707,6 +1038,7 @@ export class IfcSession {
     this.renamedGroupIds.delete(groupId);
     this.dirtyGroupMemberIds.delete(groupId);
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({ kind: "group:delete", groupId });
     this.dirty = true;
   }
 
@@ -725,8 +1057,7 @@ export class IfcSession {
       }
       if (this.createdGroupTaskRels.has(key)) this.createdGroupTaskRels.delete(key);
       else {
-        const ent = findGroupTaskRel(this.originalText, taskId, groupId);
-        if (ent) this.removedGroupTaskRels.set(ent.expressId, { taskId, groupId });
+        this.removedGroupTaskLinks.set(key, { taskId, groupId });
       }
     } else {
       task.groupIds.push(groupId);
@@ -734,16 +1065,15 @@ export class IfcSession {
       for (let i = 0; i < group.productIds.length; i++) {
         this.addProductLink(task, group.productGuids[i], group.productIds[i]);
       }
-      const pending = [...this.removedGroupTaskRels.entries()].find(
-        ([, v]) => v.taskId === taskId && v.groupId === groupId,
-      );
-      if (pending) this.removedGroupTaskRels.delete(pending[0]);
+      const pending = this.removedGroupTaskLinks.get(key);
+      if (pending) this.removedGroupTaskLinks.delete(key);
       else {
         this.createdGroupTaskRels.set(key, { relId: this.allocId(), taskId, groupId });
       }
     }
 
     recomputeProductGuidsByTask(this.schedule);
+    this.changeSet.append({ kind: "group:assign", taskId, groupId, assigned: !already });
     this.dirty = true;
     return {
       added: !already,
@@ -761,8 +1091,8 @@ export class IfcSession {
 
   private resolveProductId(guid: string, expressIdHint?: number): number {
     const productId =
-      findExpressIdByGlobalId(this.originalText, guid) ??
-      (expressIdHint != null && findEntity(this.originalText, expressIdHint) ? expressIdHint : undefined);
+      this.index.guidToId.get(guid) ??
+      (expressIdHint != null && this.index.offset.has(expressIdHint) ? expressIdHint : undefined);
     if (productId == null) {
       throw new Error("Este elemento não tem GlobalId no IFC — não dá para associar nativamente.");
     }
@@ -777,7 +1107,9 @@ export class IfcSession {
     const pendingRemove = [...this.removedExistingAssignRels.entries()].find(
       ([, v]) => v.taskId === task.id && v.productId === productId,
     );
+    const pendingLazyRemove = this.removedProductLinks.get(key);
     if (pendingRemove) this.removedExistingAssignRels.delete(pendingRemove[0]);
+    else if (pendingLazyRemove) this.removedProductLinks.delete(key);
     else if (!this.createdProductRels.has(key)) {
       this.createdProductRels.set(key, { relId: this.allocId(), taskId: task.id, productId });
     }
@@ -790,10 +1122,7 @@ export class IfcSession {
     if (pi >= 0) task.productIds.splice(pi, 1);
     const key = `${task.id}:${productId}`;
     if (this.createdProductRels.has(key)) this.createdProductRels.delete(key);
-    else {
-      const ent = findProductTaskRel(this.originalText, task.id, productId);
-      if (ent) this.removedExistingAssignRels.set(ent.expressId, { taskId: task.id, productId });
-    }
+    else this.removedProductLinks.set(key, { taskId: task.id, productId });
   }
 
   private ensureCostEntities(task: Task): void {
@@ -821,7 +1150,142 @@ export class IfcSession {
     }
   }
 
-  exportBytes(): Uint8Array {
+  createExportSnapshot(): IfcSessionExportSnapshot {
+    return {
+      fileName: this.fileName,
+      schedule: this.schedule,
+      schema: this.schema,
+      index: this.index,
+      nextExpressId: this.nextExpressId,
+      sets: {
+        identityEdited: [...this.identityEdited],
+        timeEdited: [...this.timeEdited],
+        costEdited: [...this.costEdited],
+        createdTaskTimeIds: [...this.createdTaskTimeIds],
+        createdCostValueIds: [...this.createdCostValueIds],
+        createdStarCostValueIds: [...this.createdStarCostValueIds],
+        createdCostItemIds: [...this.createdCostItemIds],
+        costItemNeedsValueLink: [...this.costItemNeedsValueLink],
+        createdGroupIds: [...this.createdGroupIds],
+        renamedGroupIds: [...this.renamedGroupIds],
+        dirtyGroupMemberIds: [...this.dirtyGroupMemberIds],
+        deletedGroupIds: [...this.deletedGroupIds],
+        createdTaskIds: [...this.createdTaskIds],
+        deletedTaskIds: [...this.deletedTaskIds],
+        deletedEntityIds: [...this.deletedEntityIds],
+        createdNestsRelIds: [...this.createdNestsRelIds],
+        dirtyNestsParentIds: [...this.dirtyNestsParentIds],
+        createdLagTimeIds: [...this.createdLagTimeIds],
+        dirtyLagTimeIds: [...this.dirtyLagTimeIds],
+        removedSiteLimitCluster: [...this.removedSiteLimitCluster],
+      },
+      maps: {
+        elementNameEdited: [...this.elementNameEdited],
+        propertyValueEdited: [...this.propertyValueEdited],
+        createdCostRels: [...this.createdCostRels],
+        createdProductRels: [...this.createdProductRels],
+        removedExistingAssignRels: [...this.removedExistingAssignRels],
+        removedProductLinks: [...this.removedProductLinks],
+        createdGroupAssignRel: [...this.createdGroupAssignRel],
+        createdGroupTaskRels: [...this.createdGroupTaskRels],
+        removedGroupTaskRels: [...this.removedGroupTaskRels],
+        removedGroupTaskLinks: [...this.removedGroupTaskLinks],
+        dateTimeByDay: [...this.dateTimeByDay],
+        ifc2x3Times: [...this.ifc2x3Times],
+      },
+      createdSequenceRels: this.createdSequenceRels.map((rel) => ({ ...rel })),
+      dirtySequenceRels: [...this.dirtySequenceRels.values()].map((rel) => ({ ...rel })),
+      createdDateLines: [...this.createdDateLines],
+      flags: {
+        createdWorkPlan: this.createdWorkPlan,
+        createdWorkSchedule: this.createdWorkSchedule,
+        createdAggregatesRel: this.createdAggregatesRel,
+        createdScheduleControlRel: this.createdScheduleControlRel,
+        dirtyScheduleControl: this.dirtyScheduleControl,
+        renamedSchedule: this.renamedSchedule,
+        geoChanged: this.geoChanged,
+        siteLimitDirty: this.siteLimitDirty,
+      },
+      ids: {
+        createdDeclaresRelId: this.createdDeclaresRelId,
+        workControlDateId: this.workControlDateId,
+        localTimeId: this.localTimeId,
+      },
+      extra: { ...this.extra },
+      geoWrite: this.geoWrite ? { ...this.geoWrite } : null,
+      wasmPath: this.wasmPath,
+    };
+  }
+
+  static fromExportSnapshot(
+    source: Uint8Array,
+    snapshot: IfcSessionExportSnapshot,
+  ): IfcSession {
+    const session = new IfcSession(source, snapshot.fileName, snapshot.schedule, {
+      index: snapshot.index,
+      schema: snapshot.schema,
+    });
+    session.restoreExportSnapshot(snapshot);
+    return session;
+  }
+
+  private restoreExportSnapshot(snapshot: IfcSessionExportSnapshot): void {
+    this.nextExpressId = snapshot.nextExpressId;
+    restoreSet(this.identityEdited, snapshot.sets.identityEdited);
+    restoreSet(this.timeEdited, snapshot.sets.timeEdited);
+    restoreSet(this.costEdited, snapshot.sets.costEdited);
+    restoreSet(this.createdTaskTimeIds, snapshot.sets.createdTaskTimeIds);
+    restoreSet(this.createdCostValueIds, snapshot.sets.createdCostValueIds);
+    restoreSet(this.createdStarCostValueIds, snapshot.sets.createdStarCostValueIds);
+    restoreSet(this.createdCostItemIds, snapshot.sets.createdCostItemIds);
+    restoreSet(this.costItemNeedsValueLink, snapshot.sets.costItemNeedsValueLink);
+    restoreSet(this.createdGroupIds, snapshot.sets.createdGroupIds);
+    restoreSet(this.renamedGroupIds, snapshot.sets.renamedGroupIds);
+    restoreSet(this.dirtyGroupMemberIds, snapshot.sets.dirtyGroupMemberIds);
+    restoreSet(this.deletedGroupIds, snapshot.sets.deletedGroupIds);
+    restoreSet(this.createdTaskIds, snapshot.sets.createdTaskIds);
+    restoreSet(this.deletedTaskIds, snapshot.sets.deletedTaskIds);
+    restoreSet(this.deletedEntityIds, snapshot.sets.deletedEntityIds);
+    restoreSet(this.createdNestsRelIds, snapshot.sets.createdNestsRelIds);
+    restoreSet(this.dirtyNestsParentIds, snapshot.sets.dirtyNestsParentIds);
+    restoreSet(this.createdLagTimeIds, snapshot.sets.createdLagTimeIds);
+    restoreSet(this.dirtyLagTimeIds, snapshot.sets.dirtyLagTimeIds);
+    this.removedSiteLimitCluster = [...(snapshot.sets.removedSiteLimitCluster ?? [])];
+
+    restoreMap(this.createdCostRels, snapshot.maps.createdCostRels);
+    restoreMap(this.elementNameEdited, snapshot.maps.elementNameEdited);
+    restoreMap(this.propertyValueEdited, snapshot.maps.propertyValueEdited);
+    restoreMap(this.createdProductRels, snapshot.maps.createdProductRels);
+    restoreMap(this.removedExistingAssignRels, snapshot.maps.removedExistingAssignRels);
+    restoreMap(this.removedProductLinks, snapshot.maps.removedProductLinks);
+    restoreMap(this.createdGroupAssignRel, snapshot.maps.createdGroupAssignRel);
+    restoreMap(this.createdGroupTaskRels, snapshot.maps.createdGroupTaskRels);
+    restoreMap(this.removedGroupTaskRels, snapshot.maps.removedGroupTaskRels);
+    restoreMap(this.removedGroupTaskLinks, snapshot.maps.removedGroupTaskLinks);
+    restoreMap(this.dateTimeByDay, snapshot.maps.dateTimeByDay);
+    restoreMap(this.ifc2x3Times, snapshot.maps.ifc2x3Times);
+
+    this.createdSequenceRels.splice(0, this.createdSequenceRels.length, ...snapshot.createdSequenceRels);
+    this.dirtySequenceRels.clear();
+    for (const rel of snapshot.dirtySequenceRels ?? []) this.dirtySequenceRels.set(rel.relId, { ...rel });
+    this.createdDateLines.splice(0, this.createdDateLines.length, ...snapshot.createdDateLines);
+    this.createdWorkPlan = !!snapshot.flags.createdWorkPlan;
+    this.createdWorkSchedule = !!snapshot.flags.createdWorkSchedule;
+    this.createdAggregatesRel = !!snapshot.flags.createdAggregatesRel;
+    this.createdScheduleControlRel = !!snapshot.flags.createdScheduleControlRel;
+    this.dirtyScheduleControl = !!snapshot.flags.dirtyScheduleControl;
+    this.renamedSchedule = !!snapshot.flags.renamedSchedule;
+    this.geoChanged = !!snapshot.flags.geoChanged;
+    this.siteLimitDirty = !!snapshot.flags.siteLimitDirty;
+    this.createdDeclaresRelId = snapshot.ids.createdDeclaresRelId;
+    this.workControlDateId = snapshot.ids.workControlDateId;
+    this.localTimeId = snapshot.ids.localTimeId;
+    this.extra = { ...snapshot.extra };
+    this.geoWrite = snapshot.geoWrite ? { ...snapshot.geoWrite } : null;
+    this.dirty = true;
+  }
+
+  private buildExportBytes(): Uint8Array {
     const replacements: Array<{ start: number; end: number; text: string }> = [];
     const newLines: string[] = [];
     const now = new Date();
@@ -848,7 +1312,7 @@ export class IfcSession {
         serializeNewWorkSchedule(this.schedule.workScheduleId, this.schedule.name, now, this.schema, oh, this.workControlDateId),
       );
     } else if (this.renamedSchedule && this.schedule.workScheduleId != null) {
-      const ent = findEntity(this.originalText, this.schedule.workScheduleId);
+      const ent = this.find(this.schedule.workScheduleId);
       if (ent) {
         replacements.push({
           start: ent.start,
@@ -879,6 +1343,34 @@ export class IfcSession {
       );
     }
 
+    for (const [expressId, edit] of this.elementNameEdited) {
+      const ent = this.find(expressId);
+      if (!ent || ent.args.length < 3) {
+        throw new Error(`Não foi possível editar o nome do elemento #${expressId}.`);
+      }
+      const args = [...ent.args];
+      args[2] = ifcOptionalString(edit.name);
+      replacements.push({
+        start: ent.start,
+        end: ent.end,
+        text: serializeEntity(ent.expressId, ent.type, args),
+      });
+    }
+
+    for (const [propertyId, value] of this.propertyValueEdited) {
+      const ent = this.find(propertyId);
+      if (!ent || ent.type !== "IFCPROPERTYSINGLEVALUE" || ent.args.length < 3) {
+        throw new Error(`#${propertyId} não é um IfcPropertySingleValue editável.`);
+      }
+      const args = [...ent.args];
+      args[2] = serializeNominalValue(args[2]!, value);
+      replacements.push({
+        start: ent.start,
+        end: ent.end,
+        text: serializeEntity(ent.expressId, ent.type, args),
+      });
+    }
+
     const taskIds = new Set([...this.identityEdited, ...this.timeEdited, ...this.costEdited]);
 
     for (const taskId of taskIds) {
@@ -889,7 +1381,7 @@ export class IfcSession {
       if (this.createdTaskIds.has(taskId)) {
         newLines.push(serializeNewIfcTask(task, this.schema, oh));
       } else if (this.identityEdited.has(taskId)) {
-        const taskEnt = findEntity(this.originalText, task.id);
+        const taskEnt = this.find(task.id);
         if (!taskEnt) {
           throw new Error(`Não foi possível localizar IfcTask #${task.id} no IFC.`);
         }
@@ -910,7 +1402,7 @@ export class IfcSession {
         if (this.createdTaskTimeIds.has(task.taskTimeId)) {
           newLines.push(serializeNewTaskTime(task.taskTimeId, task.start, task.end));
         } else {
-          const timeEnt = findEntity(this.originalText, task.taskTimeId);
+          const timeEnt = this.find(task.taskTimeId);
           if (!timeEnt) {
             throw new Error(`Não foi possível localizar IfcTaskTime #${task.taskTimeId} no IFC.`);
           }
@@ -930,7 +1422,7 @@ export class IfcSession {
           serializeNewCostValue(task.costValueId, amount, task, this.createdStarCostValueIds.has(task.costValueId)),
         );
       } else {
-        const valueEnt = findEntity(this.originalText, task.costValueId);
+        const valueEnt = this.find(task.costValueId);
         if (!valueEnt) {
           throw new Error(`Não foi possível localizar IfcCostValue #${task.costValueId} no IFC.`);
         }
@@ -948,7 +1440,7 @@ export class IfcSession {
         this.costItemNeedsValueLink.has(task.costItemId) &&
         this.createdCostValueIds.has(task.costValueId)
       ) {
-        const itemEnt = findEntity(this.originalText, task.costItemId);
+        const itemEnt = this.find(task.costItemId);
         if (!itemEnt) {
           throw new Error(`Não foi possível localizar IfcCostItem #${task.costItemId} no IFC.`);
         }
@@ -973,8 +1465,12 @@ export class IfcSession {
     for (const { relId, taskId, productId } of this.createdProductRels.values()) {
       newLines.push(serializeNewAssignToProduct(relId, taskId, productId));
     }
+    for (const { taskId, productId } of this.removedProductLinks.values()) {
+      const ent = findProductTaskRel(this.step(), taskId, productId, this.index);
+      if (ent) this.removedExistingAssignRels.set(ent.expressId, { taskId, productId });
+    }
     for (const [relId, { taskId, productId }] of this.removedExistingAssignRels) {
-      const ent = findEntity(this.originalText, relId);
+      const ent = this.find(relId);
       if (!ent) continue;
       replacements.push({
         start: ent.start,
@@ -993,7 +1489,7 @@ export class IfcSession {
         }
       } else {
         if (this.renamedGroupIds.has(group.id)) {
-          const ent = findEntity(this.originalText, group.id);
+          const ent = this.find(group.id);
           if (ent) {
             replacements.push({
               start: ent.start,
@@ -1005,7 +1501,7 @@ export class IfcSession {
         if (this.dirtyGroupMemberIds.has(group.id)) {
           const relId = group.assignRelId;
           if (relId != null) {
-            const ent = findEntity(this.originalText, relId);
+            const ent = this.find(relId);
             if (ent) {
               replacements.push({
                 start: ent.start,
@@ -1022,7 +1518,7 @@ export class IfcSession {
       }
     }
     for (const groupId of this.deletedGroupIds) {
-      const groupEnt = findEntity(this.originalText, groupId);
+      const groupEnt = this.find(groupId);
       if (groupEnt) {
         replacements.push({
           start: groupEnt.start,
@@ -1030,7 +1526,7 @@ export class IfcSession {
           text: `/* deleted #${groupId} IFCGROUP */`,
         });
       }
-      const assignEnt = findGroupAssignRel(this.originalText, groupId);
+      const assignEnt = findGroupAssignRel(this.step(), groupId, this.index);
       if (assignEnt) {
         replacements.push({
           start: assignEnt.start,
@@ -1042,8 +1538,12 @@ export class IfcSession {
     for (const { relId, taskId, groupId } of this.createdGroupTaskRels.values()) {
       newLines.push(serializeNewAssignToProcess(relId, taskId, groupId));
     }
+    for (const { taskId, groupId } of this.removedGroupTaskLinks.values()) {
+      const ent = findGroupTaskRel(this.step(), taskId, groupId, this.index);
+      if (ent) this.removedGroupTaskRels.set(ent.expressId, { taskId, groupId });
+    }
     for (const [relId, { taskId, groupId }] of this.removedGroupTaskRels) {
-      const ent = findEntity(this.originalText, relId);
+      const ent = this.find(relId);
       if (!ent) continue;
       replacements.push({
         start: ent.start,
@@ -1073,7 +1573,7 @@ export class IfcSession {
       if (this.createdNestsRelIds.has(parent.nestsRelId)) {
         if (childIds.length) newLines.push(serializeRelNests(parent.nestsRelId, parent.id, childIds, oh));
       } else {
-        const ent = findEntity(this.originalText, parent.nestsRelId);
+        const ent = this.find(parent.nestsRelId);
         if (ent) {
           replacements.push({
             start: ent.start,
@@ -1098,7 +1598,7 @@ export class IfcSession {
           );
         }
       } else if (this.dirtyScheduleControl) {
-        const ent = findEntity(this.originalText, this.schedule.scheduleControlRelId);
+        const ent = this.find(this.schedule.scheduleControlRelId);
         if (ent) {
           replacements.push({
             start: ent.start,
@@ -1110,13 +1610,43 @@ export class IfcSession {
     }
 
     for (const rel of this.createdSequenceRels) {
-      newLines.push(serializeRelSequence(rel.relId, rel.predId, rel.succId, rel.type));
+      if (rel.lagTimeId != null && this.createdLagTimeIds.has(rel.lagTimeId) && rel.lagDays) {
+        newLines.push(serializeIfcLagTime(rel.lagTimeId, rel.lagDays));
+      }
+      newLines.push(
+        serializeRelSequence(rel.relId, rel.predId, rel.succId, rel.type, this.schema, this.timeLagArg(rel)),
+      );
+    }
+    const writtenLag = new Set(this.createdSequenceRels.map((r) => r.lagTimeId).filter((id): id is number => id != null));
+    for (const rel of this.dirtySequenceRels.values()) {
+      if (rel.lagTimeId != null && rel.lagDays) {
+        if (this.createdLagTimeIds.has(rel.lagTimeId) && !writtenLag.has(rel.lagTimeId)) {
+          newLines.push(serializeIfcLagTime(rel.lagTimeId, rel.lagDays));
+        } else if (this.dirtyLagTimeIds.has(rel.lagTimeId)) {
+          const lagEnt = this.find(rel.lagTimeId);
+          if (lagEnt) {
+            replacements.push({
+              start: lagEnt.start,
+              end: lagEnt.end,
+              text: rewriteIfcLagTime(lagEnt, rel.lagDays),
+            });
+          }
+        }
+      }
+      const ent = this.find(rel.relId);
+      if (ent) {
+        replacements.push({
+          start: ent.start,
+          end: ent.end,
+          text: rewriteRelSequence(ent, rel.predId, rel.succId, rel.type, this.timeLagArg(rel)),
+        });
+      }
     }
 
     const commented = new Set<number>();
     const comment = (id: number, reason?: string) => {
       if (commented.has(id)) return;
-      const ent = findEntity(this.originalText, id);
+      const ent = this.find(id);
       if (!ent) return;
       commented.add(id);
       replacements.push({ start: ent.start, end: ent.end, text: commentEntity(ent, reason) });
@@ -1124,20 +1654,44 @@ export class IfcSession {
     for (const taskId of this.deletedTaskIds) comment(taskId);
     for (const expressId of this.deletedEntityIds) comment(expressId);
     if (this.deletedTaskIds.size) {
-      for (const ent of findSequenceEntities(this.originalText)) {
+      for (const ent of findSequenceEntities(this.step(), this.index)) {
         if (![...this.deletedTaskIds].some((id) => sequenceInvolves(ent, id))) continue;
         comment(ent.expressId, "unlinked");
       }
     }
 
-    const patched = applyReplacements(this.originalText, replacements);
+    if (this.siteLimitDirty) {
+      const toComment = new Set<number>(this.removedSiteLimitCluster);
+      const limit = this.schedule.siteLimit;
+      if (limit?.clusterIds) for (const id of limit.clusterIds) toComment.add(id);
+      for (const id of toComment) comment(id, "site-limit");
+      if (limit && limit.points.length >= 3) {
+        const written = serializeSiteLimit({
+          limit,
+          ownerHistory: oh,
+          index: this.index,
+          nextExpressId: this.nextExpressId ?? this.index.maxId + 1,
+        });
+        newLines.push(...written.lines);
+        this.nextExpressId = written.nextExpressId;
+        limit.annotationId = written.annotationId;
+        limit.globalId = written.globalId;
+        limit.clusterIds = written.clusterIds;
+        this.schedule.siteLimit = limit;
+      } else {
+        this.schedule.siteLimit = undefined;
+      }
+    }
+
+    const originalText = this.step();
+    const patched = applyReplacements(originalText, replacements);
     const withTasks = insertBeforeLastEndsec(patched, newLines.filter((l) => l.trim()));
     const georef = this.schedule.georef;
     const spatial =
       georef && (this.geoChanged || !extraIsIdentity(this.extra))
         ? patchIfcGeoref(
             withTasks,
-            this.nextExpressId ?? maxExpressId(this.originalText) + 1,
+            this.nextExpressId ?? maxExpressId(originalText, this.index) + 1,
             georef,
             this.extra,
             this.geoWrite,
@@ -1145,11 +1699,46 @@ export class IfcSession {
           )
         : null;
     if (spatial) this.nextExpressId = spatial.nextExpressId;
-    return latin1ToBytes(spatial?.text ?? withTasks);
+    const outText = spatial?.text ?? withTasks;
+    this.stepText = outText;
+    this.index = buildStepIndex(outText);
+    return latin1ToBytes(outText);
   }
 
-  download(fileName = this.fileName): void {
-    const bytes = this.exportBytes();
+  async exportBytes(): Promise<Uint8Array> {
+    const source = await this.sourceBytesForExport();
+    let bytes: Uint8Array;
+    let nextIndex: StepIndex | null = null;
+    if (typeof Worker !== "undefined") {
+      try {
+        const result = await runExportWorker(source, this.createExportSnapshot());
+        bytes = new Uint8Array(result.bytes!);
+        nextIndex = deserializeStepIndex(result.index);
+      } catch (error) {
+        console.warn("Worker de export IFC indisponível:", error);
+        const fallback = this.storeHash ? await loadIfcBytes(this.storeHash) : null;
+        if (fallback) this.stepText = bytesToLatin1(fallback);
+        else if (this.stepText == null) throw error;
+        bytes = await this.exportBytesOnCurrentThread();
+        nextIndex = this.index;
+      }
+    } else {
+      if (this.stepText == null) this.stepText = bytesToLatin1(source);
+      bytes = await this.exportBytesOnCurrentThread();
+      nextIndex = this.index;
+    }
+    await this.commitExport(bytes, nextIndex);
+    return bytes;
+  }
+
+  /** Usado pelo export worker; não chamar no fluxo normal da UI. */
+  async exportBytesOnCurrentThread(): Promise<Uint8Array> {
+    await this.ensureText();
+    return this.buildExportBytes();
+  }
+
+  async download(fileName = this.fileName): Promise<void> {
+    const bytes = await this.exportBytes();
     const blob = new Blob([bytes as BlobPart], { type: "application/x-step" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -1162,6 +1751,152 @@ export class IfcSession {
     URL.revokeObjectURL(url);
     this.dirty = false;
   }
+
+  private async sourceBytesForExport(): Promise<Uint8Array> {
+    if (this.storeHash) {
+      const bytes = await loadIfcBytes(this.storeHash);
+      if (bytes) return bytes;
+    }
+    if (this.stepText != null) return latin1ToBytes(this.stepText);
+    throw new Error("Não há IFC canônico disponível para exportar.");
+  }
+
+  private async commitExport(bytes: Uint8Array, nextIndex: StepIndex | null): Promise<void> {
+    if (nextIndex) this.index = nextIndex;
+    else this.index = buildStepIndex(bytesToLatin1(bytes));
+    const exported = bytesToLatin1(bytes);
+    if (this.siteLimitDirty || this.schedule.siteLimit) {
+      this.schedule.siteLimit = parseSiteLimitFromStep(exported, this.index) ?? undefined;
+    }
+    if (this.storeHash) {
+      const nextHash = await hashIfcBytes(bytes);
+      const stored = await saveIfcBytes(nextHash, bytes);
+      if (stored) this.storeHash = nextHash;
+      this.stepText = null;
+    } else {
+      this.stepText = exported;
+    }
+    this.nextExpressId = this.index.maxId + 1;
+    this.clearCommittedChanges();
+  }
+
+  private clearCommittedChanges(): void {
+    const sets = [
+      this.identityEdited,
+      this.timeEdited,
+      this.costEdited,
+      this.createdTaskTimeIds,
+      this.createdCostValueIds,
+      this.createdStarCostValueIds,
+      this.createdCostItemIds,
+      this.costItemNeedsValueLink,
+      this.createdGroupIds,
+      this.renamedGroupIds,
+      this.dirtyGroupMemberIds,
+      this.deletedGroupIds,
+      this.createdTaskIds,
+      this.deletedTaskIds,
+      this.deletedEntityIds,
+      this.createdNestsRelIds,
+      this.dirtyNestsParentIds,
+      this.createdLagTimeIds,
+      this.dirtyLagTimeIds,
+    ];
+    for (const set of sets) set.clear();
+    this.createdCostRels.clear();
+    this.elementNameEdited.clear();
+    this.propertyValueEdited.clear();
+    this.createdProductRels.clear();
+    this.removedExistingAssignRels.clear();
+    this.removedProductLinks.clear();
+    this.createdGroupAssignRel.clear();
+    this.createdGroupTaskRels.clear();
+    this.removedGroupTaskRels.clear();
+    this.removedGroupTaskLinks.clear();
+    this.ifc2x3Times.clear();
+    this.createdSequenceRels.length = 0;
+    this.dirtySequenceRels.clear();
+    this.createdDateLines.length = 0;
+    this.createdWorkPlan = false;
+    this.createdWorkSchedule = false;
+    this.createdDeclaresRelId = undefined;
+    this.createdAggregatesRel = false;
+    this.createdScheduleControlRel = false;
+    this.dirtyScheduleControl = false;
+    this.renamedSchedule = false;
+    this.geoChanged = false;
+    this.siteLimitDirty = false;
+    this.removedSiteLimitCluster = [];
+    this.geoWrite = null;
+    this.extra = emptyExtraTransform();
+    this.changeSet.clear();
+    this.dirty = false;
+  }
+}
+
+async function runExportWorker(
+  source: Uint8Array,
+  snapshot: IfcSessionExportSnapshot,
+): Promise<ExportWorkerResult & { bytes: ArrayBuffer; index: StepIndexWire }> {
+  const payload =
+    source.buffer instanceof ArrayBuffer &&
+    source.byteOffset === 0 &&
+    source.byteLength === source.buffer.byteLength
+      ? source.buffer
+      : source.slice().buffer;
+  const worker = new Worker(new URL("./export.worker.ts", import.meta.url), { type: "module" });
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      worker.terminate();
+      reject(new Error("Tempo limite ao exportar IFC."));
+    }, 300_000);
+    worker.onmessage = (event: MessageEvent<ExportWorkerResult>) => {
+      window.clearTimeout(timer);
+      worker.terminate();
+      const result = event.data;
+      if (!result?.bytes || !result.index || result.error) {
+        reject(new Error(result?.error || "O worker não devolveu o IFC exportado."));
+        return;
+      }
+      resolve(result as ExportWorkerResult & { bytes: ArrayBuffer; index: StepIndexWire });
+    };
+    worker.onerror = (event) => {
+      window.clearTimeout(timer);
+      worker.terminate();
+      reject(event);
+    };
+    worker.postMessage({ source: payload, snapshot }, [payload]);
+  });
+}
+
+function restoreSet<T>(target: Set<T>, values: unknown): void {
+  target.clear();
+  if (!Array.isArray(values)) return;
+  for (const value of values) target.add(value as T);
+}
+
+function restoreMap<K, V>(target: Map<K, V>, entries: Array<[unknown, unknown]> | undefined): void {
+  target.clear();
+  for (const [key, value] of entries ?? []) target.set(key as K, value as V);
+}
+
+function serializeNominalValue(
+  previous: string,
+  value: string | number | boolean | null,
+): string {
+  if (value == null) return "$";
+  const wrapper = /^\s*([A-Z][A-Z0-9_]*)\s*\(/i.exec(previous)?.[1]?.toUpperCase();
+  if (typeof value === "string") {
+    const scalar = ifcString(value);
+    return `${wrapper ?? "IFCLABEL"}(${scalar})`;
+  }
+  if (typeof value === "boolean") {
+    const scalar = value ? ".T." : ".F.";
+    return `${wrapper ?? "IFCBOOLEAN"}(${scalar})`;
+  }
+  if (!Number.isFinite(value)) throw new Error("O valor numérico da propriedade é inválido.");
+  const scalar = Number.isInteger(value) ? `${value}.` : String(value);
+  return `${wrapper ?? "IFCREAL"}(${scalar})`;
 }
 
 function rewriteIfcTask(ent: StepEntity, task: Task): string {
@@ -1169,12 +1904,14 @@ function rewriteIfcTask(ent: StepEntity, task: Task): string {
   if (args.length >= 13) {
     args[2] = ifcOptionalString(task.name);
     args[5] = ifcOptionalString(task.identification);
+    args[9] = task.isMilestone ? ".T." : ".F.";
     if (task.taskTimeId != null) args[11] = `#${task.taskTimeId}`;
     return serializeEntity(ent.expressId, ent.type, args);
   }
   if (args.length >= 10) {
     args[2] = ifcOptionalString(task.name);
     args[5] = ifcString(task.identification?.trim() || `T${task.id}`);
+    args[8] = task.isMilestone ? ".T." : ".F.";
     return serializeEntity(ent.expressId, ent.type, args);
   }
   throw new Error(`IfcTask #${task.id} tem ${args.length} atributos; esperado ≥ 10.`);
@@ -1378,33 +2115,69 @@ function rewriteAssignToGroupMembers(ent: StepEntity, group: SelectionGroup): st
   return serializeEntity(ent.expressId, ent.type, args);
 }
 
-function findGroupAssignRel(text: string, groupId: number): StepEntity | null {
+function findGroupAssignRel(text: string, groupId: number, index?: StepIndex | null): StepEntity | null {
+  const ids = index ? idsOfType(index, "IFCRELASSIGNSTOGROUP") : null;
+  if (ids) {
+    for (const id of ids) {
+      const ent = findEntity(text, id, index);
+      if (!ent || ent.args.length < 7) continue;
+      if (ent.args[6] === `#${groupId}`) return ent;
+    }
+    return null;
+  }
   const re = /#(\d+)\s*=\s*IFCRELASSIGNSTOGROUP\s*\(/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const ent = findEntity(text, Number(m[1]));
+    const ent = findEntity(text, Number(m[1]), index);
     if (!ent || ent.args.length < 7) continue;
     if (ent.args[6] === `#${groupId}`) return ent;
   }
   return null;
 }
 
-function findGroupTaskRel(text: string, taskId: number, groupId: number): StepEntity | null {
+function findGroupTaskRel(text: string, taskId: number, groupId: number, index?: StepIndex | null): StepEntity | null {
+  const ids = index ? idsOfType(index, "IFCRELASSIGNSTOPROCESS") : null;
+  if (ids) {
+    for (const id of ids) {
+      const ent = findEntity(text, id, index);
+      if (!ent || ent.args.length < 7) continue;
+      if (ent.args[6] === `#${taskId}` && relatedIncludes(ent.args[4] ?? "", groupId)) return ent;
+    }
+    return null;
+  }
   const re = /#(\d+)\s*=\s*IFCRELASSIGNSTOPROCESS\s*\(/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const ent = findEntity(text, Number(m[1]));
+    const ent = findEntity(text, Number(m[1]), index);
     if (!ent || ent.args.length < 7) continue;
     if (ent.args[6] === `#${taskId}` && relatedIncludes(ent.args[4] ?? "", groupId)) return ent;
   }
   return null;
 }
 
-function findProductTaskRel(text: string, taskId: number, productId: number): StepEntity | null {
+function findProductTaskRel(text: string, taskId: number, productId: number, index?: StepIndex | null): StepEntity | null {
+  const types = index
+    ? [...idsOfType(index, "IFCRELASSIGNSTOPRODUCT"), ...idsOfType(index, "IFCRELASSIGNSTOPROCESS")]
+    : null;
+  if (types) {
+    for (const id of types) {
+      const ent = findEntity(text, id, index);
+      if (!ent || ent.args.length < 7) continue;
+      const related = ent.args[4] ?? "";
+      const relating = ent.args[6] ?? "";
+      const type = ent.type.toUpperCase();
+      if (type === "IFCRELASSIGNSTOPRODUCT") {
+        if (relating === `#${productId}` && relatedIncludes(related, taskId)) return ent;
+      } else if (type === "IFCRELASSIGNSTOPROCESS") {
+        if (relating === `#${taskId}` && relatedIncludes(related, productId)) return ent;
+      }
+    }
+    return null;
+  }
   const re = /#(\d+)\s*=\s*IFCRELASSIGNS(?:TOPRODUCT|TOPROCESS)\s*\(/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const ent = findEntity(text, Number(m[1]));
+    const ent = findEntity(text, Number(m[1]), index);
     if (!ent || ent.args.length < 7) continue;
     const related = ent.args[4] ?? "";
     const relating = ent.args[6] ?? "";

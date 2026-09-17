@@ -49,9 +49,13 @@ export function ownAndGroupGuids(schedule: ScheduleData, t: Task): string[] {
 
 /** Cache interno de `computeStateBuckets` — invalidar quando mudam produtos/conjuntos. */
 export const LEAF_BY_GUID_CACHE = "__leafByGuid__";
+/** Índice invertido GUID → tarefas (inclui ancestrais via productGuidsByTask). */
+export const TASK_IDS_BY_GUID = "__taskIdsByGuid__";
 
 export function invalidateLeafByGuidCache(schedule: ScheduleData): void {
-  delete (schedule as unknown as Record<string, unknown>)[LEAF_BY_GUID_CACHE];
+  const rec = schedule as unknown as Record<string, unknown>;
+  delete rec[LEAF_BY_GUID_CACHE];
+  delete rec[TASK_IDS_BY_GUID];
 }
 
 /** Recalcula GUIDs agregados (tarefa + conjuntos + descendentes) após ligar/desligar produtos. */
@@ -68,6 +72,22 @@ export function recomputeProductGuidsByTask(schedule: ScheduleData): void {
   };
   schedule.productGuidsByTask.clear();
   for (const r of schedule.roots) walk(r);
+}
+
+export function getTaskIdsByGuid(schedule: ScheduleData): Map<string, number[]> {
+  const rec = schedule as unknown as Record<string, unknown>;
+  const cached = rec[TASK_IDS_BY_GUID] as Map<string, number[]> | undefined;
+  if (cached) return cached;
+  const map = new Map<string, number[]>();
+  for (const [tid, guids] of schedule.productGuidsByTask) {
+    for (const g of guids) {
+      const list = map.get(g);
+      if (list) list.push(tid);
+      else map.set(g, [tid]);
+    }
+  }
+  rec[TASK_IDS_BY_GUID] = map;
+  return map;
 }
 
 /** Cronograma vazio para a UI antes de importar um IFC. */

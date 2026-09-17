@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 180" role="img" aria-labelledby="title desc">
+  <title id="title">Logo vtwin</title>
+  <desc id="desc">Assinatura vtwin com símbolo formado por dois Vs gêmeos.</desc>
+  <defs><clipPath id="lockup-mark-clip"><polygon points="11.183,29.632 82.674,192.336 120.000,98.038 157.326,192.336 228.817,29.632 203.183,18.368 158.674,119.664 120.000,21.962 81.326,119.664 36.817,18.368"/></clipPath></defs>
+  
+  <g transform="translate(16 10) scale(.8889)">
+    <polygon points="11.183,29.632 82.674,192.336 120.000,98.038 157.326,192.336 228.817,29.632 203.183,18.368 158.674,119.664 120.000,21.962 81.326,119.664 36.817,18.368" fill="#F8FBFA"/>
+    <path d="M95.300 -2.400 L158 156 L216 24" fill="none" stroke="#F8FBFA" stroke-width="28" stroke-linecap="butt" stroke-linejoin="miter" clip-path="url(#lockup-mark-clip)"/>
+  </g>
+  <g transform="translate(252 63) scale(1.1)">
+    <g fill="#F8FBFA">
+  <path d="M0 10H10L17 38 24 10H34L22 52H12Z"/>
+  <path d="M49 0H59V13H68V22H59V39C59 46 62 49 68 49V52H62C53 52 49 47 49 40V22H39V13H49Z"/>
+  <path d="M72 10H82L88 39 96 10H104L112 39 118 10H128L118 52H107L100 25 92 52H81Z"/>
+  <path d="M136 0H145V9H136ZM136 14H145V52H136Z"/>
+  <path d="M154 52V10H164V16C169 11 175 9 181 9C192 9 198 17 198 30V52H188V31C188 22 185 18 178 18C169 18 164 24 164 33V52Z"/>
+</g>
+  </g>
+</svg>

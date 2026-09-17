@@ -1,4 +1,5 @@
 import { addDays, diffDays, recomputePlanRange, startOfDay } from "./dates";
+import { rollupSummaryDates } from "../schedule/links";
 import type { PlanAttachment, PlanTask, ProjectPlan } from "./types";
 
 let seq = 0;
@@ -49,6 +50,7 @@ export function emptyPlan(name = "Novo planejamento"): ProjectPlan {
 
 export function finalizePlan(partial: Omit<ProjectPlan, "minDate" | "maxDate"> & Partial<Pick<ProjectPlan, "minDate" | "maxDate">>): ProjectPlan {
   markSummaries(partial.tasks);
+  rollupSummaryDates(partial.tasks);
   const range = recomputePlanRange(partial.tasks.flatMap((t) => [t.start, t.end]));
   return {
     ...partial,
@@ -66,11 +68,13 @@ export function markSummaries(tasks: PlanTask[]): void {
 
 export function applyDuration(task: PlanTask, days: number): void {
   task.durationDays = Math.max(0, days);
-  if (task.isMilestone) {
+  if (days <= 0) {
+    task.isMilestone = true;
     task.end = task.start;
     task.durationDays = 0;
     return;
   }
+  task.isMilestone = false;
   if (task.start) task.end = addDays(task.start, Math.max(0, days));
 }
 

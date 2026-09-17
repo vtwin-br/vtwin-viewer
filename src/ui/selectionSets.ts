@@ -1,4 +1,5 @@
 import type { SelectionGroup } from "../schedule/types";
+import { DND_GROUP, DND_GUIDS, clearDrops, getDragJson, hasType, markDrop, setDragJson } from "./dnd";
 
 export interface SelectionSetsOptions {
   onCreate: () => void;
@@ -7,6 +8,8 @@ export interface SelectionSetsOptions {
   onSelect: (groupId: number) => void;
   onAddSelection: (groupId: number) => void;
   onAssign: (groupId: number) => void;
+  onDropGuids?: (groupId: number, guids: string[]) => void;
+  onReorder?: (fromId: number, beforeId: number | null) => void;
 }
 
 export class SelectionSetsList {
@@ -21,6 +24,11 @@ export class SelectionSetsList {
     this.opts = opts;
     this.root.addEventListener("click", this.onClick);
     this.root.addEventListener("change", this.onChange);
+    this.root.addEventListener("dragstart", this.onDragStart);
+    this.root.addEventListener("dragend", this.onDragEnd);
+    this.root.addEventListener("dragover", this.onDragOver);
+    this.root.addEventListener("dragleave", this.onDragLeave);
+    this.root.addEventListener("drop", this.onDrop);
   }
 
   setSelected(id: number | null): void {
@@ -42,7 +50,15 @@ export class SelectionSetsList {
     const list = groups.length ? groups : this.lastGroups;
     const want = new Set(guids);
     this.hitIds = new Set(list.filter((g) => g.productGuids.some((id) => want.has(id))).map((g) => g.id));
-    this.render(list);
+    this.lastGroups = list;
+    if (!this.root.querySelector(".ms-set")) {
+      this.render(list);
+      return;
+    }
+    this.root.querySelectorAll<HTMLElement>("[data-id]").forEach((el) => {
+      const id = Number(el.dataset.id);
+      el.classList.toggle("is-hit", this.hitIds.has(id));
+    });
     this.root.querySelector<HTMLElement>(".ms-set.is-hit")?.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
@@ -53,7 +69,7 @@ export class SelectionSetsList {
   render(groups: SelectionGroup[]): void {
     this.lastGroups = groups;
     if (!groups.length) {
-      this.root.innerHTML = `<p class="ms-empty">Nenhum conjunto. Selecione elementos no modelo ou na árvore e clique em «Novo conjunto».</p>`;
+      this.root.innerHTML = `<div class="empty-state"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="4" y="7" width="16" height="12" rx="2"/><path d="M8 7V5h8v2" stroke-linecap="round"/></svg><span>Conjuntos</span></div>`;
       return;
     }
     this.root.innerHTML = groups
@@ -61,18 +77,16 @@ export class SelectionSetsList {
         const selected = g.id === this.selectedId ? " is-selected" : "";
         const hit = this.hitIds.has(g.id) ? " is-hit" : "";
         const linked = this.taskId != null && g.taskIds.includes(this.taskId);
-        return `<article class="ms-set${selected}${hit}" data-id="${g.id}">
+        return `<article class="ms-set${selected}${hit}" data-id="${g.id}" draggable="true">
           <button type="button" class="ms-set-main" data-act="select">
             <strong>${escapeHtml(g.name)}</strong>
-            <span>${g.productGuids.length} elemento${g.productGuids.length === 1 ? "" : "s"}</span>
-            ${g.sourceFileName ? `<em>${escapeHtml(g.sourceFileName.replace(/\.ifc$/i, ""))}</em>` : ""}
-            ${linked ? `<em>ligado à tarefa</em>` : ""}
-            ${hit ? `<em>contém a seleção</em>` : ""}
+            <span>${g.productGuids.length}</span>
+            ${linked ? `<em>ligado</em>` : ""}
           </button>
-          <input class="ms-set-name" data-act="rename" value="${escapeAttr(g.name)}" aria-label="Nome do conjunto" />
+          <input class="ms-set-name" data-act="rename" value="${escapeAttr(g.name)}" aria-label="Nome" />
           <div class="ms-set-actions">
-            <button type="button" data-act="add">+ seleção</button>
-            <button type="button" data-act="assign">${linked ? "Desligar" : "Ligar à tarefa"}</button>
+            <button type="button" data-act="add">+</button>
+            <button type="button" data-act="assign">${linked ? "Desligar" : "Ligar"}</button>
             <button type="button" data-act="delete" class="is-danger">Apagar</button>
           </div>
         </article>`;
@@ -103,6 +117,62 @@ export class SelectionSetsList {
     const id = Number(card?.dataset.id);
     if (!Number.isFinite(id)) return;
     this.opts.onRename(id, input.value);
+  };
+
+  private onDragStart = (e: DragEvent) => {
+    const t = e.target as HTMLElement;
+    if (t.closest("input, button")) {
+      e.preventDefault();
+      return;
+    }
+    const card = t.closest<HTMLElement>("[data-id]");
+    if (!card || !e.dataTransfer) return;
+    const id = Number(card.dataset.id);
+    if (!Number.isFinite(id)) return;
+    setDragJson(e.dataTransfer, DND_GROUP, id, "move");
+    card.classList.add("is-dragging");
+  };
+
+  private onDragEnd = () => {
+    this.root.querySelectorAll(".is-dragging, .is-drop-ready").forEach((el) => {
+      el.classList.remove("is-dragging", "is-drop-ready");
+    });
+  };
+
+  private onDragOver = (e: DragEvent) => {
+    if (!hasType(e, DND_GUIDS) && !hasType(e, DND_GROUP)) return;
+    const card = (e.target as HTMLElement).closest<HTMLElement>("[data-id]");
+    if (!card) return;
+    e.preventDefault();
+    if (e.dataTransfer) e.dataTransfer.dropEffect = hasType(e, DND_GUIDS) ? "copy" : "move";
+    clearDrops(this.root);
+    markDrop(card, true);
+  };
+
+  private onDragLeave = (e: DragEvent) => {
+    const card = (e.target as HTMLElement).closest<HTMLElement>("[data-id]");
+    const next = e.relatedTarget as Node | null;
+    if (card && next && card.contains(next)) return;
+    markDrop(card, false);
+  };
+
+  private onDrop = (e: DragEvent) => {
+    const card = (e.target as HTMLElement).closest<HTMLElement>("[data-id]");
+    clearDrops(this.root);
+    if (!card) return;
+    const id = Number(card.dataset.id);
+    if (!Number.isFinite(id)) return;
+    const guids = getDragJson<string[]>(e.dataTransfer, DND_GUIDS);
+    if (guids?.length) {
+      e.preventDefault();
+      this.opts.onDropGuids?.(id, guids);
+      return;
+    }
+    const fromId = getDragJson<number>(e.dataTransfer, DND_GROUP);
+    if (fromId != null && fromId !== id) {
+      e.preventDefault();
+      this.opts.onReorder?.(fromId, id);
+    }
   };
 }
 

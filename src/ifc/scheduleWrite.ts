@@ -1,4 +1,5 @@
-import type { Task } from "../schedule/types";
+import type { StepIndex } from "./stepIndex";
+import type { SequenceType, Task } from "../schedule/types";
 import {
   createIfcGuid,
   findEntity,
@@ -11,8 +12,7 @@ import {
   type StepEntity,
 } from "./stepText";
 
-export type { IfcSchemaKind };
-export type SequenceType = "FS" | "SS" | "FF" | "SF";
+export type { IfcSchemaKind, SequenceType };
 
 export interface NewTaskInput {
   name: string;
@@ -31,7 +31,7 @@ export interface OutlineRowInput {
   end?: Date;
   outlineLevel: number;
   isMilestone?: boolean;
-  predecessorIndexes?: Array<{ index: number; type: SequenceType }>;
+  predecessorIndexes?: Array<{ index: number; type: SequenceType; lagDays?: number }>;
 }
 
 export function serializeNewIfcTask(
@@ -294,11 +294,26 @@ export function serializeRelNests(
   return serializeEntity(expressId, "IFCRELNESTS", args);
 }
 
+export function serializeIfcLagTime(expressId: number, lagDays: number): string {
+  const args = ["$", "$", "$", ifcDurationDays(lagDays), ".WORKTIME."];
+  return serializeEntity(expressId, "IFCLAGTIME", args);
+}
+
+export function rewriteIfcLagTime(ent: StepEntity, lagDays: number): string {
+  const args = [...ent.args];
+  while (args.length < 5) args.push("$");
+  args[3] = ifcDurationDays(lagDays);
+  if (args[4] === "$") args[4] = ".WORKTIME.";
+  return serializeEntity(ent.expressId, ent.type, args);
+}
+
 export function serializeRelSequence(
   expressId: number,
   predId: number,
   succId: number,
   type: SequenceType,
+  schema: IfcSchemaKind = "IFC4",
+  timeLagArg = "$",
 ): string {
   const args = [
     ifcString(createIfcGuid()),
@@ -307,11 +322,39 @@ export function serializeRelSequence(
     "$",
     `#${predId}`,
     `#${succId}`,
-    "$",
+    timeLagArg,
     sequenceEnum(type),
-    "$",
   ];
+  if (schema !== "IFC2X3") args.push("$");
   return serializeEntity(expressId, "IFCRELSEQUENCE", args);
+}
+
+export function rewriteRelSequence(
+  ent: StepEntity,
+  predId: number,
+  succId: number,
+  type: SequenceType,
+  timeLagArg: string,
+): string {
+  const args = [...ent.args];
+  while (args.length < 8) args.push("$");
+  args[4] = `#${predId}`;
+  args[5] = `#${succId}`;
+  args[6] = timeLagArg;
+  args[7] = sequenceEnum(type);
+  return serializeEntity(ent.expressId, ent.type, args);
+}
+
+export function ifcDurationDays(days: number): string {
+  const n = Math.round(days);
+  if (n === 0) return "$";
+  const body = n < 0 ? `-P${Math.abs(n)}D` : `P${n}D`;
+  return `IFCDURATION('${body}')`;
+}
+
+export function ifcTimeMeasureDays(days: number): string {
+  const seconds = Math.round(days * 86400);
+  return Number.isInteger(seconds) ? `${seconds}.` : String(seconds);
 }
 
 export function rewriteWorkControlName(ent: StepEntity, name: string): string {
@@ -345,12 +388,20 @@ export function sequenceEnum(type: SequenceType): string {
   return ".FINISH_START.";
 }
 
-export function findSequenceEntities(text: string): StepEntity[] {
+export function findSequenceEntities(text: string, index?: StepIndex | null): StepEntity[] {
   const out: StepEntity[] = [];
+  const ids = index?.typeIds.get("IFCRELSEQUENCE");
+  if (ids) {
+    for (const id of ids) {
+      const ent = findEntity(text, id, index);
+      if (ent) out.push(ent);
+    }
+    return out;
+  }
   const re = /#(\d+)\s*=\s*IFCRELSEQUENCE\s*\(/gi;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const ent = findEntity(text, Number(m[1]));
+    const ent = findEntity(text, Number(m[1]), index);
     if (ent) out.push(ent);
   }
   return out;

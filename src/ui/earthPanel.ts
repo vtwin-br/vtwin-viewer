@@ -12,6 +12,8 @@ export interface EarthPanelOptions {
   initial: EarthPanelState;
   onChange: (state: EarthPanelState) => void;
   onTransformChange: (t: ModelExtraTransform) => void;
+  /** Delta em metros na vista: positivo sobe a malha Google, o IFC fica. */
+  onTerrainY: (delta: number, sceneY: number) => void;
   onModeChange: (mode: GizmoMode | null) => void;
   onSnapTerrain: () => void;
   /** Só oculta o painel; a camada Earth continua ligada. */
@@ -32,6 +34,7 @@ export class EarthPanel {
   private elLat: HTMLInputElement;
   private elLon: HTMLInputElement;
   private elTerrain: HTMLElement;
+  private elTerrainY: HTMLInputElement;
   private elSnap: HTMLButtonElement;
   private elX: HTMLInputElement;
   private elY: HTMLInputElement;
@@ -47,6 +50,7 @@ export class EarthPanel {
   private elModeRotate: HTMLButtonElement;
   private elReset: HTMLButtonElement;
   private gizmoMode: GizmoMode | null = null;
+  private terrainY = 0;
 
   constructor(root: HTMLElement, opts: EarthPanelOptions) {
     this.root = root;
@@ -63,6 +67,7 @@ export class EarthPanel {
     this.elLat = $("ep-lat");
     this.elLon = $("ep-lon");
     this.elTerrain = $("ep-terrain");
+    this.elTerrainY = $("ep-terrain-y");
     this.elSnap = $("ep-snap");
     this.elX = $("ep-x");
     this.elY = $("ep-y");
@@ -122,6 +127,18 @@ export class EarthPanel {
     this.state.anchor.altitude = meters;
   }
 
+  /**
+   * Y da malha Google na vista (metros). `emit=false` só sincroniza o campo,
+   * sem voltar a deslocar o terreno.
+   */
+  setTerrainY(sceneY: number, emit = false): void {
+    const y = Number.isFinite(sceneY) ? sceneY : 0;
+    const delta = y - this.terrainY;
+    this.terrainY = y;
+    this.elTerrainY.value = String(roundTo(y, 3));
+    if (emit && Math.abs(delta) > 1e-6) this.opts.onTerrainY(delta, y);
+  }
+
   setMode(mode: GizmoMode | null): void {
     this.gizmoMode = mode;
     this.elModeMove.classList.toggle("is-active", mode === "translate");
@@ -142,6 +159,13 @@ export class EarthPanel {
     this.elLat.addEventListener("change", () => this.commitLatLon(this.elLat.valueAsNumber, undefined));
     this.elLon.addEventListener("change", () => this.commitLatLon(undefined, this.elLon.valueAsNumber));
     this.elSnap.addEventListener("click", () => this.opts.onSnapTerrain());
+    this.elTerrainY.addEventListener("change", () => {
+      const y = Number.isFinite(this.elTerrainY.valueAsNumber) ? this.elTerrainY.valueAsNumber : this.terrainY;
+      this.setTerrainY(y, true);
+    });
+    this.elTerrainY.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.elTerrainY.blur();
+    });
 
     // Transformação do modelo (gizmo)
     const onAxis = (key: "x" | "y" | "z", el: HTMLInputElement) => {

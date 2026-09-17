@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180" role="img" aria-labelledby="title desc">
+  <title id="title">Símbolo vtwin</title>
+  <desc id="desc">Dois módulos em V convergem para formar um W, representando a conexão entre o físico e o digital.</desc>
+  <defs><clipPath id="mark-clip"><polygon points="11.183,29.632 82.674,192.336 120.000,98.038 157.326,192.336 228.817,29.632 203.183,18.368 158.674,119.664 120.000,21.962 81.326,119.664 36.817,18.368"/></clipPath></defs>
+  
+  <polygon points="11.183,29.632 82.674,192.336 120.000,98.038 157.326,192.336 228.817,29.632 203.183,18.368 158.674,119.664 120.000,21.962 81.326,119.664 36.817,18.368" fill="#071820"/>
+  <path d="M95.300 -2.400 L158 156 L216 24" fill="none" stroke="#071820" stroke-width="28" stroke-linecap="butt" stroke-linejoin="miter" clip-path="url(#mark-clip)"/>
+</svg>

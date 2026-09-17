@@ -35,12 +35,16 @@ export async function parseSchedule(
 ): Promise<ScheduleData> {
   const ifcApi = await getScheduleApi(wasmPath);
   const modelId = ifcApi.OpenModel(buffer);
-
   try {
     return extract(ifcApi, modelId);
   } finally {
     ifcApi.CloseModel(modelId);
   }
+}
+
+/** Extrai o cronograma de um modelo web-ifc já aberto (1.ª conversão IfcLoader). */
+export function parseOpenIfcModel(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
+  return extract(ifcApi, modelId);
 }
 
 function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
@@ -158,7 +162,14 @@ function extract(ifcApi: WebIFC.IfcAPI, modelId: number): ScheduleData {
     if (predId == null || succId == null) continue;
     const succ = allTasks.get(succId);
     if (!succ || !allTasks.has(predId)) continue;
-    succ.predecessors.push({ taskId: predId, type: sequenceType(enumStr(rel?.SequenceType)) });
+    const lag = parseSequenceLag(ifcApi, modelId, rel?.TimeLag);
+    succ.predecessors.push({
+      taskId: predId,
+      type: sequenceType(enumStr(rel?.SequenceType)),
+      lagDays: lag.days,
+      relId: id,
+      lagTimeId: lag.lagTimeId,
+    });
   }
 
   // ---------- 5) Task -> Produtos ----------
@@ -406,6 +417,58 @@ function sequenceType(raw?: string): "FS" | "SS" | "FF" | "SF" {
   if (s.includes("FINISH_FINISH") || s === "FF") return "FF";
   if (s.includes("START_FINISH") || s === "SF") return "SF";
   return "FS";
+}
+
+function parseSequenceLag(
+  ifcApi: WebIFC.IfcAPI,
+  modelId: number,
+  timeLag: any,
+): { days?: number; lagTimeId?: number } {
+  if (timeLag == null || timeLag === "") return {};
+  const asNumber = monetary(timeLag) ?? intVal(timeLag);
+  if (asNumber != null && Number.isFinite(asNumber)) {
+    return { days: timeMeasureToDays(asNumber) };
+  }
+  const iso = str(timeLag);
+  if (iso) {
+    const days = parseSignedDurationDays(iso);
+    if (days != null) return { days };
+  }
+  const lagTimeId = ref(timeLag);
+  if (lagTimeId == null) return {};
+  const lag = safeLine(ifcApi, modelId, lagTimeId);
+  if (!lag) return { lagTimeId };
+  const days = parseLagValue(lag?.LagValue);
+  return { days, lagTimeId };
+}
+
+function parseLagValue(v: any): number | undefined {
+  if (v == null || v === "") return undefined;
+  const asNumber = monetary(v) ?? intVal(v);
+  if (asNumber != null && Number.isFinite(asNumber)) return timeMeasureToDays(asNumber);
+  const iso = str(v);
+  if (iso) return parseSignedDurationDays(iso);
+  if (v && typeof v === "object") {
+    const nested = str(v.value) ?? str(v.wrappedValue);
+    if (nested) return parseSignedDurationDays(nested);
+  }
+  return undefined;
+}
+
+function parseSignedDurationDays(raw: string): number | undefined {
+  const s = raw.trim().toUpperCase();
+  const neg = s.startsWith("-");
+  const body = neg ? s.slice(1) : s;
+  if (!body.startsWith("P")) return undefined;
+  const day = /P(?:(\d+(?:\.\d+)?)D)?/.exec(body);
+  const n = day?.[1] ? Number(day[1]) : undefined;
+  if (n == null || !Number.isFinite(n)) return undefined;
+  return neg ? -n : n;
+}
+
+function timeMeasureToDays(n: number): number {
+  if (Math.abs(n) >= 3600) return Math.round(n / 86400);
+  return Math.round(n);
 }
 
 function webIfcType(name: string): number | undefined {

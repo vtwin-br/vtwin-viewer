@@ -1,12 +1,12 @@
-import type { FragmentsModel } from "@thatopen/fragments";
 import type { ScheduleData, Task } from "../schedule/types";
 import { emptySchedule, recomputeProductGuidsByTask, recomputeScheduleRange } from "../schedule/range";
 import type { IfcSession } from "./ifcSession";
+import type { BimModelRecord, BimModelRepository } from "../bim/contracts";
 
 /** ExpressIDs nativos cabem abaixo disto; o slot distingue o ficheiro na vista federada. */
 export const IFC_ID_STRIDE = 1_000_000_000;
 
-export const MODEL_LAYER_COLORS = ["#2266e3", "#0e8a68", "#c47a0a", "#7c3aed", "#c13515", "#0e7490"];
+export const MODEL_LAYER_COLORS = ["#087F72", "#2FD6BF", "#163540", "#748891", "#b8892e", "#9b3a2a"];
 
 export function encodeIfcRef(slot: number, nativeId: number): number {
   return slot * IFC_ID_STRIDE + nativeId;
@@ -17,13 +17,12 @@ export function decodeIfcRef(id: number): { slot: number; nativeId: number } {
   return { slot, nativeId: id - slot * IFC_ID_STRIDE };
 }
 
-export interface LoadedIfc {
+export interface LoadedIfc extends BimModelRecord {
   id: string;
   slot: number;
   fileName: string;
   displayName: string;
   session: IfcSession;
-  model: FragmentsModel;
   visible: boolean;
   color: string;
   hash?: string;
@@ -39,7 +38,7 @@ export interface NativeRef {
  * Vários ficheiros IFC na mesma vista. Cada um mantém o seu IfcSession / STEP.
  * A UI trabalha sobre o cronograma federado só dos modelos visíveis.
  */
-export class IfcModelSet {
+export class IfcModelSet implements BimModelRepository<LoadedIfc> {
   private readonly items: LoadedIfc[] = [];
   private nextSlot = 1;
   private seq = 1;
@@ -77,7 +76,6 @@ export class IfcModelSet {
     id?: string;
     fileName: string;
     session: IfcSession;
-    model: FragmentsModel;
     hash?: string;
   }): LoadedIfc {
     const slot = this.nextSlot++;
@@ -91,7 +89,6 @@ export class IfcModelSet {
         this.items.map((m) => m.displayName),
       ),
       session: input.session,
-      model: input.model,
       visible: true,
       color: MODEL_LAYER_COLORS[(slot - 1) % MODEL_LAYER_COLORS.length]!,
       hash: input.hash,
@@ -113,7 +110,6 @@ export class IfcModelSet {
     const m = this.get(id);
     if (!m) return undefined;
     m.visible = visible;
-    m.model.object.visible = visible;
     if (!visible && this.activeId === id) {
       this.activeId = this.visible[0]?.id ?? this.items[0]?.id ?? null;
     }
@@ -125,6 +121,20 @@ export class IfcModelSet {
     if (this.get(id)) this.activeId = id;
   }
 
+  /** Reordena a lista de modelos (vista; não altera o STEP). */
+  move(id: string, beforeId: string | null): void {
+    const from = this.items.findIndex((m) => m.id === id);
+    if (from < 0) return;
+    const [item] = this.items.splice(from, 1);
+    if (!item) return;
+    if (!beforeId) {
+      this.items.push(item);
+      return;
+    }
+    const to = this.items.findIndex((m) => m.id === beforeId);
+    this.items.splice(to < 0 ? this.items.length : to, 0, item);
+  }
+
   hasHash(hash: string): boolean {
     return this.items.some((m) => m.hash === hash);
   }
@@ -134,7 +144,7 @@ export class IfcModelSet {
   }
 
   label(): string {
-    if (this.items.length === 0) return "Importar IFC…";
+    if (this.items.length === 0) return "IFC";
     if (this.items.length === 1) return this.items[0]!.displayName;
     return `${this.items.length} modelos`;
   }
