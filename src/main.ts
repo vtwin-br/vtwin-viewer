@@ -12,7 +12,7 @@ import { SimHud } from "./ui/simHud";
 import { GoogleEarthLayer, type AnchorLLA } from "./viewer/earthTiles";
 import { EarthPanel } from "./ui/earthPanel";
 import { ModelGizmo } from "./viewer/modelGizmo";
-import { emptyExtraTransform, extraIsIdentity, georefSourceLabel, hasStoredSiteElevation, threeWorldToIfc } from "./ifc/georef";
+import { emptyExtraTransform, extraIsIdentity, extraFromObject, applyExtraToObject, georefSourceLabel, hasStoredSiteElevation, threeWorldToIfc } from "./ifc/georef";
 import { initPanelSplitters, constrainPanelWidths } from "./ui/splitters";
 import { initModuleNav } from "./ui/moduleNav";
 import { initAppShell } from "./ui/appShell";
@@ -21,11 +21,26 @@ import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
-import { IfcModelSet, encodeIfcRef, scheduleTitle } from "./ifc/modelSet";
+import { IfcModelSet, encodeIfcRef, scheduleTitle, type LoadedIfc } from "./ifc/modelSet";
+import {
+  createCoordinationSession,
+  persistCoordinationSession,
+  seedCoordinationFromDisciplines,
+} from "./ifc/coordination";
 import { ModelLayersUI } from "./ui/modelLayers";
 import { prepareIfcOffthread } from "./ifc/prepareIfc";
 import { hasIfcBytes, loadIfcBytes, saveIfcBytes } from "./ifc/stepStore";
 import { getCachedModel, hashIfcBytes, saveCachedModel } from "./ifc/fragCache";
+import {
+  downloadBytes,
+  isVtwinFileName,
+  listOrphanSummary,
+  looksLikeZip,
+  packVtwin,
+  unpackVtwin,
+  vtwinDownloadName,
+  type VtwinPackModel,
+} from "./project";
 import { computeCostProgress, formatMoney } from "./schedule/cost";
 import type { ScheduleData, Task } from "./schedule/types";
 import { FirstPersonController } from "./viewer/firstPerson";
@@ -56,12 +71,15 @@ async function main() {
   const viewportShell = document.getElementById("viewport-wrapper")!;
   const taskSearch = document.getElementById("task-search") as HTMLInputElement | null;
   const fileInput = document.getElementById("ifc-file-input") as HTMLInputElement | null;
+  const replaceIfcInput = document.getElementById("replace-ifc-input") as HTMLInputElement | null;
   const btnShare = document.getElementById("btn-share");
   const btnShareLabel = document.getElementById("btn-share-label");
   const btnExport = document.getElementById("btn-export") as HTMLButtonElement | null;
   const btnExportLabel = document.getElementById("btn-export-label");
+  const btnSaveProject = document.getElementById("btn-save-project") as HTMLButtonElement | null;
   const btnImport = document.getElementById("btn-import");
   const btnOpenIfc = document.getElementById("btn-open-ifc");
+  const fileExtEl = document.getElementById("file-ext");
   const btnImportPick = document.getElementById("btn-import-pick");
   const btnFit = document.getElementById("btn-fit");
   const btnWalk = document.getElementById("btn-walk") as HTMLButtonElement | null;
@@ -91,6 +109,45 @@ async function main() {
 
   let models = new IfcModelSet();
   const viewportModels = new ViewportModelRegistry();
+  let projectName: string | null = null;
+
+  const meshEntry = (): LoadedIfc | undefined => {
+    const active = models.active;
+    if (active && active.role !== "coordination") return active;
+    return models.disciplines.find((m) => m.visible) ?? models.disciplines[0];
+  };
+
+  const ensurePlanning = (): LoadedIfc | null => {
+    if (!models.size) return null;
+    if (models.coordination) return models.coordination;
+    const session = createCoordinationSession(projectName ?? models.label());
+    const entry = models.ensureCoordination(() => ({ session }));
+    seedCoordinationFromDisciplines(
+      session,
+      models.disciplines.map((d) => d.session),
+    );
+    void persistCoordinationSession(session)
+      .then((hash) => {
+        entry.hash = hash;
+      })
+      .catch((err) => console.warn("COORD.ifc:", err));
+    return entry;
+  };
+
+  const planningSession = () => ensurePlanning()?.session ?? null;
+
+  const resolvePlanningTask = (federatedId: number, globalId?: string) => {
+    const root = ensurePlanning();
+    const gid = globalId || scheduleRef?.byId.get(federatedId)?.globalId;
+    if (root && gid) {
+      for (const t of root.session.schedule.byId.values()) {
+        if (t.globalId === gid) {
+          return { model: root, nativeId: t.id, session: root.session };
+        }
+      }
+    }
+    return models.resolveTask(federatedId);
+  };
   let selectedTask: Task | null = null;
   let lastDate = new Date();
   let scheduleRef: ScheduleData | null = null;
@@ -223,8 +280,8 @@ async function main() {
     ? new ProjectWorkspace(projectRoot, {
         getIfcSchedule: () => scheduleRef,
         getIfcFileName: () => models.active?.fileName ?? (models.size ? models.label() : null),
-        getSession: () => models.active?.session ?? null,
-        resolveIfcTask: (id) => models.resolveTask(id),
+        getSession: () => planningSession(),
+        resolveIfcTask: (id) => resolvePlanningTask(id),
         federateIfcId: (session, nativeId) => {
           const m = models.all.find((x) => x.session === session);
           return m ? encodeIfcRef(m.slot, nativeId) : nativeId;
@@ -439,19 +496,23 @@ async function main() {
   const setFileLabel = (name: string, dirty = false) => {
     fileNameEl.dataset.base = name;
     fileNameEl.textContent = dirty ? `${name} •` : name;
-    fileNameEl.title = dirty ? "Há alterações por exportar" : name;
+    fileNameEl.title = dirty ? "Há alterações por guardar" : name;
   };
 
   const syncFileChrome = () => {
     const dirty = models.anyDirty();
-    setFileLabel(models.size ? models.label() : "Abrir modelo", dirty);
+    const label = projectName ?? (models.size ? models.label() : "Abrir modelo");
+    setFileLabel(label, dirty);
+    if (fileExtEl) fileExtEl.textContent = projectName ? "VTWIN" : "IFC";
     if (btnExport) btnExport.disabled = models.size === 0;
+    if (btnSaveProject) btnSaveProject.disabled = models.size === 0;
     btnExport?.classList.toggle("is-dirty", dirty);
+    btnSaveProject?.classList.toggle("is-dirty", dirty);
     if (btnExportLabel) btnExportLabel.textContent = models.size > 1 ? "Exportar IFCs" : "Exportar IFC";
     const importLabel = document.getElementById("btn-import-label");
     if (importLabel) importLabel.textContent = models.size ? "Adicionar" : "Abrir";
     btnOpenIfc?.classList.toggle("has-models", models.size > 0);
-    btnOpenIfc?.setAttribute("title", models.size ? "Modelos IFC" : "Abrir IFC");
+    btnOpenIfc?.setAttribute("title", models.size ? "Modelos IFC" : "Abrir IFC ou projeto");
   };
 
   const markIfcDirty = () => {
@@ -466,11 +527,21 @@ async function main() {
     void (async () => {
       try {
         const dirtyModels = models.all.filter((m) => m.session.dirty);
-        const list = dirtyModels.length ? dirtyModels : models.all;
+        const coord = models.coordination;
+        if (coord) {
+          for (const d of models.disciplines) {
+            d.session.syncCoordinationBindings(coord.session.schedule);
+          }
+        }
+        let list = dirtyModels.length ? dirtyModels : [...models.all];
+        if (coord && !list.includes(coord)) list = [coord, ...list];
+        list.sort((a, b) => Number(b.role === "coordination") - Number(a.role === "coordination"));
         for (let i = 0; i < list.length; i++) {
           if (i) await new Promise((r) => setTimeout(r, 280));
           const entry = list[i]!;
-          await entry.session.download();
+          const downloadName =
+            entry.role === "coordination" ? coordinationExportName(projectName, entry.fileName) : undefined;
+          await entry.session.download(downloadName);
           entry.hash = entry.session.sourceHash ?? entry.hash;
         }
         btnExport?.classList.remove("is-dirty");
@@ -484,6 +555,89 @@ async function main() {
       } catch (err) {
         console.error(err);
         window.alert(`Não foi possível exportar o IFC: ${(err as Error).message}`);
+      }
+    })();
+  };
+
+  const saveProject = () => {
+    if (!models.size) return;
+    void (async () => {
+      try {
+        setLoading(true, "A guardar projeto");
+        setStatus("Projeto");
+        ensurePlanning();
+        const coord = models.coordination;
+        if (coord && !coord.hash) {
+          coord.hash = await persistCoordinationSession(coord.session);
+        }
+        if (coord) {
+          for (const d of models.disciplines) {
+            d.session.syncCoordinationBindings(coord.session.schedule);
+          }
+        }
+        const packed: VtwinPackModel[] = [];
+        for (const entry of models.all) {
+          const vp = viewportModels.get(entry.id);
+          let extra = entry.session.getExtraTransform();
+          if (extraIsIdentity(extra) && vp) {
+            extra = extraFromObject(vp.object);
+            if (!extraIsIdentity(extra)) entry.session.hydrateExtraTransform(extra);
+          }
+          let ifc: Uint8Array;
+          if (entry.session.dirty) {
+            ifc = await entry.session.exportBytes();
+            entry.hash = entry.session.sourceHash ?? (await hashIfcBytes(ifc));
+          } else if (entry.hash) {
+            const stored = await loadIfcBytes(entry.hash);
+            if (!stored) throw new Error(`Não há IFC canónico de «${entry.displayName}».`);
+            ifc = stored;
+          } else {
+            throw new Error(`Não há IFC canónico de «${entry.displayName}».`);
+          }
+          const hash = entry.hash ?? (await hashIfcBytes(ifc));
+          entry.hash = hash;
+          let frag: Uint8Array | null = null;
+          if (vp) {
+            try {
+              frag = await exportFragmentsBuffer(vp);
+              await saveCachedModel(hash, frag, entry.session.schedule, {
+                ifcSchema: entry.session.ifcSchema,
+                sourceByteLength: ifc.byteLength,
+                index: entry.session.stepIndex,
+              });
+            } catch (err) {
+              console.warn("Fragments no projeto:", err);
+            }
+          } else {
+            const cached = await getCachedModel(hash);
+            frag = cached?.frag ?? null;
+          }
+          packed.push({
+            id: entry.id,
+            fileName: entry.fileName,
+            schema: entry.session.ifcSchema,
+            hash,
+            visible: entry.visible,
+            extra,
+            ifc,
+            frag,
+            schedule: entry.session.schedule,
+            index: entry.session.stepIndex,
+            role: entry.role,
+          });
+        }
+        const name = projectName ?? models.label();
+        const bytes = await packVtwin(name, packed);
+        downloadBytes(bytes, vtwinDownloadName(name));
+        projectName = name;
+        btnExport?.classList.remove("is-dirty");
+        btnSaveProject?.classList.remove("is-dirty");
+        syncFileChrome();
+        setLoading(false);
+      } catch (err) {
+        console.error(err);
+        setLoading(false);
+        window.alert(`Não foi possível guardar o projeto: ${(err as Error).message}`);
       }
     })();
   };
@@ -579,7 +733,7 @@ async function main() {
 
   applyTaskEdit = (task, patch) => {
     if (!scheduleRef || task.isFederationRoot) return;
-    const resolved = models.resolveTask(task.id);
+    const resolved = resolvePlanningTask(task.id, task.globalId);
     if (!resolved || resolved.nativeId <= 0) return;
     const { changed, timeChanged } = resolved.session.applyTaskEdit(resolved.nativeId, patch);
     if (!changed) return;
@@ -797,7 +951,6 @@ async function main() {
             if (!group || !resolved) return;
             const members = new Map(group.productGuids.map((g, i) => [g, group.productIds[i]]));
             for (const g of extra) {
-              if (highlighter.guidModelId(g) !== resolved.model.id) continue;
               if (!members.has(g)) members.set(g, highlighter.localIdOf(g, resolved.model.id) ?? 0);
             }
             try {
@@ -884,7 +1037,6 @@ async function main() {
       if (!group || !resolved) return;
       const members = new Map(group.productGuids.map((g, i) => [g, group.productIds[i]]));
       for (const g of extra) {
-        if (highlighter.guidModelId(g) !== resolved.model.id) continue;
         if (!members.has(g)) members.set(g, highlighter.localIdOf(g, resolved.model.id) ?? 0);
       }
       try {
@@ -945,22 +1097,21 @@ async function main() {
           return;
         }
         const task = projectWs?.getSelected();
-        const taskRef = task?.linkedIfcTaskId != null ? models.resolveTask(task.linkedIfcTaskId) : null;
-        let lastGuids: string[] = [];
-        let created = 0;
-        for (const [modelId, members] of byModel) {
-          const entry = models.get(modelId);
-          if (!entry) continue;
-          const group = entry.session.createGroup(name, members);
-          created += 1;
-          lastGuids = group.productGuids;
-          if (taskRef && taskRef.model.id === modelId && task) {
-            const linked = entry.session.assignGroupToTask(taskRef.nativeId, group.id);
-            lastGuids = linked.guids;
-            projectWs?.applyProductGuids(task.linkedIfcTaskId!, linked.guids);
-          }
-          setsList?.setSelected(encodeIfcRef(entry.slot, group.id));
+        const taskRef = task?.linkedIfcTaskId != null ? resolvePlanningTask(task.linkedIfcTaskId) : null;
+        const members = [...byModel.values()].flat();
+        const root = ensurePlanning();
+        if (!root) {
+          projectWs?.notify("IFC");
+          return;
         }
+        const group = root.session.createGroup(name, members);
+        let lastGuids = group.productGuids;
+        if (taskRef && taskRef.session === root.session && task?.linkedIfcTaskId != null) {
+          const linked = root.session.assignGroupToTask(taskRef.nativeId, group.id);
+          lastGuids = linked.guids;
+          projectWs?.applyProductGuids(task.linkedIfcTaskId, linked.guids);
+        }
+        setsList?.setSelected(encodeIfcRef(root.slot, group.id));
         if (lastGuids.length) void focusGuidsInView(lastGuids);
         bumpSimulation(guids);
         markIfcDirty();
@@ -986,7 +1137,7 @@ async function main() {
         return;
       }
       const groupRef = models.resolveGroup(groupId);
-      const taskRef = models.resolveTask(task.linkedIfcTaskId);
+      const taskRef = resolvePlanningTask(task.linkedIfcTaskId);
       if (!groupRef || !taskRef) return;
       if (groupRef.model.id !== taskRef.model.id) {
         projectWs?.notify("IFC");
@@ -1008,7 +1159,7 @@ async function main() {
 
     assignGroupToFederatedTask = (federatedTaskId, groupId) => {
       const groupRef = models.resolveGroup(groupId);
-      const taskRef = models.resolveTask(federatedTaskId);
+      const taskRef = resolvePlanningTask(federatedTaskId);
       if (!groupRef || !taskRef) return;
       if (groupRef.model.id !== taskRef.model.id) {
         projectWs?.notify("Ficheiro");
@@ -1029,16 +1180,16 @@ async function main() {
     };
 
     assignGuidsToFederatedTask = (federatedTaskId, guids) => {
-      const taskRef = models.resolveTask(federatedTaskId);
+      const taskRef = resolvePlanningTask(federatedTaskId);
       if (!taskRef || !highlighter || !guids.length) return;
       const task = taskRef.session.schedule.byId.get(taskRef.nativeId);
       let last: string[] = task ? [...(scheduleRef?.productGuidsByTask.get(federatedTaskId) ?? task.productGuids)] : [];
       let changed = false;
       for (const guid of guids) {
-        if (highlighter.guidModelId(guid) !== taskRef.model.id) continue;
         if (task?.productGuids.includes(guid)) continue;
         try {
-          const localId = highlighter.localIdOf(guid, taskRef.model.id);
+          const ownerId = highlighter.guidModelId(guid);
+          const localId = ownerId ? highlighter.localIdOf(guid, ownerId) : undefined;
           const result = taskRef.session.assignProductToTask(taskRef.nativeId, guid, localId);
           last = result.guids;
           changed = true;
@@ -1128,8 +1279,8 @@ async function main() {
       void walk?.setModel(vis.length ? vis : null);
     };
 
-    const attachGizmoToActive = (reset: boolean) => {
-      const m = models.active;
+    const attachGizmoToActive = (_reset: boolean) => {
+      const m = meshEntry();
       const viewportModel = m ? viewportModels.get(m.id) : null;
       if (!m?.visible || !viewportModel) {
         gizmo.attach(null);
@@ -1137,19 +1288,20 @@ async function main() {
       }
       gizmo.attach(viewportModel.object);
       const extra = m.session.getExtraTransform();
-      if (reset && extraIsIdentity(extra)) gizmo.reset();
-      else gizmo.apply(extra);
+      applyExtraToObject(viewportModel.object, extra);
       gizmo.fitSize(viewportModel.object);
       earth.setClipCenter(extra.x, extra.y, extra.z);
     };
 
     const applyActiveGeoref = (opts: { snap?: boolean; resetGizmo?: boolean } = {}) => {
-      const session = models.active?.session;
+      const planning = models.coordination?.session ?? models.active?.session;
+      const mesh = meshEntry();
+      const session = planning ?? mesh?.session;
       if (!session) return;
-      const georef = session.schedule.georef;
+      const georef = planning?.schedule.georef ?? mesh?.session.schedule.georef;
       const storedAlt = georef?.elevation;
       const hasAlt = hasStoredSiteElevation(storedAlt);
-      const extra = session.getExtraTransform();
+      const extra = mesh?.session.getExtraTransform() ?? session.getExtraTransform();
       const anchor: AnchorLLA =
         georef?.lat != null && georef.lon != null
           ? {
@@ -1177,10 +1329,10 @@ async function main() {
     refreshFederatedView = (opts) => {
       const keepId = selectedTask?.id ?? null;
       earth.setIfcModelCount(models.visible.length);
-      scheduleRef = models.visible.length ? models.mergedSchedule() : emptySchedule();
+      scheduleRef = models.size ? models.mergedSchedule() : emptySchedule();
       const schedule = scheduleRef;
       const structure = opts?.structure !== false;
-      if (!models.visible.length || schedule.roots.length === 0) {
+      if (!models.size || schedule.roots.length === 0) {
         tree.setSchedule(emptySchedule());
         timeline.bindSchedule(emptySchedule());
         timeline.setIdle(!models.size);
@@ -1204,10 +1356,13 @@ async function main() {
         simHud?.bind(schedule);
         timeline.setRange(schedule.minDate, schedule.maxDate);
       }
-      scheduleNameEl.textContent = models.visible.length ? scheduleTitle(schedule) : "Importe um arquivo IFC";
-      scheduleNameEl.title = models.visible.length
-        ? models.visible.map((m) => m.displayName).join(", ")
-        : "IfcWorkPlan / IfcWorkSchedule / IfcTask";
+      const coord = models.coordination;
+      scheduleNameEl.textContent = models.size ? scheduleTitle(schedule) : "Importe um arquivo IFC";
+      scheduleNameEl.title = coord
+        ? `${coord.displayName} · cronograma da raiz`
+        : models.size
+          ? models.all.map((m) => m.displayName).join(", ")
+          : "IfcWorkPlan / IfcWorkSchedule / IfcTask";
       if (scheduleCountEl) {
         scheduleCountEl.textContent = String(schedule.leafTaskCount);
         scheduleCountEl.title = `${schedule.leafTaskCount} tarefas-folha`;
@@ -1266,8 +1421,9 @@ async function main() {
       onChange: (t) => {
         earth.setClipCenter(t.x, t.y, t.z);
         earthPanel?.setTransform(t);
-        models.active?.session.setExtraTransform(t);
-        if (models.active && !extraIsIdentity(t)) markIfcDirty();
+        const mesh = meshEntry();
+        mesh?.session.setExtraTransform(t);
+        if (mesh && !extraIsIdentity(t)) markIfcDirty();
         refreshSiteVisual();
       },
     });
@@ -1277,8 +1433,8 @@ async function main() {
       earthPanel?.setTerrainHeight(alt);
       earthPanel?.setTerrainY(0, false);
       const a = earth.getAnchor();
-      if (models.active) {
-        models.active.session.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: alt });
+      if (models.active || models.coordination) {
+        planningSession()?.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: alt });
         markIfcDirty();
       }
       refreshSiteVisual();
@@ -1305,9 +1461,9 @@ async function main() {
               { snap: geoMoved },
             );
             earth.setHideRadius(state.hideRadius);
-            if (geoMoved && models.active) {
+            if (geoMoved && (models.active || models.coordination)) {
               const a = earth.getAnchor();
-              models.active.session.setGeoAnchor({
+              planningSession()?.setGeoAnchor({
                 lat: state.anchor.lat,
                 lon: state.anchor.lon,
                 elevation: a.altitude,
@@ -1318,15 +1474,16 @@ async function main() {
           onTransformChange: (t) => {
             gizmo.apply(t);
             earth.setClipCenter(t.x, t.y, t.z);
-            models.active?.session.setExtraTransform(t);
-            if (models.active && !extraIsIdentity(t)) markIfcDirty();
+            const mesh = meshEntry();
+            mesh?.session.setExtraTransform(t);
+            if (mesh && !extraIsIdentity(t)) markIfcDirty();
             refreshSiteVisual();
           },
           onTerrainY: (delta) => {
             earth.raiseTerrain(delta);
             const a = earth.getAnchor();
-            if (models.active) {
-              models.active.session.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: a.altitude });
+            if (models.active || models.coordination) {
+              planningSession()?.setGeoAnchor({ lat: a.lat, lon: a.lon, elevation: a.altitude });
               markIfcDirty();
             }
             refreshSiteVisual();
@@ -1401,9 +1558,10 @@ async function main() {
     };
 
     const refreshSiteVisualNow = (draft?: import("three").Vector3[], skipUi = false) => {
-      const session = models.active?.session;
-      const extra = session?.getExtraTransform() ?? emptyExtraTransform();
-      const limit = session?.getSiteLimit() ?? null;
+      const planning = models.coordination?.session ?? models.active?.session;
+      const mesh = meshEntry();
+      const extra = mesh?.session.getExtraTransform() ?? emptyExtraTransform();
+      const limit = planning?.getSiteLimit() ?? mesh?.session.getSiteLimit() ?? null;
       if (earth.enabled) {
         const clip = siteOverlay.clipPolygon(limit, extra);
         if (clip) earth.setSiteClip(clip.xz, clip.yMin, clip.yMax);
@@ -1434,14 +1592,15 @@ async function main() {
         );
       },
       onComplete: (worldPts) => {
-        const session = models.active?.session;
+        const session = planningSession();
+        const mesh = meshEntry();
         logisticsWs?.setDrawing(false);
         setDrawHint(null);
         if (!session || worldPts.length < 3) {
           refreshSiteVisual();
           return;
         }
-        const extra = session.getExtraTransform();
+        const extra = mesh?.session.getExtraTransform() ?? session.getExtraTransform();
         const ifcPts = worldPts.map((p) => threeWorldToIfc(p, extra));
         const z = ifcPts.reduce((s, p) => s + p.z, 0) / ifcPts.length;
         const prev = session.getSiteLimit();
@@ -1476,14 +1635,16 @@ async function main() {
     const logisticsWs = logisticsRoot
       ? new LogisticsWorkspace(logisticsRoot, {
           hasModel: () => models.size > 0,
-          getLimit: () => models.active?.session.getSiteLimit() ?? null,
-          getExtra: () => models.active?.session.getExtraTransform() ?? emptyExtraTransform(),
+          getLimit: () => (models.coordination?.session ?? models.active?.session)?.getSiteLimit() ?? null,
+          getExtra: () => meshEntry()?.session.getExtraTransform() ?? emptyExtraTransform(),
           onDraw: () => {
-            if (!models.active) {
+            const mesh = meshEntry();
+            if (!mesh && !models.size) {
               window.alert("Abre um IFC para gravar o limite no modelo.");
               return;
             }
-            siteDraw.setPlaneY(models.active.session.getExtraTransform().y);
+            ensurePlanning();
+            siteDraw.setPlaneY(mesh?.session.getExtraTransform().y ?? 0);
             logisticsWs?.setDrawing(true);
             siteDraw.startDraw();
             setDrawHint("Clica no terreno para os vértices do canteiro");
@@ -1498,7 +1659,7 @@ async function main() {
           },
           onCancelDraw: () => siteDraw.cancel(),
           onPatch: (patch) => {
-            const session = models.active?.session;
+            const session = planningSession();
             const cur = session?.getSiteLimit();
             if (!session || !cur) return;
             session.setSiteLimit({ ...cur, ...patch, points: patch.points ?? cur.points });
@@ -1506,7 +1667,7 @@ async function main() {
             refreshSiteVisual();
           },
           onDelete: () => {
-            models.active?.session.clearSiteLimit();
+            planningSession()?.clearSiteLimit();
             markIfcDirty();
             refreshSiteVisual();
           },
@@ -1515,7 +1676,8 @@ async function main() {
 
     onLogisticsWorkspace = () => {
       void (async () => {
-        if (models.active) await models.active.session.hydrateSiteLimit();
+        if (models.coordination) await models.coordination.session.hydrateSiteLimit();
+        else if (models.active) await models.active.session.hydrateSiteLimit();
         logisticsWs?.refresh();
         refreshSiteVisual();
         if (nav.getWorkspace() !== "logistics") return;
@@ -1580,6 +1742,7 @@ async function main() {
             renderModelLayers();
           },
           onRemove: (id) => void removeLoadedModel(id),
+          onReplace: (id) => pickReplaceIfc(id),
           onAdd: () => pickIfcFile(),
           onReorder: (id, beforeId) => {
             models.move(id, beforeId);
@@ -1598,6 +1761,12 @@ async function main() {
     const setModelLayerVisible = async (id: string, visible: boolean) => {
       const entry = models.get(id);
       if (!entry) return;
+      if (entry.role === "coordination") {
+        models.setVisible(id, visible);
+        refreshFederatedView({ structure: true });
+        dirty = true;
+        return;
+      }
       if (!visible) {
         await highlighter?.removeModel(id);
         if (viewportModels.get(id)) {
@@ -1635,8 +1804,9 @@ async function main() {
           }
           viewportModels.attach(id, model);
           models.setVisible(id, true);
+          applyExtraToObject(model.object, entry.session.getExtraTransform());
           if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
-          await highlighter.addModel(id, model, collectAllGuids(entry.session.schedule));
+          await highlighter.addModel(id, model, collectAllGuids(models.mergedSchedule()));
         } catch (err) {
           console.error(err);
           window.alert(`Não foi possível mostrar «${entry.displayName}»: ${(err as Error).message}`);
@@ -1673,6 +1843,7 @@ async function main() {
         simHud?.bind(null);
         ifcTree?.clear();
         setImportVisible(true);
+        projectName = null;
       } else {
         attachGizmoToActive(false);
         syncWalkModels();
@@ -1681,41 +1852,53 @@ async function main() {
       dirty = true;
     };
 
-    const loadFromBuffer = async (buffer: Uint8Array, fileName: string) => {
+    const ingestIfc = async (
+      buffer: Uint8Array,
+      fileName: string,
+      opts?: {
+        modelId?: string;
+        skipDuplicateCheck?: boolean;
+        frag?: Uint8Array | null;
+        schedule?: ScheduleData | null;
+        index?: import("./ifc/stepIndex").StepIndex | null;
+        schema?: import("./ifc/stepText").IfcSchemaKind;
+      },
+    ) => {
       setImportVisible(false);
-      setLoading(true, "");
       setStatus("IFC");
       performance.mark("vista:load:start");
       const sourceByteLength = buffer.byteLength;
       const hash = await hashIfcBytes(buffer);
       markLoad("vista:hash", "vista:load:start");
-      if (hash && models.hasHash(hash)) {
-        setLoading(false);
-        setImportVisible(false);
+      if (!opts?.skipDuplicateCheck && hash && models.hasHash(hash)) {
         window.alert(`«${fileName}» já está na vista.`);
-        return;
+        return null;
       }
       const cached = hash ? await getCachedModel(hash) : null;
-      const cacheHasCanonicalSource =
-        cached?.warmReady === true && (await hasIfcBytes(hash));
-      // Caches das versões anteriores guardavam os bytes preparados. Num cold
-      // load regravamos sempre o IFC original para preservar o round-trip.
-      const sourceStored = cacheHasCanonicalSource
-        ? true
-        : await saveIfcBytes(hash, buffer);
+      const cacheHasCanonicalSource = cached?.warmReady === true && (await hasIfcBytes(hash));
+      const sourceStored = cacheHasCanonicalSource ? true : await saveIfcBytes(hash, buffer);
       markLoad("vista:cache", "vista:hash");
 
-      const first = models.size === 0;
-      const modelId = `ifc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      const first = models.disciplines.length === 0;
+      const modelId = opts?.modelId ?? `ifc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
       timeline.pause();
 
       let schedule: ScheduleData;
       let loaded: Awaited<ReturnType<typeof loadIfc>>;
       let index: import("./ifc/stepIndex").StepIndex;
       let schema: import("./ifc/stepText").IfcSchemaKind;
-      const warm = cached?.warmReady === true && !!cached.schedule && !!cached.index && !!cached.manifest;
+      const packWarm = !!(opts?.frag && opts.schedule && opts.index && opts.schema);
+      const cacheWarm = cached?.warmReady === true && !!cached.schedule && !!cached.index && !!cached.manifest;
+      const warm = packWarm || cacheWarm;
 
-      if (warm) {
+      if (packWarm) {
+        setStatus("3D");
+        schedule = opts.schedule!;
+        index = opts.index!;
+        schema = opts.schema!;
+        loaded = await loadFragments(viewer, opts.frag!, modelId);
+        markLoad("vista:warm-load", "vista:cache");
+      } else if (cacheWarm) {
         setStatus("3D");
         schedule = cached.schedule!;
         index = cached.index!;
@@ -1761,7 +1944,6 @@ async function main() {
       }
       markLoad("vista:geometry", "vista:load:start");
       const model = loaded.model;
-
       const session = new IfcSession(sourceStored ? null : buffer, fileName, schedule, {
         index,
         storeHash: hash,
@@ -1776,41 +1958,6 @@ async function main() {
         indexEntities: index.offset.size,
         tasks: schedule.byId.size,
       });
-      const entry = models.add({ id: modelId, fileName, session, hash });
-      viewportModels.attach(entry.id, model);
-
-      setStatus(entry.displayName);
-      if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
-      await highlighter.addModel(entry.id, model, collectAllGuids(schedule));
-
-      refreshFederatedView({ structure: true });
-      if (pendingPlanModel && nav.getWorkspace() === "project-plan") {
-        pendingPlanModel = false;
-        setPlanModelOpen(true);
-      }
-
-      if (first) {
-        earth.setClipCenter(0, 0, 0);
-        applyActiveGeoref({ snap: true, resetGizmo: false });
-        lastDate = scheduleRef?.minDate ?? schedule.minDate;
-      } else {
-        attachGizmoToActive(true);
-      }
-      syncWalkModels();
-      if (scheduleRef && lastDate < scheduleRef.minDate) lastDate = scheduleRef.minDate;
-      if (scheduleRef && lastDate > scheduleRef.maxDate) lastDate = scheduleRef.maxDate;
-      dirty = true;
-      tree.update(lastDate);
-      if (workspaceShell(nav.getWorkspace()) === "schedule") {
-        currentDateEl.textContent = formatDateLabel(lastDate);
-      } else {
-        currentDateEl.textContent = models.label();
-      }
-      refreshInspector();
-      refreshCost5d();
-      setLoading(false);
-      markLoad("vista:load", "vista:load:start");
-      void fitCameraToVisibleModels(viewer);
       if (!warm) {
         void exportFragmentsBuffer(model)
           .then((buf) =>
@@ -1821,42 +1968,258 @@ async function main() {
             }),
           )
           .catch((err) => console.warn("Cache Fragments:", err));
+      } else if (packWarm && hash) {
+        void saveCachedModel(hash, opts.frag!, schedule, {
+          ifcSchema: schema,
+          sourceByteLength,
+          index,
+        }).catch((err) => console.warn("Cache Fragments:", err));
       }
+      return { modelId, hash, fileName, session, model, first, schedule };
+    };
+
+    const finishLoadedModel = async (
+      ingested: NonNullable<Awaited<ReturnType<typeof ingestIfc>>>,
+      opts?: { extra?: import("./ifc/georef").ModelExtraTransform; skipFit?: boolean },
+    ) => {
+      if (opts?.extra) ingested.session.hydrateExtraTransform(opts.extra);
+      const entry = models.add({
+        id: ingested.modelId,
+        fileName: ingested.fileName,
+        session: ingested.session,
+        hash: ingested.hash,
+        role: "discipline",
+      });
+      viewportModels.attach(entry.id, ingested.model);
+      applyExtraToObject(ingested.model.object, ingested.session.getExtraTransform());
+      setStatus(entry.displayName);
+      if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
+      await highlighter.addModel(entry.id, ingested.model, collectAllGuids(models.mergedSchedule()));
+      refreshFederatedView({ structure: true });
+      if (pendingPlanModel && nav.getWorkspace() === "project-plan") {
+        pendingPlanModel = false;
+        setPlanModelOpen(true);
+      }
+      if (ingested.first) {
+        earth.setClipCenter(0, 0, 0);
+        applyActiveGeoref({ snap: true, resetGizmo: false });
+        lastDate = scheduleRef?.minDate ?? ingested.schedule.minDate;
+      } else {
+        attachGizmoToActive(true);
+      }
+      const extra = ingested.session.getExtraTransform();
+      if (!extraIsIdentity(extra)) gizmo.apply(extra);
+      syncWalkModels();
+      if (scheduleRef && lastDate < scheduleRef.minDate) lastDate = scheduleRef.minDate;
+      if (scheduleRef && lastDate > scheduleRef.maxDate) lastDate = scheduleRef.maxDate;
+      dirty = true;
+      tree.update(lastDate);
+      if (workspaceShell(nav.getWorkspace()) === "schedule") {
+        currentDateEl.textContent = formatDateLabel(lastDate);
+      } else {
+        currentDateEl.textContent = projectName ?? models.label();
+      }
+      refreshInspector();
+      refreshCost5d();
+      markLoad("vista:load", "vista:load:start");
+      if (!opts?.skipFit) void fitCameraToVisibleModels(viewer);
+    };
+
+    const loadFromBuffer = async (buffer: Uint8Array, fileName: string) => {
+      setLoading(true, "");
+      const ingested = await ingestIfc(buffer, fileName);
+      if (!ingested) {
+        setLoading(false);
+        if (!models.size) setImportVisible(true);
+        return;
+      }
+      await finishLoadedModel(ingested);
+      setLoading(false);
+    };
+
+    const finishCoordinationModel = async (member: {
+      entry: { id: string; fileName: string; schema: import("./ifc/stepText").IfcSchemaKind; hash: string; extra?: import("./ifc/georef").ModelExtraTransform };
+      ifc: Uint8Array;
+      schedule: ScheduleData | null;
+      index: import("./ifc/stepIndex").StepIndex | null;
+    }) => {
+      const hash = member.entry.hash || (await hashIfcBytes(member.ifc));
+      if (!(await hasIfcBytes(hash))) await saveIfcBytes(hash, member.ifc);
+      const schedule = member.schedule ?? emptySchedule();
+      const session = new IfcSession(member.ifc, member.entry.fileName, schedule, {
+        index: member.index ?? undefined,
+        storeHash: hash,
+        schema: member.entry.schema,
+      });
+      if (member.entry.extra) session.hydrateExtraTransform(member.entry.extra);
+      await session.hydrateSiteLimit();
+      models.add({
+        id: member.entry.id,
+        fileName: member.entry.fileName,
+        session,
+        hash,
+        role: "coordination",
+      });
+    };
+
+    const loadFromVtwin = async (buffer: Uint8Array, fileName: string) => {
+      setLoading(true, "A abrir projeto");
+      setStatus("Projeto");
+      if (!looksLikeZip(buffer)) throw new Error("Este ficheiro não é um projeto vtwin.");
+      const unpacked = await unpackVtwin(buffer);
+      if (models.size) {
+        const ok = window.confirm("Abrir este projeto substitui os modelos atuais na vista. Continuar?");
+        if (!ok) {
+          setLoading(false);
+          return;
+        }
+        const ids = models.all.map((m) => m.id);
+        for (const id of ids) {
+          const entry = models.get(id);
+          if (!entry) continue;
+          await highlighter?.removeModel(id);
+          await unloadIfc(viewer, id);
+          viewportModels.detach(id);
+          models.remove(id);
+        }
+        selectedTask = null;
+      }
+      projectName = unpacked.manifest.name || fileName.replace(/\.vtwin$/i, "");
+      let index = 0;
+      for (const member of unpacked.models) {
+        setStatus(`${member.entry.fileName} (${index + 1}/${unpacked.models.length})`);
+        if (member.entry.role === "coordination") {
+          await finishCoordinationModel(member);
+          const entry = models.get(member.entry.id);
+          if (entry && !member.entry.visible) models.setVisible(entry.id, false);
+          index += 1;
+          continue;
+        }
+        const ingested = await ingestIfc(member.ifc, member.entry.fileName, {
+          modelId: member.entry.id,
+          skipDuplicateCheck: true,
+          frag: member.frag,
+          schedule: member.schedule,
+          index: member.index,
+          schema: member.entry.schema,
+        });
+        if (!ingested) continue;
+        await finishLoadedModel(ingested, {
+          extra: member.entry.extra,
+          skipFit: index < unpacked.models.length - 1,
+        });
+        const entry = models.get(ingested.modelId);
+        if (entry && !member.entry.visible) {
+          await setModelLayerVisible(entry.id, false);
+        }
+        index += 1;
+      }
+      if (!models.size) {
+        projectName = null;
+        setImportVisible(true);
+        throw new Error("O projeto não carregou nenhum modelo.");
+      }
+      refreshFederatedView({ structure: true });
+      bumpSimulation(collectAllGuids(models.mergedSchedule()));
+      for (const m of models.disciplines) {
+        const model = viewportModels.get(m.id);
+        if (model) applyExtraToObject(model.object, m.session.getExtraTransform());
+      }
+      applyActiveGeoref({ snap: false, resetGizmo: false });
+      syncFileChrome();
+      setLoading(false);
+    };
+
+    let replaceTargetId: string | null = null;
+    const pickReplaceIfc = (id: string) => {
+      if (models.get(id)?.role === "coordination") {
+        window.alert("A raiz de coordenação não se substitui por um IFC de disciplina.");
+        return;
+      }
+      replaceTargetId = id;
+      replaceIfcInput?.click();
+    };
+
+    const replaceMemberIfc = async (id: string, buffer: Uint8Array, fileName: string) => {
+      const entry = models.get(id);
+      if (!entry) return;
+      setLoading(true, "A substituir IFC");
+      const previous = entry.session.schedule;
+      const extra = entry.session.getExtraTransform();
+      await highlighter?.removeModel(id);
+      await unloadIfc(viewer, id);
+      viewportModels.detach(id);
+      const ingested = await ingestIfc(buffer, fileName, { modelId: id, skipDuplicateCheck: true });
+      if (!ingested) {
+        setLoading(false);
+        window.alert("Não foi possível substituir o IFC.");
+        return;
+      }
+      const report = ingested.session.adoptPlanningFrom(previous);
+      ingested.session.hydrateExtraTransform(extra);
+      entry.session = ingested.session;
+      entry.hash = ingested.hash;
+      models.rename(id, fileName);
+      ingested.session.fileName = entry.fileName;
+      viewportModels.attach(id, ingested.model);
+      if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
+      await highlighter.addModel(id, ingested.model, collectAllGuids(models.mergedSchedule()));
+      models.setActive(id);
+      attachGizmoToActive(false);
+      if (!extraIsIdentity(extra)) gizmo.apply(extra);
+      syncWalkModels();
+      refreshFederatedView({ structure: true });
+      dirty = true;
+      tree.update(lastDate);
+      refreshInspector();
+      refreshCost5d();
+      setLoading(false);
+      void fitCameraToVisibleModels(viewer);
+      window.alert(listOrphanSummary(report, entry.displayName));
     };
 
     const pickIfcFile = () => fileInput?.click();
 
+    const resetEmptyWorkspace = () => {
+      selectedTask = null;
+      scheduleRef = emptySchedule();
+      tree.setSchedule(emptySchedule());
+      timeline.bindSchedule(emptySchedule());
+      timeline.setIdle(true);
+      simHud?.bind(null);
+      refreshLayoutRestore();
+      syncFileChrome();
+      scheduleNameEl.textContent = "Importe um arquivo IFC";
+      if (scheduleCountEl) scheduleCountEl.textContent = "0";
+      refreshInspector();
+      refreshCost5d();
+      setImportVisible(true);
+      projectName = null;
+    };
+
     const importFiles = async (files: File[]) => {
       if (loading) return;
+      const vtwin = files.find((f) => isVtwinFileName(f.name));
       const ifcs = files.filter(isIfcFile);
-      if (!ifcs.length) {
-        window.alert("Selecione um ou mais arquivos IFC (.ifc).");
+      if (!vtwin && !ifcs.length) {
+        window.alert("Selecione um projeto (.vtwin) ou um ou mais arquivos IFC (.ifc).");
         return;
       }
       loading = true;
       try {
-        for (const file of ifcs) {
-          const buffer = new Uint8Array(await file.arrayBuffer());
-          await loadFromBuffer(buffer, file.name);
+        if (vtwin) {
+          const buffer = new Uint8Array(await vtwin.arrayBuffer());
+          await loadFromVtwin(buffer, vtwin.name);
+        } else {
+          for (const file of ifcs) {
+            const buffer = new Uint8Array(await file.arrayBuffer());
+            await loadFromBuffer(buffer, file.name);
+          }
         }
       } catch (err) {
         console.error(err);
-        window.alert(`Não foi possível importar o IFC: ${(err as Error).message}`);
-        if (!models.size) {
-          selectedTask = null;
-          scheduleRef = emptySchedule();
-          tree.setSchedule(emptySchedule());
-          timeline.bindSchedule(emptySchedule());
-          timeline.setIdle(true);
-          simHud?.bind(null);
-          refreshLayoutRestore();
-          syncFileChrome();
-          scheduleNameEl.textContent = "Importe um arquivo IFC";
-          if (scheduleCountEl) scheduleCountEl.textContent = "0";
-          refreshInspector();
-          refreshCost5d();
-          setImportVisible(true);
-        }
+        window.alert(`Não foi possível importar: ${(err as Error).message}`);
+        if (!models.size) resetEmptyWorkspace();
         setLoading(false);
       } finally {
         loading = false;
@@ -1894,6 +2257,28 @@ async function main() {
       }
     });
     btnExport?.addEventListener("click", exportIfc);
+    btnSaveProject?.addEventListener("click", saveProject);
+    replaceIfcInput?.addEventListener("change", () => {
+      const file = replaceIfcInput.files?.[0];
+      const id = replaceTargetId;
+      replaceIfcInput.value = "";
+      replaceTargetId = null;
+      if (!file || !id || !isIfcFile(file)) return;
+      void (async () => {
+        if (loading) return;
+        loading = true;
+        try {
+          const buffer = new Uint8Array(await file.arrayBuffer());
+          await replaceMemberIfc(id, buffer, file.name);
+        } catch (err) {
+          console.error(err);
+          setLoading(false);
+          window.alert(`Não foi possível substituir o IFC: ${(err as Error).message}`);
+        } finally {
+          loading = false;
+        }
+      })();
+    });
     document.addEventListener("pointerdown", (e) => {
       if (!popover || popover.hidden) return;
       const t = e.target as Node;
@@ -1933,8 +2318,8 @@ async function main() {
       e.preventDefault();
       setFileDrop(false);
       if ((e.target as HTMLElement | null)?.closest?.("#project-workspace")) return;
-      const ifcs = [...(e.dataTransfer?.files ?? [])].filter(isIfcFile);
-      if (ifcs.length) void importFiles(ifcs);
+      const files = [...(e.dataTransfer?.files ?? [])];
+      if (files.length) void importFiles(files);
     });
 
     // Benchmark reproduzível em desenvolvimento:
@@ -1970,7 +2355,7 @@ async function main() {
     window.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyS") {
         e.preventDefault();
-        exportIfc();
+        saveProject();
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyO") {
@@ -2132,6 +2517,13 @@ async function main() {
     overlay.style.background = "rgba(254, 226, 226, 0.95)";
     overlayText.style.color = "#991b1b";
   }
+}
+
+function coordinationExportName(project: string | null, fileName: string): string {
+  const raw = (project || fileName || "COORD").trim() || "COORD";
+  const stem = raw.replace(/\.ifc$/i, "").replace(/-coordenacao$/i, "");
+  if (/^coord$/i.test(stem)) return "COORD.ifc";
+  return `${stem}-coordenacao.ifc`;
 }
 
 function collectAllGuids(schedule: ScheduleData): Set<string> {

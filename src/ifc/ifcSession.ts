@@ -1,6 +1,8 @@
 import type { ScheduleData, SelectionGroup, Task } from "../schedule/types";
 import { VISTA4D_SET_TYPE } from "../schedule/types";
 import { inclusiveCalendarDays, ownAndGroupGuids, recomputeProductGuidsByTask, recomputeScheduleRange } from "../schedule/range";
+import { scheduleFromJson, scheduleToJson } from "../schedule/serialize";
+import { rematchProductGuids, type GuidRematchReport } from "../project/rematch";
 import {
   extraIsIdentity,
   emptyExtraTransform,
@@ -52,6 +54,7 @@ import {
   serializeNewIfcTask,
   serializeNewWorkPlan,
   serializeNewWorkSchedule,
+  serializeNewCostSchedule,
   serializeRelAggregates,
   serializeRelAssignsTasks,
   serializeRelDeclares,
@@ -128,11 +131,12 @@ interface ExportWorkerResult {
  * só as linhas alteradas na exportação — o resto do ficheiro fica intacto.
  */
 export class IfcSession {
-  readonly fileName: string;
+  fileName: string;
   readonly schedule: ScheduleData;
   readonly changeSet = new IfcChangeSet();
   private stepText: string | null;
   private index: StepIndex;
+  private typeById: Map<number, string> | null = null;
   private storeHash?: string;
   private readonly wasmPath?: string;
   /** Preenchido na primeira alocação — evita varrer o STEP inteiro só para abrir. */
@@ -172,6 +176,8 @@ export class IfcSession {
   private readonly dirtyLagTimeIds = new Set<number>();
   private createdWorkPlan = false;
   private createdWorkSchedule = false;
+  private createdCostSchedule = false;
+  private createdCostDeclaresRelId: number | undefined;
   private createdDeclaresRelId: number | undefined;
   private createdAggregatesRel = false;
   private createdScheduleControlRel = false;
@@ -213,6 +219,15 @@ export class IfcSession {
         : undefined);
     this.ownerHistoryRef = oh != null ? `#${oh}` : "$";
     this.nextExpressId = this.index.maxId > 0 ? this.index.maxId + 1 : undefined;
+  }
+
+  attachStore(hash: string): void {
+    this.storeHash = hash;
+  }
+
+  stepTextBytes(): Uint8Array {
+    if (this.stepText != null) return latin1ToBytes(this.stepText);
+    throw new Error("O STEP deste modelo não está em memória.");
   }
 
   private step(): string {
@@ -269,6 +284,54 @@ export class IfcSession {
       this.changeSet.append({ kind: "georef:transform", value: extra });
       this.dirty = true;
     }
+  }
+
+  /** Aplica a transform sem marcar o STEP como sujo (abrir projeto). */
+  hydrateExtraTransform(extra: ModelExtraTransform): void {
+    this.extra = { ...extra };
+  }
+
+  /**
+   * Leva o cronograma/custo/conjuntos de uma revisão anterior para este STEP.
+   * Recasa produtos pelo GUID e volta a alocar express IDs neste ficheiro.
+   */
+  adoptPlanningFrom(source: ScheduleData, opts?: { keepExternalProducts?: boolean }): GuidRematchReport {
+    const cloned = scheduleFromJson(scheduleToJson(source));
+    if (!cloned) {
+      return { matched: 0, orphans: [], keptTasks: 0 };
+    }
+    const report = rematchProductGuids(cloned, this.index.guidToId, {
+      keepOrphans: !!opts?.keepExternalProducts,
+    });
+    const projectId = this.schedule.projectId ?? firstIdOfType(this.index, "IFCPROJECT");
+    const georef = this.schedule.georef;
+    this.rebasePlanningOntoThisFile(cloned);
+    cloned.projectId = projectId;
+    if (!cloned.georef) cloned.georef = georef;
+
+    this.schedule.projectId = cloned.projectId;
+    this.schedule.workPlanId = cloned.workPlanId;
+    this.schedule.workScheduleId = cloned.workScheduleId;
+    this.schedule.declaresRelId = cloned.declaresRelId;
+    this.schedule.aggregatesRelId = cloned.aggregatesRelId;
+    this.schedule.scheduleControlRelId = cloned.scheduleControlRelId;
+    this.schedule.name = cloned.name;
+    this.schedule.workPlanName = cloned.workPlanName;
+    this.schedule.documents = cloned.documents;
+    this.schedule.roots = cloned.roots;
+    this.schedule.byId = cloned.byId;
+    this.schedule.productGuidsByTask = cloned.productGuidsByTask;
+    this.schedule.groups = cloned.groups;
+    this.schedule.minDate = cloned.minDate;
+    this.schedule.maxDate = cloned.maxDate;
+    this.schedule.leafTaskCount = cloned.leafTaskCount;
+    this.schedule.costScheduleId = cloned.costScheduleId;
+    this.schedule.currency = cloned.currency;
+    if (!this.schedule.georef) this.schedule.georef = cloned.georef;
+    this.schedule.siteLimit = cloned.siteLimit;
+    if (cloned.siteLimit) this.siteLimitDirty = true;
+    this.dirty = true;
+    return report;
   }
 
   getSiteLimit(): SiteLimit | null {
@@ -401,6 +464,7 @@ export class IfcSession {
       if (!(task.cost == null && next === 0) && roundMoney(task.cost ?? 0) !== next) {
         task.cost = next;
         cost = true;
+        this.ensureCostSchedule();
         this.ensureCostEntities(task);
         if (task.costItemId != null) {
           for (const other of this.schedule.byId.values()) {
@@ -475,6 +539,28 @@ export class IfcSession {
     return { created: true };
   }
 
+  /**
+   * Garante IfcCostSchedule (BUDGET) no projeto — dono dos IfcCostItem 5D.
+   * Na federação isto vive na COORD (IFC4).
+   */
+  ensureCostSchedule(name = "Orçamento"): { created: boolean } {
+    if (this.schedule.costScheduleId != null) return { created: false };
+    const projectId = this.schedule.projectId ?? firstIdOfType(this.index, "IFCPROJECT");
+    if (projectId == null) {
+      throw new Error("Este IFC não tem IfcProject — não dá para gravar um orçamento nativo.");
+    }
+    this.schedule.projectId = projectId;
+    this.schedule.costScheduleId = this.allocId();
+    this.createdCostSchedule = true;
+    if (this.schema !== "IFC2X3") {
+      if (this.createdDeclaresRelId == null && this.schedule.declaresRelId == null) {
+        this.createdCostDeclaresRelId = this.allocId();
+      }
+    }
+    this.dirty = true;
+    return { created: true };
+  }
+
   createTask(input: NewTaskInput): Task {
     this.ensureWorkSchedule(input.name);
     const id = this.allocId();
@@ -490,7 +576,7 @@ export class IfcSession {
     }
     const task: Task = {
       id,
-      globalId: createIfcGuid(),
+      globalId: input.globalId?.trim() || createIfcGuid(),
       name: input.name.trim() || "Nova tarefa",
       identification: input.identification?.trim() || undefined,
       start,
@@ -537,8 +623,8 @@ export class IfcSession {
     for (const gid of [...(task.groupIds ?? [])]) {
       this.assignGroupToTask(taskId, gid);
     }
-    for (let i = task.productIds.length - 1; i >= 0; i--) {
-      this.removeProductLink(task, task.productGuids[i], task.productIds[i]);
+    for (let i = task.productGuids.length - 1; i >= 0; i--) {
+      this.removeProductLink(task, task.productGuids[i]!, task.productIds[i] ?? 0);
     }
 
     if (task.parentId != null) {
@@ -657,6 +743,7 @@ export class IfcSession {
           identification: row.identification,
           start: row.start,
           end: row.end,
+          cost: row.cost,
         });
         task = existing;
         updated += 1;
@@ -669,6 +756,7 @@ export class IfcSession {
           isMilestone: row.isMilestone,
           parentId: parent?.id,
         });
+        if (row.cost != null && row.cost !== 0) this.applyTaskEdit(task.id, { cost: row.cost });
         created += 1;
       }
       idByIndex[i] = task.id;
@@ -900,6 +988,194 @@ export class IfcSession {
     return dtId;
   }
 
+  private rebasePlanningOntoThisFile(cloned: ScheduleData): void {
+    const idMap = new Map<number, number>();
+    const take = (old?: number): number | undefined => {
+      if (old == null) return undefined;
+      const hit = idMap.get(old);
+      if (hit != null) return hit;
+      const nid = this.allocId();
+      idMap.set(old, nid);
+      return nid;
+    };
+
+    cloned.workPlanId = cloned.workPlanId != null ? take(cloned.workPlanId) : undefined;
+    if (cloned.workPlanId != null) this.createdWorkPlan = true;
+    cloned.workScheduleId = cloned.workScheduleId != null ? take(cloned.workScheduleId) : this.allocId();
+    this.createdWorkSchedule = true;
+    this.schedule.workScheduleId = cloned.workScheduleId;
+    this.schedule.workPlanId = cloned.workPlanId;
+    if (this.schema !== "IFC2X3") {
+      cloned.declaresRelId = this.allocId();
+      this.createdDeclaresRelId = cloned.declaresRelId;
+    } else {
+      cloned.declaresRelId = undefined;
+      this.workControlDateId = this.ensureDateTime(new Date());
+    }
+    if (cloned.workPlanId != null) {
+      cloned.aggregatesRelId = this.allocId();
+      this.createdAggregatesRel = true;
+    } else {
+      cloned.aggregatesRelId = undefined;
+    }
+    if (cloned.costScheduleId != null) {
+      cloned.costScheduleId = take(cloned.costScheduleId);
+      this.createdCostSchedule = true;
+    }
+    this.schedule.costScheduleId = cloned.costScheduleId;
+
+    const visit = (task: Task) => {
+      const oldId = task.id;
+      task.id = this.allocId();
+      idMap.set(oldId, task.id);
+      this.createdTaskIds.add(task.id);
+      this.identityEdited.add(task.id);
+      task.nestsRelId = undefined;
+      task.sourceModelId = undefined;
+      task.sourceFileName = undefined;
+      task.isFederationRoot = false;
+      if (task.start && task.end) {
+        this.timeEdited.add(task.id);
+        if (this.schema !== "IFC2X3") {
+          task.taskTimeId = this.allocId();
+          this.createdTaskTimeIds.add(task.taskTimeId);
+        } else {
+          task.taskTimeId = undefined;
+        }
+      } else {
+        task.taskTimeId = undefined;
+      }
+      const hadCost = task.cost != null && task.cost !== 0;
+      task.costItemId = undefined;
+      task.costValueId = undefined;
+      if (hadCost) {
+        this.ensureCostSchedule();
+        this.ensureCostEntities(task);
+        this.costEdited.add(task.id);
+      }
+      for (let i = 0; i < task.productGuids.length; i++) {
+        const guid = task.productGuids[i]!;
+        const localPid = this.lookupLocalProductId(guid);
+        if (localPid != null) {
+          task.productIds[i] = localPid;
+          this.createdProductRels.set(`${task.id}:${localPid}`, {
+            relId: this.allocId(),
+            taskId: task.id,
+            productId: localPid,
+          });
+        } else {
+          task.productIds[i] = 0;
+        }
+      }
+      for (const child of task.children) visit(child);
+    };
+    for (const root of cloned.roots) visit(root);
+
+    const remapTask = (task: Task) => {
+      task.parentId = task.parentId != null ? idMap.get(task.parentId) : undefined;
+      const oldPreds = task.predecessors ?? [];
+      task.predecessors = [];
+      for (const pred of oldPreds) {
+        const predId = idMap.get(pred.taskId);
+        if (predId == null) continue;
+        const relId = this.allocId();
+        const lag = Math.round(pred.lagDays || 0);
+        const lagTimeId = this.allocLagTime(lag);
+        task.predecessors.push({
+          taskId: predId,
+          type: pred.type,
+          lagDays: lag || undefined,
+          relId,
+          lagTimeId,
+        });
+        this.createdSequenceRels.push({
+          relId,
+          predId,
+          succId: task.id,
+          type: pred.type,
+          lagDays: lag,
+          lagTimeId,
+        });
+      }
+      task.groupIds = (task.groupIds ?? []).map((gid) => idMap.get(gid)).filter((id): id is number => id != null);
+      for (const child of task.children) remapTask(child);
+    };
+
+    for (const group of cloned.groups ?? []) {
+      const oldId = group.id;
+      group.id = this.allocId();
+      idMap.set(oldId, group.id);
+      this.createdGroupIds.add(group.id);
+      group.sourceModelId = undefined;
+      group.sourceFileName = undefined;
+      const localMemberIds: number[] = [];
+      for (let i = 0; i < group.productGuids.length; i++) {
+        const localPid = this.lookupLocalProductId(group.productGuids[i]!);
+        group.productIds[i] = localPid ?? 0;
+        if (localPid != null) localMemberIds.push(localPid);
+      }
+      if (localMemberIds.length) {
+        const relId = this.allocId();
+        group.assignRelId = relId;
+        this.createdGroupAssignRel.set(group.id, relId);
+      } else {
+        group.assignRelId = undefined;
+      }
+    }
+    for (const root of cloned.roots) remapTask(root);
+    cloned.byId = new Map();
+    const index = (t: Task) => {
+      cloned.byId.set(t.id, t);
+      for (const c of t.children) index(c);
+    };
+    for (const r of cloned.roots) index(r);
+    for (const group of cloned.groups ?? []) {
+      group.taskIds = (group.taskIds ?? [])
+        .map((tid) => idMap.get(tid))
+        .filter((id): id is number => id != null);
+      for (const taskId of group.taskIds) {
+        this.createdGroupTaskRels.set(`${taskId}:${group.id}`, {
+          relId: this.allocId(),
+          taskId,
+          groupId: group.id,
+        });
+        const task = cloned.byId.get(taskId);
+        if (task && !task.groupIds.includes(group.id)) task.groupIds.push(group.id);
+      }
+    }
+
+    if (this.schema === "IFC2X3") {
+      for (const task of cloned.byId.values()) {
+        if (task.start && task.end) this.attachIfc2x3Time(task);
+      }
+    }
+    for (const task of cloned.byId.values()) {
+      if (task.children.length) this.touchNestsOn(task, cloned);
+    }
+    cloned.scheduleControlRelId = cloned.roots.length ? this.allocId() : undefined;
+    this.createdScheduleControlRel = cloned.scheduleControlRelId != null;
+    if (cloned.siteLimit) {
+      cloned.siteLimit = {
+        ...cloned.siteLimit,
+        annotationId: undefined,
+        clusterIds: undefined,
+      };
+    }
+    recomputeProductGuidsByTask(cloned);
+    recomputeScheduleRange(cloned);
+  }
+
+  private touchNestsOn(parent: Task, schedule: ScheduleData): void {
+    const live = schedule.byId.get(parent.id) ?? parent;
+    if (live.children.length === 0) {
+      live.nestsRelId = undefined;
+      return;
+    }
+    live.nestsRelId = this.allocId();
+    this.createdNestsRelIds.add(live.nestsRelId);
+    this.dirtyNestsParentIds.add(live.id);
+  }
+
   private allocId(): number {
     if (this.nextExpressId == null) this.nextExpressId = this.index.maxId + 1;
     return this.nextExpressId++;
@@ -908,6 +1184,7 @@ export class IfcSession {
   /**
    * Liga ou desliga um IfcProduct à IfcTask (IfcRelAssignsToProduct no formato Bonsai 4D).
    * Clique repetido no mesmo elemento remove a associação.
+   * GUIDs que não existem neste STEP ficam só na tarefa (ligação federada).
    */
   assignProductToTask(
     taskId: number,
@@ -916,8 +1193,8 @@ export class IfcSession {
   ): { added: boolean; guids: string[] } {
     const task = this.schedule.byId.get(taskId);
     if (!task) throw new Error(`Tarefa #${taskId} não encontrada.`);
-    const productId = this.resolveProductId(guid, expressIdHint);
-    const already = task.productGuids.includes(guid) || task.productIds.includes(productId);
+    const productId = this.lookupLocalProductId(guid, expressIdHint) ?? 0;
+    const already = task.productGuids.includes(guid);
     if (already) this.removeProductLink(task, guid, productId);
     else this.addProductLink(task, guid, productId);
     recomputeProductGuidsByTask(this.schedule);
@@ -934,6 +1211,18 @@ export class IfcSession {
     };
   }
 
+  /**
+   * No export da disciplina: IfcTask stub com o GlobalId da COORD + RelAssignsToProduct
+   * para cada GUID local ligado a essa tarefa.
+   */
+  syncCoordinationBindings(coordSchedule: ScheduleData): void {
+    const visit = (task: Task) => {
+      this.bindLocalProductsToCoordTask(task);
+      for (const child of task.children) visit(child);
+    };
+    for (const root of coordSchedule.roots) visit(root);
+  }
+
   createGroup(
     name: string,
     members: Array<{ guid: string; expressId?: number }>,
@@ -943,12 +1232,12 @@ export class IfcSession {
     const productIds: number[] = [];
     const productGuids: string[] = [];
     for (const m of members) {
-      const pid = this.resolveProductId(m.guid, m.expressId);
-      if (productIds.includes(pid)) continue;
-      productIds.push(pid);
+      if (productGuids.includes(m.guid)) continue;
+      const pid = this.lookupLocalProductId(m.guid, m.expressId) ?? 0;
       productGuids.push(m.guid);
+      productIds.push(pid);
     }
-    const assignRelId = productIds.length ? this.allocId() : undefined;
+    const assignRelId = productIds.some((id) => id > 0) ? this.allocId() : undefined;
     const group: SelectionGroup = {
       id: groupId,
       globalId: createIfcGuid(),
@@ -983,27 +1272,28 @@ export class IfcSession {
     const nextIds: number[] = [];
     const nextGuids: string[] = [];
     for (const m of members) {
-      const pid = this.resolveProductId(m.guid, m.expressId);
-      if (nextIds.includes(pid)) continue;
-      nextIds.push(pid);
+      if (nextGuids.includes(m.guid)) continue;
       nextGuids.push(m.guid);
+      nextIds.push(this.lookupLocalProductId(m.guid, m.expressId) ?? 0);
     }
     const removed: Array<{ id: number; guid: string }> = [];
-    for (let i = 0; i < group.productIds.length; i++) {
-      if (!nextIds.includes(group.productIds[i])) {
-        removed.push({ id: group.productIds[i], guid: group.productGuids[i] });
+    for (let i = 0; i < group.productGuids.length; i++) {
+      const guid = group.productGuids[i]!;
+      if (!nextGuids.includes(guid)) {
+        removed.push({ id: group.productIds[i] ?? 0, guid });
       }
     }
     const added: Array<{ id: number; guid: string }> = [];
-    for (let i = 0; i < nextIds.length; i++) {
-      if (!group.productIds.includes(nextIds[i])) {
-        added.push({ id: nextIds[i], guid: nextGuids[i] });
+    for (let i = 0; i < nextGuids.length; i++) {
+      const guid = nextGuids[i]!;
+      if (!group.productGuids.includes(guid)) {
+        added.push({ id: nextIds[i] ?? 0, guid });
       }
     }
     group.productIds = nextIds;
     group.productGuids = nextGuids;
     if (this.createdGroupIds.has(groupId)) {
-      if (nextIds.length && !this.createdGroupAssignRel.has(groupId)) {
+      if (nextIds.some((id) => id > 0) && !this.createdGroupAssignRel.has(groupId)) {
         const relId = this.allocId();
         group.assignRelId = relId;
         this.createdGroupAssignRel.set(groupId, relId);
@@ -1052,8 +1342,8 @@ export class IfcSession {
     if (already) {
       task.groupIds = task.groupIds.filter((id) => id !== groupId);
       group.taskIds = group.taskIds.filter((id) => id !== taskId);
-      for (let i = 0; i < group.productIds.length; i++) {
-        this.removeProductLink(task, group.productGuids[i], group.productIds[i]);
+      for (let i = 0; i < group.productGuids.length; i++) {
+        this.removeProductLink(task, group.productGuids[i]!, group.productIds[i] ?? 0);
       }
       if (this.createdGroupTaskRels.has(key)) this.createdGroupTaskRels.delete(key);
       else {
@@ -1062,8 +1352,8 @@ export class IfcSession {
     } else {
       task.groupIds.push(groupId);
       if (!group.taskIds.includes(taskId)) group.taskIds.push(taskId);
-      for (let i = 0; i < group.productIds.length; i++) {
-        this.addProductLink(task, group.productGuids[i], group.productIds[i]);
+      for (let i = 0; i < group.productGuids.length; i++) {
+        this.addProductLink(task, group.productGuids[i]!, group.productIds[i] ?? 0);
       }
       const pending = this.removedGroupTaskLinks.get(key);
       if (pending) this.removedGroupTaskLinks.delete(key);
@@ -1089,20 +1379,49 @@ export class IfcSession {
     return group;
   }
 
-  private resolveProductId(guid: string, expressIdHint?: number): number {
+  private entityType(expressId: number): string | undefined {
+    if (!this.typeById) {
+      this.typeById = new Map();
+      for (const [type, ids] of this.index.typeIds) {
+        for (const id of ids) this.typeById.set(id, type);
+      }
+    }
+    return this.typeById.get(expressId);
+  }
+
+  private isAssignableProduct(expressId: number): boolean {
+    const type = this.entityType(expressId);
+    if (!type) return true;
+    if (type.startsWith("IFCREL")) return false;
+    if (
+      type === "IFCTASK" ||
+      type === "IFCTASKTIME" ||
+      type === "IFCGROUP" ||
+      type === "IFCWORKPLAN" ||
+      type === "IFCWORKSCHEDULE" ||
+      type === "IFCCOSTSCHEDULE" ||
+      type === "IFCCOSTITEM" ||
+      type === "IFCCOSTVALUE"
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  private lookupLocalProductId(guid: string, expressIdHint?: number): number | undefined {
     const productId =
       this.index.guidToId.get(guid) ??
       (expressIdHint != null && this.index.offset.has(expressIdHint) ? expressIdHint : undefined);
-    if (productId == null) {
-      throw new Error("Este elemento não tem GlobalId no IFC — não dá para associar nativamente.");
-    }
+    if (productId == null || !this.isAssignableProduct(productId)) return undefined;
     return productId;
   }
 
   private addProductLink(task: Task, guid: string, productId: number): void {
-    if (task.productGuids.includes(guid) || task.productIds.includes(productId)) return;
+    if (task.productGuids.includes(guid)) return;
     task.productGuids.push(guid);
-    task.productIds.push(productId);
+    if (productId > 0) task.productIds.push(productId);
+    else task.productIds.push(0);
+    if (productId <= 0) return;
     const key = `${task.id}:${productId}`;
     const pendingRemove = [...this.removedExistingAssignRels.entries()].find(
       ([, v]) => v.taskId === task.id && v.productId === productId,
@@ -1117,12 +1436,72 @@ export class IfcSession {
 
   private removeProductLink(task: Task, guid: string, productId: number): void {
     const gi = task.productGuids.indexOf(guid);
-    if (gi >= 0) task.productGuids.splice(gi, 1);
-    const pi = task.productIds.indexOf(productId);
-    if (pi >= 0) task.productIds.splice(pi, 1);
+    if (gi >= 0) {
+      task.productGuids.splice(gi, 1);
+      if (gi < task.productIds.length) task.productIds.splice(gi, 1);
+    } else if (productId > 0) {
+      const pi = task.productIds.indexOf(productId);
+      if (pi >= 0) task.productIds.splice(pi, 1);
+    }
+    if (productId <= 0) return;
     const key = `${task.id}:${productId}`;
     if (this.createdProductRels.has(key)) this.createdProductRels.delete(key);
     else this.removedProductLinks.set(key, { taskId: task.id, productId });
+  }
+
+  private bindLocalProductsToCoordTask(coordTask: Task): void {
+    const local: Array<{ guid: string; id: number }> = [];
+    for (const guid of coordTask.productGuids) {
+      const id = this.lookupLocalProductId(guid);
+      if (id != null) local.push({ guid, id });
+    }
+    if (!local.length) return;
+    const stub = this.ensureTaskStub(coordTask);
+    for (const { guid, id } of local) {
+      if (!stub.productGuids.includes(guid)) this.addProductLink(stub, guid, id);
+    }
+    this.dirty = true;
+  }
+
+  /** Stub IfcTask com o mesmo GlobalId da tarefa da COORD — âncora, sem WBS. */
+  private ensureTaskStub(src: Task): Task {
+    for (const existing of this.schedule.byId.values()) {
+      if (existing.globalId === src.globalId) return existing;
+    }
+    const indexed = this.index.guidToId.get(src.globalId);
+    if (indexed != null && this.entityType(indexed) === "IFCTASK") {
+      const live = this.schedule.byId.get(indexed);
+      if (live) return live;
+      const stub: Task = {
+        id: indexed,
+        globalId: src.globalId,
+        name: src.name,
+        identification: src.identification,
+        children: [],
+        productIds: [],
+        productGuids: [],
+        groupIds: [],
+        predecessors: [],
+      };
+      this.schedule.byId.set(indexed, stub);
+      return stub;
+    }
+    const id = this.allocId();
+    const stub: Task = {
+      id,
+      globalId: src.globalId,
+      name: src.name.trim() || "Tarefa",
+      identification: src.identification,
+      children: [],
+      productIds: [],
+      productGuids: [],
+      groupIds: [],
+      predecessors: [],
+    };
+    this.schedule.byId.set(id, stub);
+    this.createdTaskIds.add(id);
+    this.identityEdited.add(id);
+    return stub;
   }
 
   private ensureCostEntities(task: Task): void {
@@ -1199,6 +1578,7 @@ export class IfcSession {
       flags: {
         createdWorkPlan: this.createdWorkPlan,
         createdWorkSchedule: this.createdWorkSchedule,
+        createdCostSchedule: this.createdCostSchedule,
         createdAggregatesRel: this.createdAggregatesRel,
         createdScheduleControlRel: this.createdScheduleControlRel,
         dirtyScheduleControl: this.dirtyScheduleControl,
@@ -1208,6 +1588,7 @@ export class IfcSession {
       },
       ids: {
         createdDeclaresRelId: this.createdDeclaresRelId,
+        createdCostDeclaresRelId: this.createdCostDeclaresRelId,
         workControlDateId: this.workControlDateId,
         localTimeId: this.localTimeId,
       },
@@ -1271,6 +1652,7 @@ export class IfcSession {
     this.createdDateLines.splice(0, this.createdDateLines.length, ...snapshot.createdDateLines);
     this.createdWorkPlan = !!snapshot.flags.createdWorkPlan;
     this.createdWorkSchedule = !!snapshot.flags.createdWorkSchedule;
+    this.createdCostSchedule = !!snapshot.flags.createdCostSchedule;
     this.createdAggregatesRel = !!snapshot.flags.createdAggregatesRel;
     this.createdScheduleControlRel = !!snapshot.flags.createdScheduleControlRel;
     this.dirtyScheduleControl = !!snapshot.flags.dirtyScheduleControl;
@@ -1278,6 +1660,7 @@ export class IfcSession {
     this.geoChanged = !!snapshot.flags.geoChanged;
     this.siteLimitDirty = !!snapshot.flags.siteLimitDirty;
     this.createdDeclaresRelId = snapshot.ids.createdDeclaresRelId;
+    this.createdCostDeclaresRelId = snapshot.ids.createdCostDeclaresRelId;
     this.workControlDateId = snapshot.ids.workControlDateId;
     this.localTimeId = snapshot.ids.localTimeId;
     this.extra = { ...snapshot.extra };
@@ -1321,11 +1704,32 @@ export class IfcSession {
         });
       }
     }
+    if (this.createdCostSchedule && this.schedule.costScheduleId != null) {
+      newLines.push(
+        serializeNewCostSchedule(
+          this.schedule.costScheduleId,
+          this.schedule.name || "Orçamento",
+          now,
+          this.schema,
+          oh,
+          this.workControlDateId,
+        ),
+      );
+    }
     if (this.schema !== "IFC2X3" && this.createdDeclaresRelId != null && this.schedule.projectId != null) {
-      const defs = [this.schedule.workScheduleId, this.schedule.workPlanId].filter(
+      const defs = [this.schedule.workScheduleId, this.schedule.workPlanId, this.schedule.costScheduleId].filter(
         (id): id is number => id != null,
       );
       newLines.push(serializeRelDeclares(this.createdDeclaresRelId, this.schedule.projectId, defs, oh));
+    } else if (
+      this.schema !== "IFC2X3" &&
+      this.createdCostDeclaresRelId != null &&
+      this.schedule.projectId != null &&
+      this.schedule.costScheduleId != null
+    ) {
+      newLines.push(
+        serializeRelDeclares(this.createdCostDeclaresRelId, this.schedule.projectId, [this.schedule.costScheduleId], oh),
+      );
     }
     if (
       this.createdAggregatesRel &&
@@ -1463,6 +1867,7 @@ export class IfcSession {
     }
 
     for (const { relId, taskId, productId } of this.createdProductRels.values()) {
+      if (productId <= 0) continue;
       newLines.push(serializeNewAssignToProduct(relId, taskId, productId));
     }
     for (const { taskId, productId } of this.removedProductLinks.values()) {
@@ -1764,6 +2169,7 @@ export class IfcSession {
   private async commitExport(bytes: Uint8Array, nextIndex: StepIndex | null): Promise<void> {
     if (nextIndex) this.index = nextIndex;
     else this.index = buildStepIndex(bytesToLatin1(bytes));
+    this.typeById = null;
     const exported = bytesToLatin1(bytes);
     if (this.siteLimitDirty || this.schedule.siteLimit) {
       this.schedule.siteLimit = parseSiteLimitFromStep(exported, this.index) ?? undefined;
@@ -1819,7 +2225,9 @@ export class IfcSession {
     this.createdDateLines.length = 0;
     this.createdWorkPlan = false;
     this.createdWorkSchedule = false;
+    this.createdCostSchedule = false;
     this.createdDeclaresRelId = undefined;
+    this.createdCostDeclaresRelId = undefined;
     this.createdAggregatesRel = false;
     this.createdScheduleControlRel = false;
     this.dirtyScheduleControl = false;
@@ -1828,7 +2236,6 @@ export class IfcSession {
     this.siteLimitDirty = false;
     this.removedSiteLimitCluster = [];
     this.geoWrite = null;
-    this.extra = emptyExtraTransform();
     this.changeSet.clear();
     this.dirty = false;
   }
@@ -2069,7 +2476,7 @@ function serializeNewIfcGroup(group: SelectionGroup): string {
 }
 
 function serializeNewAssignToGroup(expressId: number, group: SelectionGroup): string {
-  const ids = group.productIds;
+  const ids = group.productIds.filter((id) => id > 0);
   if (ids.length === 0) return `/* empty group #${group.id} */`;
   const args = [
     ifcString(createIfcGuid()),

@@ -41,7 +41,7 @@
           </button>
           <div class="header-project-wrap">
           <button type="button" class="header-project" id="btn-open-ifc" title="Abrir IFC" aria-haspopup="dialog" aria-expanded="false" aria-controls="model-popover">
-            <span class="file-ext">IFC</span>
+            <span class="file-ext" id="file-ext">IFC</span>
             <span id="file-name" class="file-name">Abrir modelo</span>
             <svg class="header-project-caret" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
               <path d="M6 9l6 6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -57,7 +57,8 @@
         </div>
 
         <div class="header-right">
-          <input type="file" id="ifc-file-input" class="sr-only" accept=".ifc,.IFC" multiple />
+          <input type="file" id="ifc-file-input" class="sr-only" accept=".vtwin,.ifc,.VTWIN,.IFC" multiple />
+          <input type="file" id="replace-ifc-input" class="sr-only" accept=".ifc,.IFC" />
           <input
             type="file"
             id="plan-file-input"
@@ -76,9 +77,24 @@
           <button
             type="button"
             class="icon-btn-plain"
+            id="btn-save-project"
+            title="Guardar projeto (.vtwin)"
+            aria-label="Guardar projeto"
+            disabled
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M6 4h10l4 4v12H6V4z" stroke-linejoin="round" />
+              <path d="M8 4v6h8" />
+              <path d="M8 20v-6h8v6" />
+            </svg>
+            <span id="btn-save-project-label" class="sr-only">Guardar projeto</span>
+          </button>
+          <button
+            type="button"
+            class="icon-btn-plain"
             id="btn-export"
-            title="Exportar"
-            aria-label="Exportar"
+            title="Exportar IFC"
+            aria-label="Exportar IFC"
             disabled
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
@@ -403,14 +419,14 @@
                   <div class="import-visual" aria-hidden="true">
                     <img src="/brand/symbol-color.svg" width="72" height="54" alt="" />
                   </div>
-                  <h3>IFC</h3>
+                  <h3>IFC ou .vtwin</h3>
                 </div>
               </div>
 
               <div id="drop-veil" class="drop-veil" hidden>
                 <div class="drop-veil-card">
                   <img src="/brand/symbol-color.svg" width="72" height="54" alt="" />
-                  <span>IFC</span>
+                  <span>IFC ou .vtwin</span>
                 </div>
               </div>
 

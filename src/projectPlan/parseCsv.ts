@@ -1,6 +1,7 @@
 import { addDays, diffDays, parseDurationDays, parseFlexibleDate } from "./dates";
 import { finalizePlan, uid } from "./buildPlan";
 import type { PlanPredecessor, PlanTask, PredType, ProjectPlan } from "./types";
+import { parseMoney } from "../schedule/cost";
 
 export interface ColMap {
   name?: number;
@@ -12,6 +13,7 @@ export interface ColMap {
   progress?: number;
   pred?: number;
   milestone?: number;
+  cost?: number;
 }
 
 export type CsvField = keyof ColMap;
@@ -26,6 +28,7 @@ export const CSV_FIELDS: Array<{ key: CsvField; label: string; required?: boolea
   { key: "pred", label: "Predecessores", hint: "IDs tipo 12FS+1" },
   { key: "progress", label: "Progresso %", hint: "0–100" },
   { key: "milestone", label: "Marco", hint: "Sim/Não ou 0/1" },
+  { key: "cost", label: "Custo / valor", hint: "Valor 5D da linha (R$)" },
 ];
 
 export interface CsvInspection {
@@ -51,6 +54,7 @@ const HEADER = {
   progress: /(%|percent|progresso|conclu[ií]d|complete)/i,
   pred: /(predecessor|sucessor)/i,
   milestone: /(milestone|marco)/i,
+  cost: /(^custo|^valor$|valor\s*total|pre[cç]o\s*total|or[cç]amento|\bbudget\b|^cost$|\bamount\b)/i,
 };
 
 export function inspectCsv(text: string, fileName: string): CsvInspection {
@@ -137,6 +141,8 @@ export function planFromMappedCsv(insp: CsvInspection, map: ColMap): ProjectPlan
       predecessors: parsePreds(cell(row, map.pred)),
       linkedProductGuids: [],
     };
+    const cost = parseMoney(cell(row, map.cost));
+    if (cost != null && cost !== 0) task.cost = cost;
     if (!task.end && task.start && task.durationDays != null) {
       task.end = addDays(task.start, task.isMilestone ? 0 : task.durationDays);
     }
@@ -176,6 +182,7 @@ function guessColumns(headers: string[], sample: string[][], hasHeader: boolean)
       else if (map.progress == null && HEADER.progress.test(v)) map.progress = i;
       else if (map.pred == null && HEADER.pred.test(v)) map.pred = i;
       else if (map.milestone == null && HEADER.milestone.test(v)) map.milestone = i;
+      else if (map.cost == null && HEADER.cost.test(v)) map.cost = i;
     });
   }
   if (map.name == null) map.name = pickNameColumn(sample, map);

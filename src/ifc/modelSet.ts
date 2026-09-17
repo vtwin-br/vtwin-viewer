@@ -2,6 +2,8 @@ import type { ScheduleData, Task } from "../schedule/types";
 import { emptySchedule, recomputeProductGuidsByTask, recomputeScheduleRange } from "../schedule/range";
 import type { IfcSession } from "./ifcSession";
 import type { BimModelRecord, BimModelRepository } from "../bim/contracts";
+import type { VtwinModelRole } from "../project/manifest";
+import { COORDINATION_FILE_NAME, COORDINATION_MODEL_ID } from "./coordinationIfc";
 
 /** ExpressIDs nativos cabem abaixo disto; o slot distingue o ficheiro na vista federada. */
 export const IFC_ID_STRIDE = 1_000_000_000;
@@ -26,6 +28,7 @@ export interface LoadedIfc extends BimModelRecord {
   visible: boolean;
   color: string;
   hash?: string;
+  role: VtwinModelRole;
 }
 
 export interface NativeRef {
@@ -72,14 +75,46 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
     return this.items.find((m) => m.slot === slot);
   }
 
+  get coordination(): LoadedIfc | undefined {
+    return this.items.find((m) => m.role === "coordination");
+  }
+
+  get disciplines(): LoadedIfc[] {
+    return this.items.filter((m) => m.role !== "coordination");
+  }
+
+  /**
+   * Cria (ou devolve) o IFC de coordenação. Idempotente.
+   * `create` só corre se ainda não existir raiz.
+   */
+  ensureCoordination(create: () => {
+    session: IfcSession;
+    hash?: string;
+    fileName?: string;
+    id?: string;
+  }): LoadedIfc {
+    const existing = this.coordination;
+    if (existing) return existing;
+    const made = create();
+    return this.add({
+      id: made.id ?? COORDINATION_MODEL_ID,
+      fileName: made.fileName ?? COORDINATION_FILE_NAME,
+      session: made.session,
+      hash: made.hash,
+      role: "coordination",
+    });
+  }
+
   add(input: {
     id?: string;
     fileName: string;
     session: IfcSession;
     hash?: string;
+    role?: VtwinModelRole;
   }): LoadedIfc {
     const slot = this.nextSlot++;
     const id = input.id ?? `ifc-${this.seq++}`;
+    const role = input.role ?? "discipline";
     const entry: LoadedIfc = {
       id,
       slot,
@@ -92,9 +127,10 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
       visible: true,
       color: MODEL_LAYER_COLORS[(slot - 1) % MODEL_LAYER_COLORS.length]!,
       hash: input.hash,
+      role,
     };
     this.items.push(entry);
-    this.activeId = id;
+    if (role !== "coordination" || !this.activeId) this.activeId = id;
     return entry;
   }
 
@@ -113,12 +149,22 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
     if (!visible && this.activeId === id) {
       this.activeId = this.visible[0]?.id ?? this.items[0]?.id ?? null;
     }
-    if (visible) this.activeId = id;
+    if (visible && m.role !== "coordination") this.activeId = id;
     return m;
   }
 
   setActive(id: string): void {
     if (this.get(id)) this.activeId = id;
+  }
+
+  rename(id: string, fileName: string): void {
+    const m = this.get(id);
+    if (!m) return;
+    m.fileName = fileName;
+    m.displayName = uniqueDisplayName(
+      fileName,
+      this.items.filter((x) => x.id !== id).map((x) => x.displayName),
+    );
   }
 
   /** Reordena a lista de modelos (vista; não altera o STEP). */
@@ -161,14 +207,21 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
   }
 
   mergedSchedule(): ScheduleData {
-    const vis = this.visible;
+    const coord = this.coordination;
+    if (coord && coord.session.schedule.roots.length) {
+      return this.federateEntries([coord], false);
+    }
+    const vis = this.visible.filter((m) => m.role !== "coordination");
     if (!vis.length) return emptySchedule();
-    const wrap = vis.length > 1;
+    return this.federateEntries(vis, vis.length > 1);
+  }
+
+  private federateEntries(entries: LoadedIfc[], wrap: boolean): ScheduleData {
     const out = emptySchedule();
     out.documents = [];
     const currencies = new Set<string>();
 
-    for (const entry of vis) {
+    for (const entry of entries) {
       const src = entry.session.schedule;
       currencies.add(src.currency || "BRL");
       const remappedRoots = src.roots.map((t) => remapTask(t, entry.slot, entry.id, entry.displayName));
@@ -216,9 +269,9 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
     recomputeProductGuidsByTask(out);
     recomputeScheduleRange(out);
 
-    out.currency = currencies.size === 1 ? [...currencies][0]! : vis[0]!.session.schedule.currency || "BRL";
-    if (vis.length === 1) {
-      const s = vis[0]!.session.schedule;
+    out.currency = currencies.size === 1 ? [...currencies][0]! : entries[0]!.session.schedule.currency || "BRL";
+    if (entries.length === 1) {
+      const s = entries[0]!.session.schedule;
       out.name = s.name;
       out.workPlanName = s.workPlanName;
       out.projectId = s.projectId;
@@ -227,8 +280,8 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
       out.costScheduleId = s.costScheduleId;
       out.georef = s.georef;
     } else {
-      out.name = `${vis.length} modelos`;
-      out.workPlanName = vis.map((m) => m.displayName.replace(/\.ifc$/i, "")).join(" · ");
+      out.name = `${entries.length} modelos`;
+      out.workPlanName = entries.map((m) => m.displayName.replace(/\.ifc$/i, "")).join(" · ");
     }
     return out;
   }

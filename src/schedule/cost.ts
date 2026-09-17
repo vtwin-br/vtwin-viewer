@@ -113,6 +113,20 @@ export function computeCostProjection(schedule: ScheduleData, currentDate: Date)
   return { total, realized, months };
 }
 
+export function parseMoney(raw: string): number | undefined {
+  const t = raw.trim().replace(/\s/g, "").replace(/R\$/gi, "");
+  if (!t) return 0;
+  let s = t;
+  if (/,/.test(s) && /\./.test(s)) {
+    if (s.lastIndexOf(",") > s.lastIndexOf(".")) s = s.replace(/\./g, "").replace(",", ".");
+    else s = s.replace(/,/g, "");
+  } else if (/,/.test(s)) {
+    s = s.replace(",", ".");
+  }
+  const n = Number(s);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 export function formatMoney(amount: number, currency = "BRL"): string {
   const code = /^[A-Z]{3}$/i.test(currency) ? currency.toUpperCase() : "BRL";
   try {

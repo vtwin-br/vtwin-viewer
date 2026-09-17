@@ -28,6 +28,7 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
           type: p.type,
           lagDays: p.lagDays,
         })),
+        cost: t.cost,
         linkedIfcTaskId: t.id,
         linkedProductGuids: [...(schedule.productGuidsByTask.get(t.id) ?? t.productGuids)],
         linkedGroupIds: [...(t.groupIds ?? [])],
@@ -73,6 +74,7 @@ export function planToOutlineRows(plan: ProjectPlan): OutlineRowInput[] {
     end: t.end,
     outlineLevel: t.outlineLevel,
     isMilestone: t.isMilestone,
+    cost: t.cost,
     predecessorIndexes: t.predecessors.flatMap((p) => {
       let index = indexById.get(p.id);
       if (index == null && /^\d+$/.test(p.id)) {

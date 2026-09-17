@@ -58,6 +58,21 @@ export function extraIsIdentity(t: ModelExtraTransform, eps = 1e-6): boolean {
   return Math.abs(t.x) < eps && Math.abs(t.y) < eps && Math.abs(t.z) < eps && Math.abs(t.yaw) < eps;
 }
 
+export function applyExtraToObject(
+  object: { position: { set(x: number, y: number, z: number): void }; rotation: { set(x: number, y: number, z: number): void } },
+  t: ModelExtraTransform,
+): void {
+  object.position.set(t.x, t.y, t.z);
+  object.rotation.set(0, t.yaw, 0);
+}
+
+export function extraFromObject(object: {
+  position: { x: number; y: number; z: number };
+  rotation: { y: number };
+}): ModelExtraTransform {
+  return { x: object.position.x, y: object.position.y, z: object.position.z, yaw: object.rotation.y };
+}
+
 /**
  * Cota gravada em IfcSite.RefElevation / IfcMapConversion.OrthogonalHeight.
  * `0` (e quase-zero) é o default STEP de muitos IFCs e não serve como elipsoide.

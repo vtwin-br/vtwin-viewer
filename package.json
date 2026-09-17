@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Visualizador web 4D de IFC com cronograma nativo (IfcWorkSchedule / IfcTask) renderizado via That Open Components",
+  "description": "Visualizador e editor web openBIM (IFC): federação, pacote .vtwin, cronograma nativo 4D/5D e Fragments via That Open Components",
   "scripts": {
     "postinstall": "node scripts/setup-public.mjs",
     "dev": "vite",
@@ -17,6 +17,7 @@
     "@thatopen/components": "~3.4.6",
     "@thatopen/fragments": "~3.4.5",
     "3d-tiles-renderer": "^0.4.24",
+    "fflate": "^0.8.3",
     "three": "0.184.0",
     "three-mesh-bvh": "0.9.9",
     "web-ifc": "0.0.77"

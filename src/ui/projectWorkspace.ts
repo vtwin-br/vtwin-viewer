@@ -36,14 +36,34 @@ import {
   resolvePredecessorToken,
   wouldCreateCycle,
 } from "../schedule/links";
+import { formatMoney, parseMoney } from "../schedule/cost";
 
-const ZOOM = [8, 14, 22, 32];
+const ZOOM_MIN = 4;
+const ZOOM_MAX = 56;
 const ROW_H = 36;
+const LS_COLS = "vista4d.gantt.columns";
 const ICON_TOGGLE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_OUTDENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h7" stroke-linecap="round"/><path d="M6 9L3 12l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_INDENT = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h11M4 12h11M4 17h7" stroke-linecap="round"/><path d="M18 9l3 3-3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_LINK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9.5 14.5l5-5" stroke-linecap="round"/><rect x="3.5" y="12.5" width="8" height="6" rx="1.2"/><rect x="12.5" y="5.5" width="8" height="6" rx="1.2"/></svg>`;
 const ICON_UNLINK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M9.5 14.5l2-2M14.5 9.5l-2 2" stroke-linecap="round"/><rect x="3.5" y="12.5" width="8" height="6" rx="1.2"/><rect x="12.5" y="5.5" width="8" height="6" rx="1.2"/></svg>`;
+const ICON_DELETE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const ICON_COLUMNS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="5" width="4.2" height="14" rx="1"/><rect x="10" y="5" width="4.2" height="14" rx="1"/><rect x="16" y="5" width="4.2" height="14" rx="1"/></svg>`;
+const ICON_ADD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>`;
+
+type ColId = "wbs" | "name" | "prod" | "set" | "dur" | "pred" | "start" | "end" | "cost";
+
+const COLUMNS: Array<{ id: ColId; label: string; width: number; min: number; required?: boolean }> = [
+  { id: "wbs", label: "WBS", width: 84, min: 48 },
+  { id: "name", label: "Nome", width: 180, min: 120, required: true },
+  { id: "prod", label: "3D", width: 40, min: 32 },
+  { id: "set", label: "Conjunto", width: 72, min: 48 },
+  { id: "dur", label: "Dias", width: 48, min: 40 },
+  { id: "pred", label: "Pred.", width: 88, min: 56 },
+  { id: "start", label: "Início", width: 100, min: 88 },
+  { id: "end", label: "Término", width: 100, min: 88 },
+  { id: "cost", label: "Custo", width: 104, min: 72 },
+];
 
 export interface ProjectWorkspaceOptions {
   getIfcSchedule: () => ScheduleData | null;
@@ -83,6 +103,9 @@ export class ProjectWorkspace {
   private syncingScroll = false;
   private selectedLink: { pred: string; succ: string } | null = null;
   private suppressChartClick = false;
+  private colVisible = Object.fromEntries(COLUMNS.map((c) => [c.id, true])) as Record<ColId, boolean>;
+  private colWidths = Object.fromEntries(COLUMNS.map((c) => [c.id, c.width])) as Record<ColId, number>;
+  private costRoll = new Map<string, number>();
 
   constructor(root: HTMLElement, opts: ProjectWorkspaceOptions) {
     this.root = root;
@@ -257,7 +280,6 @@ export class ProjectWorkspace {
             <div class="pw-attach" data-el="attach" hidden></div>
           </div>
           <div class="pw-toolbar-right">
-            <button type="button" class="btn-primary" data-act="add">+</button>
             <button type="button" class="btn-secondary" data-act="model" aria-pressed="false" title="Pré-visualização BIM para ligar elementos">3D</button>
             <button type="button" class="btn-secondary pw-act-wide" data-act="from-ifc">IFC</button>
             <button type="button" class="btn-ghost pw-act-wide" data-act="import">CSV</button>
@@ -266,26 +288,14 @@ export class ProjectWorkspace {
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
               </button>
               <div class="pw-overflow-menu" hidden data-el="more-menu">
-                <button type="button" data-act="outdent">Subir</button>
-                <button type="button" data-act="indent">Descer</button>
-                <button type="button" data-act="link">Ligar</button>
-                <button type="button" data-act="unlink">Desligar</button>
                 <button type="button" data-act="model">Pré-visualização 3D</button>
                 <button type="button" data-act="from-ifc">IFC</button>
                 <button type="button" data-act="import">CSV</button>
               </div>
             </div>
-            <div class="pw-eap" role="group" aria-label="Nível da EAP">
-              <button type="button" class="pw-zoom-btn" data-act="outdent" title="Subir nível da EAP (Alt+Shift+←)" aria-label="Subir nível da EAP">${ICON_OUTDENT}</button>
-              <button type="button" class="pw-zoom-btn" data-act="indent" title="Rebaixar nível da EAP (Alt+Shift+→)" aria-label="Rebaixar nível da EAP">${ICON_INDENT}</button>
-            </div>
-            <div class="pw-eap" role="group" aria-label="Ligações">
-              <button type="button" class="pw-zoom-btn" data-act="link" title="Ligar tarefas (Ctrl+L) — Finish-to-Start" aria-label="Ligar tarefas">${ICON_LINK}</button>
-              <button type="button" class="pw-zoom-btn" data-act="unlink" title="Desligar tarefas (Ctrl+Shift+L)" aria-label="Desligar tarefas">${ICON_UNLINK}</button>
-            </div>
             <div class="pw-zoom" role="group" aria-label="Zoom do Gantt">
-              <button type="button" class="pw-zoom-btn" data-act="zoom-out" title="Afastar" aria-label="Afastar">−</button>
-              <button type="button" class="pw-zoom-btn" data-act="zoom-in" title="Aproximar" aria-label="Aproximar">+</button>
+              <button type="button" class="pw-zoom-btn" data-act="zoom-out" title="Afastar (Ctrl+scroll)" aria-label="Afastar">−</button>
+              <button type="button" class="pw-zoom-btn" data-act="zoom-in" title="Aproximar (Ctrl+scroll)" aria-label="Aproximar">+</button>
             </div>
             <button type="button" class="panel-collapse pw-hide-gantt" data-act="hide-gantt" title="Ocultar Gantt" aria-label="Ocultar Gantt">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M14 6l-6 6 6 6" stroke-linecap="round" stroke-linejoin="round"/></svg>
@@ -293,17 +303,25 @@ export class ProjectWorkspace {
           </div>
         </header>
         <div class="pw-gantt" data-el="gantt">
-          <div class="pw-table">
-            <div class="pw-table-head">
-              <span class="pw-col-wbs">WBS</span>
-              <span class="pw-col-name">Nome</span>
-              <span class="pw-col-prod">3D</span>
-              <span class="pw-col-set">Conjunto</span>
-              <span class="pw-col-dur">Dias</span>
-              <span class="pw-col-pred">Pred.</span>
-              <span class="pw-col-date">Início</span>
-              <span class="pw-col-date">Término</span>
+          <div class="pw-table" data-el="table">
+            <div class="pw-table-tools">
+              <div class="pw-eap" role="group" aria-label="Tarefas">
+                <button type="button" class="pw-zoom-btn" data-act="add" title="Nova tarefa" aria-label="Nova tarefa">${ICON_ADD}</button>
+                <button type="button" class="pw-zoom-btn" data-act="delete" title="Excluir (Delete)" aria-label="Excluir">${ICON_DELETE}</button>
+              </div>
+              <div class="pw-eap" role="group" aria-label="Nível da EAP">
+                <button type="button" class="pw-zoom-btn" data-act="outdent" title="Subir nível (Alt+Shift+←)" aria-label="Subir nível">${ICON_OUTDENT}</button>
+                <button type="button" class="pw-zoom-btn" data-act="indent" title="Rebaixar nível (Alt+Shift+→)" aria-label="Rebaixar nível">${ICON_INDENT}</button>
+              </div>
+              <div class="pw-eap" role="group" aria-label="Ligações">
+                <button type="button" class="pw-zoom-btn" data-act="link" title="Ligar tarefas (Ctrl+L)" aria-label="Ligar">${ICON_LINK}</button>
+                <button type="button" class="pw-zoom-btn" data-act="unlink" title="Desligar (Ctrl+Shift+L)" aria-label="Desligar">${ICON_UNLINK}</button>
+              </div>
+              <div class="pw-eap pw-col-tools">
+                <button type="button" class="pw-zoom-btn" data-act="columns" title="Colunas" aria-label="Mostrar ou ocultar colunas" aria-haspopup="true">${ICON_COLUMNS}</button>
+              </div>
             </div>
+            <div class="pw-table-head" data-el="table-head"></div>
             <div class="pw-table-body" data-el="table-body"></div>
           </div>
           <div class="pw-gantt-split" data-el="gantt-split" role="separator" aria-orientation="vertical" aria-label="Largura da tabela" tabindex="0"></div>
@@ -314,6 +332,8 @@ export class ProjectWorkspace {
         </div>
       </div>
       <div class="pw-sync is-hidden" data-el="mapper" role="dialog" aria-modal="true" aria-labelledby="pw-map-title"></div>
+      <div class="pw-menu" data-el="ctx" hidden></div>
+      <div class="pw-menu pw-col-menu" data-el="col-menu" hidden></div>
       <div class="pw-toast" data-el="toast" hidden></div>
       <div class="pw-link-pop" data-el="link-pop" hidden>
         <label>Tipo
@@ -338,15 +358,10 @@ export class ProjectWorkspace {
     });
     this.root.querySelector(".pw-toolbar")?.addEventListener("click", (e) => {
       const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
-      if (act === "add") this.addTask();
       if (act === "import") this.fileInput?.click();
       if (act === "from-ifc") this.openIfcSchedule();
       if (act === "model") this.opts.onToggleModel?.();
       if (act === "hide-gantt") this.opts.onHideGantt?.();
-      if (act === "indent") this.changeOutline(1);
-      if (act === "outdent") this.changeOutline(-1);
-      if (act === "link") this.linkSelected();
-      if (act === "unlink") this.unlinkSelected();
       if (act === "zoom-in") this.nudgeZoom(1);
       if (act === "zoom-out") this.nudgeZoom(-1);
       if (act === "more") {
@@ -356,6 +371,26 @@ export class ProjectWorkspace {
         const menu = this.el("more-menu");
         if (menu) menu.hidden = true;
       }
+    });
+    this.root.querySelector(".pw-table-tools")?.addEventListener("click", (e) => {
+      const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
+      if (!act) return;
+      if (act === "columns") {
+        this.toggleColMenu((e.target as HTMLElement).closest("[data-act='columns']"));
+        return;
+      }
+      this.runPlanAct(act);
+    });
+    this.root.querySelector("[data-el='ctx']")?.addEventListener("click", (e) => {
+      const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
+      this.closeMenus();
+      if (act) this.runPlanAct(act);
+    });
+    this.root.querySelector("[data-el='col-menu']")?.addEventListener("change", (e) => {
+      const input = e.target as HTMLInputElement;
+      const id = input.dataset.col as ColId | undefined;
+      if (!id || input.type !== "checkbox") return;
+      this.setColumnVisible(id, input.checked);
     });
     this.root.querySelector("[data-el='title']")?.addEventListener("change", (e) => {
       if (!this.plan) return;
@@ -367,13 +402,21 @@ export class ProjectWorkspace {
       this.opts.onNativeChange?.({});
     });
     this.bindGantt();
+    this.loadColumns();
+    this.renderTableHead();
+    this.applyColumnLayout();
     this.el("mapper")?.addEventListener("click", this.onMapperClick);
     this.el("mapper")?.addEventListener("change", this.onMapperChange);
     document.addEventListener("pointerdown", (e) => {
-      const menu = this.el("more-menu");
-      const wrap = this.root.querySelector(".pw-overflow");
-      if (!menu || menu.hidden) return;
-      if (wrap && !wrap.contains(e.target as Node)) menu.hidden = true;
+      const t = e.target as Node;
+      const more = this.el("more-menu");
+      const overflow = this.root.querySelector(".pw-overflow");
+      if (more && !more.hidden && overflow && !overflow.contains(t)) more.hidden = true;
+      const ctx = this.el("ctx");
+      if (ctx && !ctx.hidden && !ctx.contains(t)) ctx.hidden = true;
+      const cols = this.el("col-menu");
+      const colBtn = this.root.querySelector("[data-act='columns']");
+      if (cols && !cols.hidden && !cols.contains(t) && colBtn && !colBtn.contains(t as Node)) cols.hidden = true;
     });
   }
 
@@ -477,6 +520,9 @@ export class ProjectWorkspace {
     this.bindTaskDrop(table, chart);
 
     this.bindTableSplit();
+    this.bindColumnResize();
+    this.bindGanttMenus(table, chart);
+    this.bindChartZoom(chart);
 
     table?.addEventListener("click", (e) => {
       const target = e.target as HTMLElement;
@@ -529,6 +575,16 @@ export class ProjectWorkspace {
         if (d) applyEnd(task, d);
         this.commitDateEdit(task);
         return;
+      }
+      if (field === "cost") {
+        const parsed = parseMoney(input.value);
+        if (parsed == null) {
+          this.toast("Valor inválido.");
+          input.value = formatCostInput(task.cost);
+          return;
+        }
+        task.cost = parsed === 0 ? undefined : parsed;
+        patch.cost = parsed;
       }
       this.syncPlanRange();
       this.renderBoard();
@@ -628,7 +684,10 @@ export class ProjectWorkspace {
   }
 
   private deleteSelected(): void {
-    if (!this.plan || !this.selectedIds.size) return;
+    if (!this.plan || !this.selectedIds.size) {
+      this.toast("Selecione uma tarefa para excluir.");
+      return;
+    }
     const roots = selectionRootIndices(this.plan.tasks, this.selectedIds)
       .map((i) => this.plan!.tasks[i])
       .filter((t) => t.linkedIfcTaskId != null);
@@ -637,8 +696,8 @@ export class ProjectWorkspace {
     const extra = roots.length > 3 ? ` e mais ${roots.length - 3}` : "";
     const label =
       roots.length === 1
-        ? `Apagar «${roots[0]!.name}» e subtarefas do IFC (IfcTask)?`
-        : `Apagar ${roots.length} tarefas (${names}${extra}) e subtarefas do IFC?`;
+        ? `Excluir «${roots[0]!.name}» e subtarefas do IFC (IfcTask)?`
+        : `Excluir ${roots.length} tarefas (${names}${extra}) e subtarefas do IFC?`;
     if (!window.confirm(label)) return;
     try {
       for (const task of roots) {
@@ -761,10 +820,24 @@ export class ProjectWorkspace {
   }
 
   private nudgeZoom(dir: number): void {
-    const i = ZOOM.indexOf(this.pxPerDay);
-    const next = ZOOM[Math.max(0, Math.min(ZOOM.length - 1, (i < 0 ? 1 : i) + dir))];
-    this.pxPerDay = next;
+    this.setPxPerDay(this.pxPerDay * (dir > 0 ? 1.25 : 0.8));
+  }
+
+  private setPxPerDay(next: number, anchor?: { clientX: number }): void {
+    const clamped = Math.round(Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, next)) * 10) / 10;
+    if (Math.abs(clamped - this.pxPerDay) < 0.05) return;
+    const chart = this.el("chart-body");
+    let dayAtCursor = 0;
+    if (anchor && chart) {
+      const rect = chart.getBoundingClientRect();
+      dayAtCursor = (anchor.clientX - rect.left + chart.scrollLeft) / this.pxPerDay;
+    }
+    this.pxPerDay = clamped;
     this.renderBoard();
+    if (anchor && chart) {
+      const rect = chart.getBoundingClientRect();
+      chart.scrollLeft = dayAtCursor * this.pxPerDay - (anchor.clientX - rect.left);
+    }
   }
 
   private render(): void {
@@ -894,6 +967,23 @@ export class ProjectWorkspace {
     this.paintHits();
   }
 
+  private recomputeCostRoll(): void {
+    this.costRoll.clear();
+    const tasks = this.plan?.tasks;
+    if (!tasks?.length) return;
+    for (let i = tasks.length - 1; i >= 0; i--) {
+      const task = tasks[i]!;
+      let n = task.cost ?? 0;
+      const level = task.outlineLevel;
+      for (let j = i + 1; j < tasks.length; j++) {
+        const child = tasks[j]!;
+        if (child.outlineLevel <= level) break;
+        if (child.outlineLevel === level + 1) n += this.costRoll.get(child.id) ?? child.cost ?? 0;
+      }
+      this.costRoll.set(task.id, n);
+    }
+  }
+
   private paintTableWindow(host: HTMLElement, slice: PlanTask[], start: number, height: number): void {
     let spacer = host.querySelector<HTMLElement>(".pw-table-spacer");
     let windowEl = host.querySelector<HTMLElement>(".pw-table-window");
@@ -905,6 +995,7 @@ export class ProjectWorkspace {
     if (!spacer || !windowEl) return;
     if (spacer.style.height !== `${height}px`) spacer.style.height = `${height}px`;
     windowEl.style.transform = `translateY(${start * ROW_H}px)`;
+    this.recomputeCostRoll();
     windowEl.innerHTML = slice.map((t, i) => this.rowHtml(t, start + i)).join("");
   }
 
@@ -940,6 +1031,216 @@ export class ProjectWorkspace {
       handle.addEventListener("pointerup", onUp);
     });
     handle.addEventListener("dblclick", () => apply(640));
+  }
+
+  private bindColumnResize(): void {
+    const head = this.el("table-head");
+    if (!head) return;
+    head.addEventListener("pointerdown", (ev: PointerEvent) => {
+      if (ev.button !== 0) return;
+      const handle = (ev.target as HTMLElement).closest<HTMLElement>("[data-resize]");
+      if (!handle) return;
+      const id = handle.dataset.resize as ColId | undefined;
+      if (!id) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      const spec = COLUMNS.find((c) => c.id === id);
+      if (!spec) return;
+      const startX = ev.clientX;
+      const startW = this.colWidths[id];
+      handle.setPointerCapture(ev.pointerId);
+      const onMove = (e: PointerEvent) => {
+        this.colWidths[id] = Math.max(spec.min, Math.round(startW + (e.clientX - startX)));
+        this.applyColumnLayout();
+      };
+      const onUp = () => {
+        handle.removeEventListener("pointermove", onMove);
+        handle.removeEventListener("pointerup", onUp);
+        this.saveColumns();
+      };
+      handle.addEventListener("pointermove", onMove);
+      handle.addEventListener("pointerup", onUp);
+    });
+    head.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      this.openColMenu(e.clientX, e.clientY);
+    });
+  }
+
+  private bindGanttMenus(table: HTMLElement | null, chart: HTMLElement | null): void {
+    const onCtx = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (target.closest("input, textarea, select")) return;
+      const row = target.closest<HTMLElement>("[data-id]");
+      if (!row?.dataset.id || !this.plan) return;
+      e.preventDefault();
+      const id = row.dataset.id;
+      if (!this.selectedIds.has(id)) this.setSelected(id, true, "replace");
+      this.openCtx(e.clientX, e.clientY);
+    };
+    table?.addEventListener("contextmenu", onCtx);
+    chart?.addEventListener("contextmenu", onCtx);
+  }
+
+  private bindChartZoom(chart: HTMLElement | null): void {
+    const scale = this.el("scale");
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const factor = e.deltaY > 0 ? 0.85 : 1.18;
+      this.setPxPerDay(this.pxPerDay * factor, { clientX: e.clientX });
+    };
+    chart?.addEventListener("wheel", onWheel, { passive: false });
+    scale?.addEventListener("wheel", onWheel, { passive: false });
+  }
+
+  private loadColumns(): void {
+    try {
+      const raw = localStorage.getItem(LS_COLS);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { visible?: Partial<Record<ColId, boolean>>; widths?: Partial<Record<ColId, number>> };
+      for (const col of COLUMNS) {
+        if (col.required) {
+          this.colVisible[col.id] = true;
+        } else if (typeof parsed.visible?.[col.id] === "boolean") {
+          this.colVisible[col.id] = parsed.visible[col.id]!;
+        }
+        if (typeof parsed.widths?.[col.id] === "number") {
+          this.colWidths[col.id] = Math.max(col.min, parsed.widths[col.id]!);
+        }
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private saveColumns(): void {
+    try {
+      localStorage.setItem(LS_COLS, JSON.stringify({ visible: this.colVisible, widths: this.colWidths }));
+    } catch {
+      /* ignore */
+    }
+  }
+
+  private renderTableHead(): void {
+    const head = this.el("table-head");
+    if (!head) return;
+    head.innerHTML = COLUMNS.map(
+      (col) =>
+        `<span class="pw-col-${col.id === "start" || col.id === "end" ? "date" : col.id}" data-col="${col.id}">${escapeHtml(col.label)}<span class="pw-col-resizer" data-resize="${col.id}"></span></span>`,
+    ).join("");
+  }
+
+  private applyColumnLayout(): void {
+    const table = this.el("table");
+    if (!table) return;
+    const parts: string[] = [];
+    for (const col of COLUMNS) {
+      const on = col.required || this.colVisible[col.id];
+      table.classList.toggle(`hide-${col.id}`, !on);
+      if (!on) continue;
+      parts.push(col.id === "name" ? `minmax(${this.colWidths.name}px, 1fr)` : `${this.colWidths[col.id]}px`);
+    }
+    table.style.setProperty("--pw-cols", parts.join(" "));
+  }
+
+  private setColumnVisible(id: ColId, visible: boolean): void {
+    const spec = COLUMNS.find((c) => c.id === id);
+    if (!spec || spec.required) return;
+    this.colVisible[id] = visible;
+    this.applyColumnLayout();
+    this.saveColumns();
+  }
+
+  private toggleColMenu(anchor: HTMLElement | null): void {
+    const menu = this.el("col-menu");
+    if (!menu) return;
+    if (!menu.hidden) {
+      menu.hidden = true;
+      return;
+    }
+    this.renderColMenu();
+    const rect = (anchor ?? this.root).getBoundingClientRect();
+    this.placeMenu(menu, rect.left, rect.bottom + 4);
+  }
+
+  private openColMenu(x: number, y: number): void {
+    const menu = this.el("col-menu");
+    if (!menu) return;
+    this.renderColMenu();
+    this.placeMenu(menu, x, y);
+  }
+
+  private renderColMenu(): void {
+    const menu = this.el("col-menu");
+    if (!menu) return;
+    menu.innerHTML = COLUMNS.map((col) => {
+      const on = col.required || this.colVisible[col.id];
+      return `<label class="pw-menu-check${col.required ? " is-locked" : ""}"><input type="checkbox" data-col="${col.id}" ${on ? "checked" : ""} ${col.required ? "disabled" : ""} />${escapeHtml(col.label)}</label>`;
+    }).join("");
+  }
+
+  private openCtx(x: number, y: number): void {
+    const menu = this.el("ctx");
+    if (!menu || !this.plan) return;
+    const n = this.selectedIds.size;
+    menu.innerHTML = `
+      <button type="button" data-act="add">Nova tarefa</button>
+      <button type="button" data-act="delete" class="is-danger">Excluir${n > 1 ? ` (${n})` : ""}</button>
+      <hr />
+      <button type="button" data-act="outdent">Subir nível</button>
+      <button type="button" data-act="indent">Rebaixar nível</button>
+      <hr />
+      <button type="button" data-act="link">Ligar (FS)</button>
+      <button type="button" data-act="unlink">Desligar</button>
+      <hr />
+      <button type="button" data-act="collapse">Recolher</button>
+      <button type="button" data-act="expand">Expandir</button>
+    `;
+    this.placeMenu(menu, x, y);
+  }
+
+  private placeMenu(menu: HTMLElement, x: number, y: number): void {
+    for (const id of ["ctx", "col-menu", "more-menu"]) {
+      const el = this.el(id);
+      if (el && el !== menu) el.hidden = true;
+    }
+    menu.hidden = false;
+    menu.style.left = `${x}px`;
+    menu.style.top = `${y}px`;
+    const w = menu.offsetWidth;
+    const h = menu.offsetHeight;
+    menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - w - 8))}px`;
+    menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - h - 8))}px`;
+  }
+
+  private closeMenus(): void {
+    const ctx = this.el("ctx");
+    const cols = this.el("col-menu");
+    const more = this.el("more-menu");
+    if (ctx) ctx.hidden = true;
+    if (cols) cols.hidden = true;
+    if (more) more.hidden = true;
+  }
+
+  private runPlanAct(act: string): void {
+    if (act === "add") this.addTask();
+    else if (act === "delete") this.deleteSelected();
+    else if (act === "indent") this.changeOutline(1);
+    else if (act === "outdent") this.changeOutline(-1);
+    else if (act === "link") this.linkSelected();
+    else if (act === "unlink") this.unlinkSelected();
+    else if (act === "collapse") this.setSummariesCollapsed(true);
+    else if (act === "expand") this.setSummariesCollapsed(false);
+  }
+
+  private setSummariesCollapsed(collapsed: boolean): void {
+    if (!this.plan) return;
+    const selected = this.getSelectedTasks().filter((t) => t.isSummary);
+    const list = selected.length ? selected : this.plan.tasks.filter((t) => t.isSummary);
+    if (!list.length) return;
+    for (const task of list) task.collapsed = collapsed;
+    this.renderBoard();
   }
 
   private bindBarDrag(chart: HTMLElement | null): void {
@@ -1169,23 +1470,35 @@ export class ProjectWorkspace {
       : `<span class="pw-toggle-ph"></span>`;
     const prod = task.linkedProductGuids.length;
     const sets = task.linkedGroupNames ?? [];
+    const roll = this.costRoll.get(task.id) ?? task.cost ?? 0;
+    const own = task.cost ?? 0;
+    const currency = this.opts.getIfcSchedule()?.currency ?? "BRL";
+    const costTitle = task.isSummary
+      ? `Próprio ${formatMoney(own, currency)} · total da WBS ${formatMoney(roll, currency)}`
+      : "Custo 5D desta tarefa (os mesmos elementos 3D / conjuntos)";
+    const costCell = `<input data-field="cost" inputmode="decimal" value="${escapeAttr(formatCostInput(task.cost))}" aria-label="Custo" />${
+      task.isSummary && roll > own
+        ? `<small class="pw-cost-roll">${escapeHtml(formatMoney(roll, currency))}</small>`
+        : ""
+    }`;
     return `
       <div class="pw-row${selected}${hit}${task.isSummary ? " is-summary" : ""}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="height:${ROW_H}px">
-        <span class="pw-col-wbs" title="${escapeAttr(task.wbs || "")}"><input data-field="wbs" value="${escapeAttr(task.wbs || "")}" spellcheck="false" aria-label="WBS / Identification" /></span>
-        <span class="pw-col-name" style="padding-left:${pad}px">${toggle}
+        <span class="pw-col-wbs" data-col="wbs" title="${escapeAttr(task.wbs || "")}"><input data-field="wbs" value="${escapeAttr(task.wbs || "")}" spellcheck="false" aria-label="WBS / Identification" /></span>
+        <span class="pw-col-name" data-col="name" style="padding-left:${pad}px">${toggle}
           <span class="pw-ifc-dot" title="IfcTask nativa"></span>
           <input data-field="name" value="${escapeAttr(task.name)}" spellcheck="false" title="${escapeAttr(task.name)}" />
         </span>
-        <span class="pw-col-prod">${prod ? `<span class="pw-prod" title="${prod} elementos 3D">${prod}</span>` : ""}</span>
-        <span class="pw-col-set">${
+        <span class="pw-col-prod" data-col="prod">${prod ? `<span class="pw-prod" title="${prod} elementos 3D">${prod}</span>` : ""}</span>
+        <span class="pw-col-set" data-col="set">${
           sets.length
             ? `<span class="pw-set" title="Conjuntos IFC: ${escapeAttr(sets.join(", "))}">${escapeHtml(sets.join(", "))}</span>`
             : ""
         }</span>
-        <span class="pw-col-dur"><input data-field="dur" type="number" min="0" step="0.5" value="${task.durationDays ?? ""}" aria-label="Duração em dias" /></span>
-        <span class="pw-col-pred"><input data-field="pred" value="${escapeAttr(this.plan ? formatPredecessors(task, this.plan.tasks) : "")}" spellcheck="false" aria-label="Predecessores" title="Ex. 3FS+2d" /></span>
-        <span class="pw-col-date"><input data-field="start" type="date" value="${task.start ? toInputDate(task.start) : ""}" aria-label="Início" /></span>
-        <span class="pw-col-date"><input data-field="end" type="date" value="${task.end ? toInputDate(task.end) : ""}" aria-label="Término" /></span>
+        <span class="pw-col-dur" data-col="dur"><input data-field="dur" type="number" min="0" step="0.5" value="${task.durationDays ?? ""}" aria-label="Duração em dias" /></span>
+        <span class="pw-col-pred" data-col="pred"><input data-field="pred" value="${escapeAttr(this.plan ? formatPredecessors(task, this.plan.tasks) : "")}" spellcheck="false" aria-label="Predecessores" title="Ex. 3FS+2d" /></span>
+        <span class="pw-col-date" data-col="start"><input data-field="start" type="date" value="${task.start ? toInputDate(task.start) : ""}" aria-label="Início" /></span>
+        <span class="pw-col-date" data-col="end"><input data-field="end" type="date" value="${task.end ? toInputDate(task.end) : ""}" aria-label="Término" /></span>
+        <span class="pw-col-cost" data-col="cost" title="${escapeAttr(costTitle)}">${costCell}</span>
       </div>`;
   }
 
@@ -1394,6 +1707,11 @@ export class ProjectWorkspace {
 
   private onGanttKey(e: KeyboardEvent): void {
     const inField = (e.target as HTMLElement).matches("input, textarea, select");
+    if (e.key === "Escape") {
+      this.closeMenus();
+      this.closeLinkEditor();
+      return;
+    }
     if (e.key === "Enter" && inField) {
       (e.target as HTMLInputElement).blur();
       return;
@@ -1975,6 +2293,11 @@ function barState(task: PlanTask): string {
   if (today < task.start) return "pending";
   if (today > task.end) return "done";
   return "active";
+}
+
+function formatCostInput(amount?: number): string {
+  if (amount == null || amount === 0) return "";
+  return amount.toLocaleString("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
 function escapeHtml(s: string): string {

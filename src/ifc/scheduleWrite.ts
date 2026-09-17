@@ -22,6 +22,8 @@ export interface NewTaskInput {
   isMilestone?: boolean;
   parentId?: number;
   afterId?: number;
+  /** Reutiliza o GlobalId (cópia para a COORD ou stub na disciplina). */
+  globalId?: string;
 }
 
 export interface OutlineRowInput {
@@ -31,6 +33,7 @@ export interface OutlineRowInput {
   end?: Date;
   outlineLevel: number;
   isMilestone?: boolean;
+  cost?: number;
   predecessorIndexes?: Array<{ index: number; type: SequenceType; lagDays?: number }>;
 }
 
@@ -169,6 +172,49 @@ export function serializeNewWorkSchedule(
     ".PLANNED.",
   ];
   return serializeEntity(expressId, "IFCWORKSCHEDULE", args);
+}
+
+export function serializeNewCostSchedule(
+  expressId: number,
+  name: string,
+  when: Date,
+  schema: IfcSchemaKind = "IFC4",
+  ownerHistory = "$",
+  dateTimeRef?: number,
+): string {
+  if (schema === "IFC2X3") {
+    const stamp = dateTimeRef != null ? `#${dateTimeRef}` : "$";
+    const args = [
+      ifcString(createIfcGuid()),
+      ownerHistory,
+      ifcOptionalString(name),
+      "$",
+      "$",
+      "$",
+      "$",
+      stamp,
+      "$",
+      "$",
+      stamp,
+      ifcString("BUDGET"),
+      ".BUDGET.",
+    ];
+    return serializeEntity(expressId, "IFCCOSTSCHEDULE", args);
+  }
+  const stamp = ifcString(formatIfcDateTime(when));
+  const args = [
+    ifcString(createIfcGuid()),
+    ownerHistory,
+    ifcOptionalString(name),
+    "$",
+    "$",
+    "$",
+    ".BUDGET.",
+    "$",
+    stamp,
+    "$",
+  ];
+  return serializeEntity(expressId, "IFCCOSTSCHEDULE", args);
 }
 
 export function serializeIfcCalendarDate(expressId: number, d: Date): string {

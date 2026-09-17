@@ -22,6 +22,8 @@ export interface PlanTask {
   collapsed: boolean;
   predecessors: PlanPredecessor[];
   notes?: string;
+  /** Custo próprio 5D (IfcCostValue desta IfcTask), sem subtarefas. */
+  cost?: number;
   /** ExpressID de IfcTask, quando a tarefa já está ligada ao modelo. */
   linkedIfcTaskId?: number;
   linkedProductGuids: string[];

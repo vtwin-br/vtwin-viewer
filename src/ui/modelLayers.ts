@@ -4,6 +4,7 @@ import { DND_LAYER, clearDrops, getDragJson, hasType, markDrop, setDragJson } fr
 export interface ModelLayersOptions {
   onToggle: (id: string, visible: boolean) => void;
   onSelect: (id: string) => void;
+  onReplace: (id: string) => void;
   onRemove: (id: string) => void;
   onAdd: () => void;
   onReorder?: (id: string, beforeId: string | null) => void;
@@ -37,17 +38,20 @@ export class ModelLayersUI {
       .map((m) => {
         const on = m.visible;
         const active = m.id === activeId;
-        return `<article class="ml-row${on ? "" : " is-off"}${active ? " is-active" : ""}" data-id="${escapeAttr(m.id)}" draggable="true">
+        const root = m.role === "coordination";
+        return `<article class="ml-row${on ? "" : " is-off"}${active ? " is-active" : ""}${root ? " is-root" : ""}" data-id="${escapeAttr(m.id)}" draggable="true">
           <span class="ml-grip" title="Reordenar" aria-hidden="true"></span>
-          <button type="button" class="ml-eye" data-act="toggle" title="${on ? "Ocultar no viewer" : "Mostrar no viewer"}" aria-pressed="${on ? "true" : "false"}" aria-label="${on ? "Ocultar" : "Mostrar"} ${escapeAttr(m.displayName)}">
+          <button type="button" class="ml-eye" data-act="toggle" title="${root ? "Raiz (sem malha 3D)" : on ? "Ocultar no viewer" : "Mostrar no viewer"}" aria-pressed="${on ? "true" : "false"}" aria-label="${on ? "Ocultar" : "Mostrar"} ${escapeAttr(m.displayName)}">
             <span class="ml-swatch" style="background:${escapeAttr(m.color)}"></span>
             ${on ? ICON_EYE : ICON_EYE_OFF}
           </button>
-          <button type="button" class="ml-name" data-act="select" title="${active ? "Modelo ativo" : "Definir como ativo"}">
+          <button type="button" class="ml-name" data-act="select" title="${root ? "IFC de coordenação" : active ? "Modelo ativo" : "Definir como ativo"}">
             <strong>${escapeHtml(m.displayName)}</strong>
-            ${active ? `<span class="ml-tag">Ativo</span>` : ""}
+            ${root ? `<span class="ml-tag">Raiz</span>` : ""}
+            ${active && !root ? `<span class="ml-tag">Ativo</span>` : ""}
             ${m.session.dirty ? `<em class="ml-dirty">•</em>` : ""}
           </button>
+          ${root ? "" : `<button type="button" class="ml-replace" data-act="replace" title="Substituir IFC (revisão)" aria-label="Substituir ${escapeAttr(m.displayName)}">${ICON_REPLACE}</button>`}
           <button type="button" class="ml-remove" data-act="remove" title="Remover" aria-label="Remover ${escapeAttr(m.displayName)}">${ICON_CLOSE}</button>
         </article>`;
       })
@@ -74,8 +78,10 @@ export class ModelLayersUI {
     if (act === "toggle") {
       const on = btn.getAttribute("aria-pressed") !== "true";
       this.opts.onToggle(id, on);
-    } else if (act === "select") {
+    } else     if (act === "select") {
       this.opts.onSelect(id);
+    } else if (act === "replace") {
+      this.opts.onReplace(id);
     } else if (act === "remove") {
       this.opts.onRemove(id);
     }
@@ -123,6 +129,7 @@ function escapeAttr(s: string): string {
 }
 
 const ICON_CLOSE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke-linecap="round"/></svg>`;
+const ICON_REPLACE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M4 7h11M15 7l-3-3M15 7l-3 3" stroke-linecap="round" stroke-linejoin="round"/><path d="M20 17H9M9 17l3-3M9 17l3 3" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_PLUS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>`;
 const ICON_EYE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>`;
 const ICON_EYE_OFF = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M3 3l18 18M10.5 6.2A9 9 0 0121 12s-2 3.5-5.2 5.5M6.2 8.5C4.2 9.9 3 12 3 12s4 7 10 7a10 10 0 003.3-.5"/><path d="M9.9 9.9a3 3 0 104.2 4.2"/></svg>`;
