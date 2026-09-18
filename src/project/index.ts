@@ -2,6 +2,7 @@ export {
   VTWIN_EXTENSION,
   VTWIN_FORMAT,
   VTWIN_MANIFEST_VERSION,
+  isCoordinationEntry,
   isVtwinFileName,
   parseVtwinManifest,
   type VtwinManifest,

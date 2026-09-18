@@ -60,6 +60,7 @@ interface HighlightLayer {
   currentSelection: Set<number>;
   /** Itens translúcidos pelo isolamento (não 4D). */
   currentGhost: Set<number>;
+  readyTask?: Promise<void>;
 }
 
 export type GuidHit = ViewportElementRef;
@@ -72,12 +73,11 @@ export interface ModelSelection {
 
 /**
  * Visibilidade 4D em um ou mais FragmentsModel:
- *   - Pré-play / início parado: produtos do cronograma visíveis; volumes
- *     espaciais sem tarefa (IfcSpace, ambientes) ocultos.
- *   - Play / pause a meio: só produtos COM datas mudam.
+ *   - Pré-play / início parado: modelo completo; só volumes espaciais sem
+ *     tarefa (IfcSpace, ambientes) ficam ocultos.
+ *   - Play / pause a meio: só produtos ligados a uma IfcTask COM datas.
  *     pending oculto, active amarelo, done cor original.
- *     Construção sem data fica visível; IfcSpace / aberturas / anotações
- *     sem tarefa ficam ocultos.
+ *     Sem data ou sem ligação ao cronograma ficam ocultos.
  * Isolamento deixa o resto cinza e quase transparente (seleção opaca).
  */
 export class ScheduleHighlighter {
@@ -157,11 +157,23 @@ export class ScheduleHighlighter {
 
   async ready(modelId?: string): Promise<void> {
     const started = performance.now();
-    let prepared = 0;
     const list = modelId ? [this.layers.get(modelId)].filter((l): l is HighlightLayer => !!l) : [...this.layers.values()];
+    let prepared = 0;
     for (const layer of list) {
       if (layer.readyDone) continue;
-      layer.readyDone = true;
+      layer.readyTask ??= this.prepareLayer(layer);
+      await layer.readyTask;
+      prepared += 1;
+    }
+    if (prepared) {
+      recordMetric("vista:highlighter:ready", performance.now() - started, {
+        models: prepared,
+      });
+    }
+  }
+
+  private async prepareLayer(layer: HighlightLayer): Promise<void> {
+    try {
       if (layer.allGuids.length > 0) {
         const localIds = await layer.model.getLocalIdsByGuids(layer.allGuids);
         for (let i = 0; i < layer.allGuids.length; i++) {
@@ -175,17 +187,17 @@ export class ScheduleHighlighter {
       }
       layer.allGeomIds = await layer.model.getItemsIdsWithGeometry();
       layer.contextHideIds = await collectContextHideIds(layer.model, layer.allGeomIds);
-      prepared += 1;
-    }
-    if (prepared) {
-      recordMetric("vista:highlighter:ready", performance.now() - started, {
-        models: prepared,
-      });
+      layer.readyDone = true;
+    } catch (err) {
+      layer.readyTask = undefined;
+      throw err;
     }
   }
 
   /**
-   * @param previewAll true no início, sem play — cronograma visível, sem cor de execução.
+   * @param previewAll true no início, sem play — modelo visível, sem cor de execução.
+   *   Com a simulação a correr (ou o cursor fora do dia 0), só entram produtos
+   *   com data: pending oculto, active/done visíveis.
    * @returns false se o estado 4D já estava aplicado (nada a fazer).
    */
   async apply(
@@ -201,21 +213,25 @@ export class ScheduleHighlighter {
     await this.ensureGuidsMapped([...buckets.active, ...buckets.done, ...buckets.pending]);
 
     for (const layer of layers) {
-      if (layer.currentGhost.size > 0) continue;
       await this.clearGhostLayer(layer);
 
-      const scheduled = new Set(
-        this.guidsToLocals(layer, [...buckets.active, ...buckets.done, ...buckets.pending]),
-      );
       const nextActive = opts.previewAll
         ? new Set<number>()
         : new Set(this.guidsToLocals(layer, buckets.active));
       const nextHidden = new Set<number>();
-      for (const id of layer.contextHideIds) {
-        if (!scheduled.has(id)) nextHidden.add(id);
-      }
-      if (!opts.previewAll) {
-        for (const id of this.guidsToLocals(layer, buckets.pending)) nextHidden.add(id);
+      if (opts.previewAll) {
+        const scheduled = new Set(
+          this.guidsToLocals(layer, [...buckets.active, ...buckets.done, ...buckets.pending]),
+        );
+        for (const id of layer.contextHideIds) {
+          if (!scheduled.has(id)) nextHidden.add(id);
+        }
+      } else {
+        const visibleNow = new Set(nextActive);
+        for (const id of this.guidsToLocals(layer, buckets.done)) visibleNow.add(id);
+        for (const id of layer.allGeomIds) {
+          if (!visibleNow.has(id)) nextHidden.add(id);
+        }
       }
 
       const activeToReset = diff(layer.currentActive, nextActive);
@@ -314,6 +330,23 @@ export class ScheduleHighlighter {
     return this.selectionLocalIds();
   }
 
+  /** Destaca localIds do Fragments e devolve os GlobalId resolvidos (para vincular). */
+  async isolateLocalIds(groups: Array<{ modelId: string; localIds: number[] }>): Promise<string[]> {
+    await this.ready();
+    const guids: string[] = [];
+    for (const group of groups) {
+      if (!group.localIds.length) continue;
+      guids.push(...(await this.guidsFromLocalIds([...new Set(group.localIds)], group.modelId)));
+    }
+    const unique = [...new Set(guids)];
+    if (unique.length) {
+      await this.isolateGuids(unique);
+      return unique;
+    }
+    await this.selectByLocalIds(groups, true);
+    return this.getWorkingGuids();
+  }
+
   async clearIsolation(): Promise<void> {
     for (const layer of this.visibleLayers()) await this.clearGhostLayer(layer);
     await requestFragmentsUpdate(this.fragments);
@@ -363,6 +396,38 @@ export class ScheduleHighlighter {
       }
     }
     return [...new Set(out)];
+  }
+
+  private async selectByLocalIds(
+    groups: Array<{ modelId: string; localIds: number[] }>,
+    isolate: boolean,
+  ): Promise<void> {
+    await this.ready();
+    const byModel = new Map(groups.map((g) => [g.modelId, [...new Set(g.localIds)]]));
+    for (const layer of this.visibleLayers()) {
+      if (layer.currentSelection.size > 0) {
+        const prev = [...layer.currentSelection];
+        await layer.model.resetHighlight(prev);
+        const stillActive = prev.filter((id) => layer.currentActive.has(id));
+        if (stillActive.length > 0) await layer.model.highlight(stillActive, activeMaterial());
+        layer.currentSelection.clear();
+      }
+      const wanted = byModel.get(layer.modelId) ?? [];
+      const geom = new Set(layer.allGeomIds);
+      const newSel = geom.size ? wanted.filter((id) => geom.has(id)) : wanted;
+      if (newSel.length > 0) {
+        await layer.model.highlight(newSel, selectionMaterial());
+        layer.currentSelection = new Set(newSel);
+      }
+      if (isolate && newSel.length > 0) {
+        await this.setGhostExcept(layer, newSel);
+        await layer.model.highlight(newSel, selectionMaterial());
+      } else if (layer.currentGhost.size > 0) {
+        await this.clearGhostLayer(layer);
+        if (newSel.length > 0) await layer.model.highlight(newSel, selectionMaterial());
+      }
+    }
+    await requestFragmentsUpdate(this.fragments);
   }
 
   async selectByGuids(guids: Iterable<string>, opts: { isolate?: boolean } = {}): Promise<void> {

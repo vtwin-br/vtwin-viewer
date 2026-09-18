@@ -136,10 +136,14 @@ export class SiteOverlay {
     const world = limit.points.map((p) => applyExtraToThree(p, extra));
     const y = world.reduce((s, p) => s + p.y, 0) / world.length;
     const inner: XzPoint[] = world.map((p) => ({ x: p.x, z: p.z }));
+    const span = Math.max(8, limit.clipAbove);
+    // A malha Google, no frame ENU, vive perto de Y=0. O platô IFC pode estar
+    // dezenas/centenas de metros abaixo (origem interna vs cota de projeto).
+    // O prisma tem de cobrir os dois, senão o recorte não fura as árvores.
     return {
       xz: expandPolygonXZ(inner, siteTaludeWidth(limit)),
-      yMin: y - Math.max(CLIP_GLOBE_DEPTH, limit.clipBelow),
-      yMax: y + Math.max(8, limit.clipAbove),
+      yMin: Math.min(y, 0) - CLIP_GLOBE_DEPTH,
+      yMax: Math.max(y, 0) + span,
     };
   }
 
@@ -168,12 +172,16 @@ export class SiteOverlay {
     const geo = new THREE.ShapeGeometry(shape);
     geo.rotateX(Math.PI / 2);
     this.plateau = new THREE.Mesh(geo, this.plateauMat);
-    this.plateau.position.y = y + 0.04;
+    let plateauY = y;
+    if (this.earthEnabled && plateau) {
+      const draped = this.buildTalude(world, y, width);
+      if (draped != null && Number.isFinite(draped)) plateauY = draped;
+    }
+    this.plateau.position.y = plateauY + 0.04;
     this.plateau.renderOrder = 2;
     this.plateau.visible = plateau;
     this.solids.add(this.plateau);
-    if (this.earthEnabled && plateau) this.buildTalude(world, y, width);
-    const pts = world.map((p) => new THREE.Vector3(p.x, y + 0.08, p.z));
+    const pts = world.map((p) => new THREE.Vector3(p.x, plateauY + 0.08, p.z));
     this.edge = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), this.edgeMat);
     this.edge.renderOrder = 3;
     this.group.add(this.edge);
@@ -183,16 +191,19 @@ export class SiteOverlay {
     world: Array<{ x: number; y: number; z: number }>,
     y: number,
     width: number,
-  ): void {
+  ): number | null {
     const inner: XzPoint[] = world.map((p) => ({ x: p.x, z: p.z }));
     const n = inner.length;
-    if (n < 3 || width < 0.2) return;
+    if (n < 3 || width < 0.2) return null;
     const toe = expandPolygonXZ(inner, width + TOE_OVERLAP);
     const sampleAt = expandPolygonXZ(inner, width + TOE_OVERLAP + 0.4);
     const sampled = sampleAt.map((p) => this.sampleGround?.(p.x, p.z, y) ?? null);
     const valid = sampled.filter((v): v is number => v != null && Number.isFinite(v));
-    const fallback = valid.length ? median(valid) : y;
-    const outerY = sampled.map((hit) => (hit != null && Number.isFinite(hit) ? hit - 0.08 : fallback));
+    const ground = valid.length ? median(valid) : y;
+    // Se a cota IFC não está no mesmo referencial que o Google (ENU ~ Y=0),
+    // o platô assenta no terreno amostrado em vez de ficar a dezenas de metros.
+    const crestY = valid.length && Math.abs(ground - y) > 8 ? ground : y;
+    const outerY = sampled.map((hit) => (hit != null && Number.isFinite(hit) ? hit - 0.08 : ground));
 
     const top = new THREE.Color(PLATEAU);
     const foot = new THREE.Color(TALUDE_FOOT);
@@ -207,7 +218,7 @@ export class SiteOverlay {
           x: p.x,
           z: p.z,
           t: ease,
-          y: y + (outerY[i]! - y) * ease + (r === 0 ? 0.03 : 0),
+          y: crestY + (outerY[i]! - crestY) * ease + (r === 0 ? 0.03 : 0),
         })),
       );
     }
@@ -248,6 +259,7 @@ export class SiteOverlay {
     this.talude = new THREE.Mesh(geo, this.taludeMat);
     this.talude.renderOrder = 1;
     this.solids.add(this.talude);
+    return crestY;
   }
 
   private setDraft(world: THREE.Vector3[]): void {

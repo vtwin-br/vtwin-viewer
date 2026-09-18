@@ -83,7 +83,7 @@ export async function packVtwin(name: string, models: VtwinPackModel[]): Promise
 }
 
 export async function unpackVtwin(bytes: Uint8Array): Promise<UnpackedVtwin> {
-  const files = await unzipAsync(bytes);
+  const files = normalizeZipKeys(await unzipAsync(bytes));
   const manifestFile = files["manifest.json"];
   if (!manifestFile) throw new Error("Falta manifest.json no projeto.");
   const manifest = parseVtwinManifest(JSON.parse(strFromU8(manifestFile)));
@@ -119,6 +119,14 @@ export async function unpackVtwin(bytes: Uint8Array): Promise<UnpackedVtwin> {
     });
   }
   return { manifest, models };
+}
+
+function normalizeZipKeys(files: Record<string, Uint8Array>): Record<string, Uint8Array> {
+  const out: Record<string, Uint8Array> = {};
+  for (const [key, value] of Object.entries(files)) {
+    out[key.replace(/\\/g, "/")] = value;
+  }
+  return out;
 }
 
 function zipAsync(files: Record<string, Uint8Array>): Promise<Uint8Array> {

@@ -32,6 +32,21 @@ export function isVtwinFileName(name: string): boolean {
   return /\.vtwin$/i.test(name);
 }
 
+export function coordinationFileStem(fileName: string): string {
+  return fileName.replace(/\.ifc$/i, "").trim();
+}
+
+/** COORD.ifc / raiz do manifesto — dono do cronograma 4D/5D. */
+export function isCoordinationEntry(
+  entry: Pick<VtwinModelEntry, "id" | "fileName" | "role">,
+  rootId?: string | null,
+): boolean {
+  if (entry.role === "coordination") return true;
+  if (rootId && entry.id === rootId) return true;
+  const stem = coordinationFileStem(entry.fileName);
+  return /^coord$/i.test(stem) || /-coordenacao$/i.test(stem);
+}
+
 export function modelZipDir(id: string): string {
   const safe = id.replace(/[^A-Za-z0-9._-]/g, "_");
   return safe || "model";
@@ -48,6 +63,7 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
   if (!Array.isArray(j.models) || j.models.length === 0) {
     throw new Error("O projeto não contém modelos.");
   }
+  const rootId = typeof j.rootId === "string" && j.rootId ? j.rootId : null;
   const models: VtwinModelEntry[] = j.models.map((m, i) => {
     if (!m || typeof m !== "object") throw new Error(`Modelo #${i + 1} inválido no manifesto.`);
     if (typeof m.id !== "string" || !m.id) throw new Error(`Modelo #${i + 1} sem id.`);
@@ -60,7 +76,12 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     return {
       id: m.id,
       fileName: m.fileName,
-      role: m.role === "coordination" ? "coordination" : "discipline",
+      role: isCoordinationEntry(
+        { id: m.id, fileName: m.fileName, role: m.role === "coordination" ? "coordination" : "discipline" },
+        rootId,
+      )
+        ? "coordination"
+        : "discipline",
       schema: m.schema,
       hash: m.hash,
       visible: m.visible !== false,
@@ -72,7 +93,7 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     version: VTWIN_MANIFEST_VERSION,
     name: j.name.trim(),
     createdAt: typeof j.createdAt === "string" ? j.createdAt : new Date().toISOString(),
-    rootId: typeof j.rootId === "string" && j.rootId ? j.rootId : null,
+    rootId,
     models,
   };
 }

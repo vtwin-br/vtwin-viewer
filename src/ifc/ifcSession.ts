@@ -154,6 +154,8 @@ export class IfcSession {
   private readonly createdCostRels = new Map<number, { assignRelId: number; scheduleRelId?: number }>();
   /** key = `${taskId}:${productId}` */
   private readonly createdProductRels = new Map<string, { relId: number; taskId: number; productId: number }>();
+  /** ExpressID → GlobalId de IfcBuildingElementProxy criado só para ligar GUIDs federados. */
+  private readonly createdProductStubs = new Map<number, string>();
   private readonly removedExistingAssignRels = new Map<number, { taskId: number; productId: number }>();
   /** Desassociações descobertas no export; evita carregar STEP durante a edição. */
   private readonly removedProductLinks = new Map<string, { taskId: number; productId: number }>();
@@ -256,6 +258,17 @@ export class IfcSession {
   dropText(): void {
     if (!this.storeHash) return;
     this.stepText = null;
+  }
+
+  /**
+   * Se o cronograma está só em memória (JSON / CSV) e o STEP ainda não tem IfcTask,
+   * volta a marcar tudo para o próximo export.
+   */
+  markPlanningForExport(): void {
+    if (!this.schedule.roots.length) return;
+    if (this.createdTaskIds.size > 0) return;
+    if ((this.index.typeIds.get("IFCTASK")?.length ?? 0) > 0) return;
+    this.adoptPlanningFrom(this.schedule, { keepExternalProducts: true });
   }
 
   get georef(): IfcGeoref | undefined {
@@ -376,11 +389,13 @@ export class IfcSession {
   setGeoAnchor(geo: GeoAnchorWrite, markDirty = true): void {
     this.geoWrite = { ...geo };
     this.geoChanged = true;
-    if (this.schedule.georef) {
-      this.schedule.georef.lat = geo.lat;
-      this.schedule.georef.lon = geo.lon;
-      this.schedule.georef.elevation = geo.elevation;
+    if (!this.schedule.georef) {
+      this.schedule.georef = { source: "ifc-site", heading: 0 };
     }
+    this.schedule.georef.lat = geo.lat;
+    this.schedule.georef.lon = geo.lon;
+    this.schedule.georef.elevation = geo.elevation;
+    if (this.schedule.georef.source === "none") this.schedule.georef.source = "ifc-site";
     if (markDirty) {
       this.changeSet.append({ kind: "georef:anchor", value: geo });
       this.dirty = true;
@@ -1055,17 +1070,13 @@ export class IfcSession {
       }
       for (let i = 0; i < task.productGuids.length; i++) {
         const guid = task.productGuids[i]!;
-        const localPid = this.lookupLocalProductId(guid);
-        if (localPid != null) {
-          task.productIds[i] = localPid;
-          this.createdProductRels.set(`${task.id}:${localPid}`, {
-            relId: this.allocId(),
-            taskId: task.id,
-            productId: localPid,
-          });
-        } else {
-          task.productIds[i] = 0;
-        }
+        const localPid = this.lookupLocalProductId(guid) ?? this.ensureFederatedProductStub(guid);
+        task.productIds[i] = localPid;
+        this.createdProductRels.set(`${task.id}:${localPid}`, {
+          relId: this.allocId(),
+          taskId: task.id,
+          productId: localPid,
+        });
       }
       for (const child of task.children) visit(child);
     };
@@ -1207,6 +1218,36 @@ export class IfcSession {
     this.dirty = true;
     return {
       added: !already,
+      guids: this.schedule.productGuidsByTask.get(taskId) ?? [...task.productGuids],
+    };
+  }
+
+  /** Acrescenta produtos à IfcTask sem desligar os já associados (assistente 4D). */
+  addProductsToTask(
+    taskId: number,
+    items: Array<{ guid: string; expressIdHint?: number }>,
+  ): { added: number; guids: string[] } {
+    const task = this.schedule.byId.get(taskId);
+    if (!task) throw new Error(`Tarefa #${taskId} não encontrada.`);
+    let added = 0;
+    for (const item of items) {
+      if (!item.guid || task.productGuids.includes(item.guid)) continue;
+      const productId = this.lookupLocalProductId(item.guid, item.expressIdHint) ?? 0;
+      this.addProductLink(task, item.guid, productId);
+      this.changeSet.append({
+        kind: "product:assign",
+        taskId,
+        globalId: item.guid,
+        assigned: true,
+      });
+      added += 1;
+    }
+    if (added) {
+      recomputeProductGuidsByTask(this.schedule);
+      this.dirty = true;
+    }
+    return {
+      added,
       guids: this.schedule.productGuidsByTask.get(taskId) ?? [...task.productGuids],
     };
   }
@@ -1416,21 +1457,33 @@ export class IfcSession {
     return productId;
   }
 
+  /** Âncora no STEP da COORD para um GlobalId que só existe noutro IFC. */
+  private ensureFederatedProductStub(guid: string): number {
+    const existing = this.lookupLocalProductId(guid);
+    if (existing != null) return existing;
+    for (const [id, g] of this.createdProductStubs) {
+      if (g === guid) return id;
+    }
+    const id = this.allocId();
+    this.createdProductStubs.set(id, guid);
+    this.index.guidToId.set(guid, id);
+    return id;
+  }
+
   private addProductLink(task: Task, guid: string, productId: number): void {
     if (task.productGuids.includes(guid)) return;
+    const id = productId > 0 ? productId : this.ensureFederatedProductStub(guid);
     task.productGuids.push(guid);
-    if (productId > 0) task.productIds.push(productId);
-    else task.productIds.push(0);
-    if (productId <= 0) return;
-    const key = `${task.id}:${productId}`;
+    task.productIds.push(id);
+    const key = `${task.id}:${id}`;
     const pendingRemove = [...this.removedExistingAssignRels.entries()].find(
-      ([, v]) => v.taskId === task.id && v.productId === productId,
+      ([, v]) => v.taskId === task.id && v.productId === id,
     );
     const pendingLazyRemove = this.removedProductLinks.get(key);
     if (pendingRemove) this.removedExistingAssignRels.delete(pendingRemove[0]);
     else if (pendingLazyRemove) this.removedProductLinks.delete(key);
     else if (!this.createdProductRels.has(key)) {
-      this.createdProductRels.set(key, { relId: this.allocId(), taskId: task.id, productId });
+      this.createdProductRels.set(key, { relId: this.allocId(), taskId: task.id, productId: id });
     }
   }
 
@@ -1563,6 +1616,7 @@ export class IfcSession {
         propertyValueEdited: [...this.propertyValueEdited],
         createdCostRels: [...this.createdCostRels],
         createdProductRels: [...this.createdProductRels],
+        createdProductStubs: [...this.createdProductStubs],
         removedExistingAssignRels: [...this.removedExistingAssignRels],
         removedProductLinks: [...this.removedProductLinks],
         createdGroupAssignRel: [...this.createdGroupAssignRel],
@@ -1637,6 +1691,10 @@ export class IfcSession {
     restoreMap(this.elementNameEdited, snapshot.maps.elementNameEdited);
     restoreMap(this.propertyValueEdited, snapshot.maps.propertyValueEdited);
     restoreMap(this.createdProductRels, snapshot.maps.createdProductRels);
+    restoreMap(this.createdProductStubs, snapshot.maps.createdProductStubs);
+    for (const [id, guid] of this.createdProductStubs) {
+      if (guid) this.index.guidToId.set(guid, id);
+    }
     restoreMap(this.removedExistingAssignRels, snapshot.maps.removedExistingAssignRels);
     restoreMap(this.removedProductLinks, snapshot.maps.removedProductLinks);
     restoreMap(this.createdGroupAssignRel, snapshot.maps.createdGroupAssignRel);
@@ -1866,6 +1924,9 @@ export class IfcSession {
       }
     }
 
+    for (const [id, guid] of this.createdProductStubs) {
+      newLines.push(serializeFederatedProductStub(id, guid, oh));
+    }
     for (const { relId, taskId, productId } of this.createdProductRels.values()) {
       if (productId <= 0) continue;
       newLines.push(serializeNewAssignToProduct(relId, taskId, productId));
@@ -2160,7 +2221,7 @@ export class IfcSession {
   private async sourceBytesForExport(): Promise<Uint8Array> {
     if (this.storeHash) {
       const bytes = await loadIfcBytes(this.storeHash);
-      if (bytes) return bytes;
+      if (bytes) return bytes.slice();
     }
     if (this.stepText != null) return latin1ToBytes(this.stepText);
     throw new Error("Não há IFC canônico disponível para exportar.");
@@ -2213,6 +2274,7 @@ export class IfcSession {
     this.elementNameEdited.clear();
     this.propertyValueEdited.clear();
     this.createdProductRels.clear();
+    this.createdProductStubs.clear();
     this.removedExistingAssignRels.clear();
     this.removedProductLinks.clear();
     this.createdGroupAssignRel.clear();
@@ -2462,6 +2524,20 @@ function serializeNewAssignToProduct(expressId: number, taskId: number, productI
     `#${productId}`,
   ];
   return serializeEntity(expressId, "IFCRELASSIGNSTOPRODUCT", args);
+}
+
+function serializeFederatedProductStub(expressId: number, guid: string, ownerHistory: string): string {
+  return serializeEntity(expressId, "IFCBUILDINGELEMENTPROXY", [
+    ifcString(guid),
+    ownerHistory,
+    ifcOptionalString("4D"),
+    ifcOptionalString("Referência federada"),
+    ifcString("VISTA4D_PRODUCT_REF"),
+    "$",
+    "$",
+    "$",
+    "$",
+  ]);
 }
 
 function serializeNewIfcGroup(group: SelectionGroup): string {

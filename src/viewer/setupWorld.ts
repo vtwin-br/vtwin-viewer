@@ -20,6 +20,9 @@ export interface LoadedModel {
  * Aponta o web-ifc para os WASMs em /wasm/ (servidos por Vite a partir de public/).
  */
 export function setWorldGridVisible(world: OBC.World, visible: boolean): void {
+  const components = (world as unknown as { components?: OBC.Components }).components;
+  const grid = components?.get(OBC.Grids).list.get(world.uuid);
+  if (grid) grid.visible = visible;
   world.scene.three.traverse((obj) => {
     if (obj.type === "GridHelper") obj.visible = visible;
   });
@@ -209,8 +212,17 @@ export async function unloadIfc(handles: ViewerHandles, modelId = "main"): Promi
   }
 }
 
+export interface CameraFitOptions {
+  /** Modelos sem malha útil (COORD.ifc) — não entram no enquadramento. */
+  skipModelIds?: Iterable<string>;
+}
+
 /** Recentra a câmara nos modelos visíveis (botão “Enquadrar”). */
-export async function refitViewerCamera(handles: ViewerHandles, modelId?: string): Promise<void> {
+export async function refitViewerCamera(
+  handles: ViewerHandles,
+  modelId?: string,
+  opts?: CameraFitOptions,
+): Promise<void> {
   if (modelId) {
     const model = handles.fragments.list.get(modelId);
     if (!model || model.object.visible === false) return;
@@ -218,21 +230,23 @@ export async function refitViewerCamera(handles: ViewerHandles, modelId?: string
     await requestFragmentsUpdate(handles.fragments, true);
     return;
   }
-  await fitCameraToVisibleModels(handles);
+  await fitCameraToVisibleModels(handles, opts);
 }
 
-export async function fitCameraToVisibleModels(handles: ViewerHandles): Promise<void> {
-  const box = new THREE.Box3();
-  let any = false;
-  for (const [, model] of handles.fragments.list) {
-    if (model.object.visible === false) continue;
-    const b = new THREE.Box3().setFromObject(model.object);
-    if (b.isEmpty()) continue;
-    box.union(b);
-    any = true;
+export async function fitCameraToVisibleModels(
+  handles: ViewerHandles,
+  opts?: CameraFitOptions,
+): Promise<void> {
+  const skip = new Set(opts?.skipModelIds ?? []);
+  const boxes: THREE.Box3[] = [];
+  for (const [id, model] of handles.fragments.list) {
+    if (skip.has(id) || model.object.visible === false) continue;
+    const box = await geometryWorldBox(model);
+    if (box) boxes.push(box);
   }
-  if (!any) return;
-  await lookAtBox(handles.world, box, 1.5);
+  const merged = mergeNearbyBoxes(boxes);
+  if (!merged) return;
+  await lookAtBox(handles.world, merged, 1.4);
   await requestFragmentsUpdate(handles.fragments, true);
 }
 
@@ -249,54 +263,161 @@ export async function fitCameraToItems(
 
 export async function fitCameraToItemSets(
   handles: ViewerHandles,
-  sets: Array<{ model: FRAGS.FragmentsModel; localIds: number[] }>,
+  sets: Array<{ model: FRAGS.FragmentsModel; localIds: number[]; modelId?: string }>,
+  opts?: CameraFitOptions,
 ): Promise<void> {
-  const worldBox = new THREE.Box3();
-  let any = false;
-  for (const { model, localIds } of sets) {
+  const skip = new Set(opts?.skipModelIds ?? []);
+  const boxes: THREE.Box3[] = [];
+  for (const { model, localIds, modelId } of sets) {
     if (!localIds.length) continue;
+    if (modelId && skip.has(modelId)) continue;
     try {
-      let box: THREE.Box3;
-      if (typeof model.getMergedBox === "function") {
-        box = await model.getMergedBox(localIds);
-      } else {
-        const boxes = await model.getBoxes(localIds);
-        box = new THREE.Box3();
-        for (const b of boxes) {
-          if (b) box.union(b);
-        }
-      }
-      if (box.isEmpty() || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) continue;
-      model.object.updateWorldMatrix(true, false);
-      box.applyMatrix4(model.object.matrixWorld);
-      worldBox.union(box);
-      any = true;
+      const box = await geometryWorldBox(model, localIds);
+      if (box) boxes.push(box);
     } catch (err) {
       console.warn("Não foi possível enquadrar a seleção:", err);
     }
   }
-  if (!any) return;
-  await lookAtBox(handles.world, worldBox, 2.15);
+  const merged = mergeNearbyBoxes(boxes);
+  if (!merged) {
+    await fitCameraToVisibleModels(handles, opts);
+    return;
+  }
+  await lookAtBox(handles.world, merged, 1.45);
   await requestFragmentsUpdate(handles.fragments, true);
 }
 
 async function fitCameraToModel(world: OBC.World, model: FRAGS.FragmentsModel) {
   try {
-    const box = new THREE.Box3().setFromObject(model.object);
-    await lookAtBox(world, box, 1.5);
+    const box = await geometryWorldBox(model);
+    if (box) await lookAtBox(world, box, 1.4);
   } catch (err) {
     console.warn("Nao foi possivel enquadrar a camera:", err);
   }
 }
 
+/** Caixa da geometria visível — evita COORD vazio, helpers enormes e caixas IFC noutro referencial. */
+async function geometryWorldBox(model: FRAGS.FragmentsModel, localIds?: number[]): Promise<THREE.Box3 | null> {
+  const objectBox = meshWorldBox(model.object);
+  let itemBox: THREE.Box3 | null = null;
+  try {
+    let ids = localIds;
+    const geom = await model.getItemsIdsWithGeometry();
+    if (geom.length) {
+      if (ids?.length) {
+        const allow = new Set(geom);
+        ids = ids.filter((id) => allow.has(id));
+      } else {
+        ids = geom;
+      }
+      if (ids.length) {
+        let box: THREE.Box3;
+        if (typeof model.getMergedBox === "function") {
+          box = await model.getMergedBox(ids);
+        } else {
+          const parts = await model.getBoxes(ids);
+          box = new THREE.Box3();
+          for (const part of parts) {
+            if (part && !part.isEmpty()) box.union(part);
+          }
+        }
+        if (boxIsUseful(box)) {
+          model.object.updateWorldMatrix(true, false);
+          const world = box.clone().applyMatrix4(model.object.matrixWorld);
+          itemBox = boxIsUseful(world) ? world : box;
+        }
+      }
+    }
+  } catch {
+    itemBox = null;
+  }
+  return pickFitBox(itemBox, objectBox, model.object);
+}
+
+function meshWorldBox(root: THREE.Object3D): THREE.Box3 | null {
+  const boxes: THREE.Box3[] = [];
+  root.updateWorldMatrix(true, true);
+  root.traverse((obj) => {
+    if (!obj.visible) return;
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    const geo = mesh.geometry;
+    if (!geo.boundingBox) geo.computeBoundingBox();
+    if (!geo.boundingBox || geo.boundingBox.isEmpty()) return;
+    const world = geo.boundingBox.clone().applyMatrix4(mesh.matrixWorld);
+    const size = boxSize(world);
+    if (!Number.isFinite(size) || size < 0.02 || size > 8_000) return;
+    boxes.push(world);
+  });
+  if (boxes.length) return mergeNearbyBoxes(boxes);
+  const fallback = new THREE.Box3().setFromObject(root);
+  return boxIsUseful(fallback) ? fallback : null;
+}
+
+function pickFitBox(item: THREE.Box3 | null, object: THREE.Box3 | null, root: THREE.Object3D): THREE.Box3 | null {
+  const origin = new THREE.Vector3();
+  root.getWorldPosition(origin);
+  const near = (box: THREE.Box3 | null): THREE.Box3 | null => {
+    if (!box || !boxIsUseful(box)) return null;
+    const expanded = box.clone().expandByScalar(Math.max(boxSize(box) * 2, 80));
+    if (expanded.containsPoint(origin)) return box;
+    const center = box.getCenter(new THREE.Vector3());
+    if (center.distanceTo(origin) < Math.max(boxSize(box) * 4, 250)) return box;
+    return null;
+  };
+  const a = near(item);
+  const b = near(object);
+  if (a && b) {
+    const sa = boxSize(a);
+    const sb = boxSize(b);
+    if (sa > sb * 6 && sb > 1) return b;
+    if (sb > sa * 6 && sa > 1) return a;
+    return b;
+  }
+  return b ?? a ?? (object && boxIsUseful(object) ? object : null);
+}
+
+function boxIsUseful(box: THREE.Box3): boolean {
+  if (box.isEmpty()) return false;
+  const { min, max } = box;
+  if (![min.x, min.y, min.z, max.x, max.y, max.z].every(Number.isFinite)) return false;
+  const size = boxSize(box);
+  if (size < 1e-4 || size > 8_000) return false;
+  return true;
+}
+
+function boxSize(box: THREE.Box3): number {
+  return Math.max(box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z);
+}
+
+/** Une caixas próximas; descarta outliers (ex.: COORD na origem vs. modelo deslocado). */
+function mergeNearbyBoxes(boxes: THREE.Box3[]): THREE.Box3 | null {
+  const useful = boxes.filter(boxIsUseful);
+  if (!useful.length) return null;
+  if (useful.length === 1) return useful[0]!.clone();
+  const sizes = useful.map(boxSize);
+  let primary = 0;
+  for (let i = 1; i < sizes.length; i++) {
+    if (sizes[i]! > sizes[primary]!) primary = i;
+  }
+  const origin = useful[primary]!.getCenter(new THREE.Vector3());
+  const span = Math.max(sizes[primary]!, 12);
+  const merged = useful[primary]!.clone();
+  for (let i = 0; i < useful.length; i++) {
+    if (i === primary) continue;
+    const center = useful[i]!.getCenter(new THREE.Vector3());
+    if (center.distanceTo(origin) > Math.max(span * 8, 200)) continue;
+    merged.union(useful[i]!);
+  }
+  return boxIsUseful(merged) ? merged : useful[primary]!.clone();
+}
+
 async function lookAtBox(world: OBC.World, box: THREE.Box3, distanceScale: number) {
-  if (box.isEmpty() || !Number.isFinite(box.min.x) || !Number.isFinite(box.max.x)) return;
+  if (!boxIsUseful(box)) return;
   const center = new THREE.Vector3();
   box.getCenter(center);
-  const size = new THREE.Vector3();
-  box.getSize(size);
-  const maxDim = Math.max(size.x, size.y, size.z, 0.6);
-  const dist = maxDim * distanceScale || 30;
+  const maxDim = Math.max(boxSize(box), 0.8);
+  const dist = Math.min(Math.max(maxDim * distanceScale, 4), 1_200);
   const cam = world.camera as OBC.OrthoPerspectiveCamera;
   applyOrbitNavigation(cam);
   await cam.controls.setLookAt(

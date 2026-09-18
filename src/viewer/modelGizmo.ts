@@ -71,7 +71,7 @@ export class ModelGizmo {
     this.applyVisibility();
   }
 
-  /** Earth ligado e 1ª pessoa desligada — o gizmo só aparece se houver modo. */
+  /** Vista 3D com 1ª pessoa desligada — o gizmo só aparece se houver modo. */
   setAllowed(on: boolean): void {
     this.allowed = on;
     if (!on) this.mode = null;

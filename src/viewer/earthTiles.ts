@@ -3,14 +3,20 @@ import * as OBC from "@thatopen/components";
 import { TilesRenderer } from "3d-tiles-renderer";
 import {
   GoogleCloudAuthPlugin,
+  GLTFExtensionsPlugin,
   TileCompressionPlugin,
   TilesFadePlugin,
   UpdateOnChangePlugin,
 } from "3d-tiles-renderer/plugins";
+import { DRACOLoader } from "three/examples/jsm/loaders/DRACOLoader.js";
 import { Sky } from "three/examples/jsm/objects/Sky.js";
 import { hasStoredSiteElevation } from "../ifc/georef";
 import { pointInPolygonXZ, type XzPoint } from "../logistics/polygon";
 import { SITE_LIMIT_MAX_POINTS } from "../logistics/types";
+
+const DRACO_DECODER_PATH = "https://www.gstatic.com/draco/v1/decoders/";
+/** A sessão Photorealistic 3D Tiles da Google vale ~3 h; renovamos um pouco antes. */
+const SESSION_TTL_MS = 2.75 * 60 * 60 * 1000;
 
 /** 1 GiB em bytes — orçamento do LRU dos Photorealistic 3D Tiles. */
 const GIB = 2 ** 30;
@@ -24,6 +30,33 @@ const ERROR_BLOCK = 18;
 const ERROR_CITY = 22;
 const ERROR_SNAP = 12;
 const ERROR_TELEPORT = 28;
+
+function describeGoogleTilesError(raw: string, status?: number): string {
+  const text = raw.replace(/\s+/g, " ").trim();
+  const code = status ?? Number(/error code (\d{3})/i.exec(text)?.[1] ?? /(?:^|\D)([45]\d\d)(?:\D|$)/.exec(text)?.[1]);
+  if (code === 404 || /NOT_FOUND|Requested entity was not found/i.test(text)) {
+    return (
+      "A Map Tiles API não está ativa neste projeto (404). Criar uma chave nova não chega: " +
+      "no mesmo projeto da chave, ativa a Map Tiles API e a faturação. " +
+      "https://console.cloud.google.com/apis/library/tile.googleapis.com"
+    );
+  }
+  if (code === 403 || /PERMISSION_DENIED|referer|blocked/i.test(text)) {
+    return (
+      "A chave Google está bloqueada (403). Inclui http://localhost:5173/* nas restrições " +
+      "de referer ou testa sem restrição de HTTP."
+    );
+  }
+  if (code === 429 || /RESOURCE_EXHAUSTED|quota|rate limit/i.test(text)) {
+    return "A quota da Map Tiles API esgotou (429). Espera um pouco ou sobe o limite no Google Cloud.";
+  }
+  if (code === 400 || /INVALID_ARGUMENT/i.test(text)) {
+    return "Pedido inválido à Map Tiles API (400). A sessão 3D pode ter expirado — volta a ligar a camada Earth.";
+  }
+  return text.slice(0, 220) || "Falha a carregar os Photorealistic 3D Tiles.";
+}
+
+export type EarthEnableResult = "created" | "resumed" | "paused" | "unchanged";
 
 /** Latitude/longitude/altitude (graus, graus, metros sobre o elipsoide WGS84). */
 export interface AnchorLLA {
@@ -50,6 +83,8 @@ export interface EarthTilesOptions {
   onTerrainSnap?: (ellipsoidMeters: number) => void;
   /** Chamado se a malha não der um ponto de chão credível. */
   onTerrainSnapFail?: () => void;
+  /** Falha a obter o tileset / um tile (API, rede, chave). */
+  onLoadError?: (message: string) => void;
   /** Tiles novos carregaram — o talude pode reamostrar a cota do Google. */
   onTilesReady?: () => void;
 }
@@ -95,6 +130,11 @@ export class GoogleEarthLayer {
   private siteClipYMin = -50;
   private siteClipYMax = 80;
   private tilesReadyTimer = 0;
+  /** Instante do último `root.json` (SKU faturável). */
+  private sessionAt = 0;
+  private enableLock: Promise<void> | null = null;
+  private recreating = false;
+  private rootRetries = 0;
 
   constructor(world: OBC.World, opts: EarthTilesOptions) {
     this.world = world;
@@ -113,17 +153,52 @@ export class GoogleEarthLayer {
     return this.opts.hideRadiusMeters ?? 0;
   }
 
+  /** Há tileset em memória (visível ou em pausa). */
+  hasTiles(): boolean {
+    return this.tiles != null;
+  }
+
   /** Divide o orçamento de VRAM entre os tiles e as disciplinas IFC visíveis. */
   setIfcModelCount(count: number): void {
     this.ifcModelCount = Math.max(0, Math.floor(count));
     this.applyTileMemoryBudget();
   }
 
-  /** Liga ou desliga a camada. */
-  async setEnabled(on: boolean): Promise<void> {
-    if (on === this._enabled) return;
-    if (on) await this.attach();
-    else this.detach();
+  /**
+   * Liga ou desliga a camada. Desligar **pausa** o renderer (sem `root.json`
+   * novo). A Google fatura sobretudo o pedido raiz (~3 h de sessão); ligar e
+   * desligar na mesma página reutiliza essa sessão.
+   */
+  async setEnabled(on: boolean): Promise<EarthEnableResult> {
+    const run = this.enableLock ?? Promise.resolve();
+    let result: EarthEnableResult = "unchanged";
+    const next = run.then(async () => {
+      if (on) {
+        if (this._enabled) return;
+        if (this.tiles && this.sessionFresh()) {
+          this.resume();
+          result = "resumed";
+          return;
+        }
+        if (this.tiles) this.detach();
+        await this.attach();
+        result = "created";
+        return;
+      }
+      if (!this._enabled && !this.tiles) return;
+      this.pause();
+      result = "paused";
+    });
+    this.enableLock = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    await next;
+    return result;
+  }
+
+  private sessionFresh(): boolean {
+    return this.sessionAt > 0 && Date.now() - this.sessionAt < SESSION_TTL_MS;
   }
 
   /** Reposiciona o anchor. Por omissão só assenta se lat/lon mudaram. */
@@ -133,7 +208,7 @@ export class GoogleEarthLayer {
       Math.abs(prev.lat - anchor.lat) > 1e-8 || Math.abs(prev.lon - anchor.lon) > 1e-8;
     this.opts.anchor = anchor;
     if (this.tiles) this.applyAnchorTransform();
-    if (opts?.snap ?? moved) this.requestTerrainSnap();
+    if (this._enabled && (opts?.snap ?? moved)) this.requestTerrainSnap();
   }
 
   /** Sobe a malha Google na vista (metros). O modelo IFC não mexe. */
@@ -176,11 +251,12 @@ export class GoogleEarthLayer {
       const p = this.siteClipPts[i];
       u.pts.value[i]!.set(p?.x ?? 0, p?.z ?? 0);
     }
+    if (this.siteClipPts.length >= 3 && this.tiles) bindSiteClipMaterials(this.tiles.group);
   }
 
   siteClipContains(world: THREE.Vector3): boolean {
     if (this.siteClipPts.length < 3) return false;
-    if (world.y > this.siteClipYMax) return false;
+    if (world.y > this.siteClipYMax || world.y < this.siteClipYMin) return false;
     return pointInPolygonXZ({ x: world.x, z: world.z }, this.siteClipPts);
   }
 
@@ -193,12 +269,15 @@ export class GoogleEarthLayer {
     if (!this.tiles) return null;
     let best: number | null = null;
     const consider = (hx: number, hz: number) => {
-      this.rayOrigin.set(hx, aroundY + 160, hz);
-      const hit = this.raycast(this.rayOrigin, this.rayDir, 900);
+      const top = Math.max(aroundY, 0) + 160;
+      this.rayOrigin.set(hx, top, hz);
+      const hit = this.raycast(this.rayOrigin, this.rayDir, top + 80 - (Math.min(aroundY, 0) - 80));
       if (!hit) return;
       if (this.hitToEllipsoidHeight(hit.point) == null) return;
       const hy = hit.point.y;
-      if (hy > aroundY + 40 || hy < aroundY - 60) return;
+      const lo = Math.min(aroundY, 0) - 60;
+      const hi = Math.max(aroundY, 0) + 40;
+      if (hy > hi || hy < lo) return;
       if (best == null || hy < best) best = hy;
     };
     consider(x, z);
@@ -253,6 +332,21 @@ export class GoogleEarthLayer {
   // -------------------------------------------------------------------------
 
   private async attach(): Promise<void> {
+    const key = this.opts.apiKey.trim();
+    if (!key) {
+      throw new Error(
+        "Falta VITE_GOOGLE_MAP_TILES_API_KEY no .env. Reinicia o `npm run dev` depois de a preencher.",
+      );
+    }
+    try {
+      await this.attachTiles();
+    } catch (err) {
+      this.detach();
+      throw err;
+    }
+  }
+
+  private async attachTiles(): Promise<void> {
     const cam = this.world.camera as OBC.OrthoPerspectiveCamera;
     const renderer = this.world.renderer!.three;
     const scene = this.world.scene.three;
@@ -260,10 +354,14 @@ export class GoogleEarthLayer {
     const tiles = new TilesRenderer();
     tiles.registerPlugin(
       new GoogleCloudAuthPlugin({
-        apiToken: this.opts.apiKey,
-        autoRefreshToken: true,
+        apiToken: this.opts.apiKey.trim(),
+        // `true` volta a pedir root.json a cada 4xx de tile — cada um é SKU.
+        autoRefreshToken: false,
       }),
     );
+    const dracoLoader = new DRACOLoader();
+    dracoLoader.setDecoderPath(DRACO_DECODER_PATH);
+    tiles.registerPlugin(new GLTFExtensionsPlugin({ dracoLoader }));
     // Menos VRAM (sem mipmaps) e índices compactos — sem comprimir posições
     // (artefactos visíveis na malha fotorrealista).
     tiles.registerPlugin(
@@ -282,7 +380,6 @@ export class GoogleEarthLayer {
         makeTilesUnlit(scene);
         bindSiteClipMaterials(scene);
       },
-      doTilesNeedUpdate: () => this.snapPending || this.sseSettling,
     });
     tiles.registerPlugin(new TilesFadePlugin({ fadeDuration: 180, maximumFadeOutTiles: 40 }));
     tiles.registerPlugin(new UpdateOnChangePlugin());
@@ -323,6 +420,7 @@ export class GoogleEarthLayer {
     this.refreshClipBox();
 
     const onLoadModel = () => {
+      this.rootRetries = 0;
       if (this.snapPending) {
         this.snapUntil = Math.min(this.snapUntil + 6000, this.snapStarted + 90000);
         this.tryTerrainSnap();
@@ -332,14 +430,53 @@ export class GoogleEarthLayer {
     tiles.addEventListener("load-model", onLoadModel);
     this.loadModelUnsub = () => tiles.removeEventListener("load-model", onLoadModel);
 
+    const onLoadError = (event: { error?: Error; url?: string | URL }) => {
+      const raw = event.error?.message || String(event.error || "falha a carregar tiles");
+      const url = String(event.url ?? "");
+      const isRoot = /\/3dtiles\/root\.json/i.test(url) || /Failed to load tileset/i.test(raw);
+      const expired = this.sessionAt > 0 && Date.now() - this.sessionAt >= SESSION_TTL_MS;
+      console.warn("Google Photorealistic 3D Tiles:", event.url ?? "", event.error);
+      if (expired && this._enabled && !this.recreating && this.rootRetries < 1) {
+        this.rootRetries += 1;
+        void this.rebuildSession();
+        return;
+      }
+      if (isRoot && !this.recreating) {
+        this.detach();
+        this.opts.onLoadError?.(describeGoogleTilesError(raw));
+      }
+    };
+    tiles.addEventListener("load-error", onLoadError);
+    const prevUnsub = this.loadModelUnsub;
+    this.loadModelUnsub = () => {
+      prevUnsub?.();
+      tiles.removeEventListener("load-error", onLoadError);
+    };
+
     if (!hasStoredSiteElevation(this.opts.anchor.altitude)) {
       this.requestTerrainSnap();
     }
 
-    let lastCamRef: THREE.Camera = activeCam;
+    this.sessionAt = Date.now();
+    this.rootRetries = 0;
+    this.startUpdateLoop();
+    this._enabled = true;
+  }
+
+  private startUpdateLoop(): void {
+    this.updateUnsub?.();
+    const renderer = this.world.renderer!.three;
+    let lastCamRef: THREE.Camera = (this.world.camera as any).three as THREE.Camera;
     const updateFn = () => {
-      if (!this.tiles) return;
+      if (!this.tiles || !this._enabled) return;
       const c = (this.world.camera as any).three as THREE.Camera;
+      c.updateMatrixWorld();
+      const persp = (this.world.camera as OBC.OrthoPerspectiveCamera).threePersp;
+      if (persp && persp.far < 1e6) {
+        persp.far = 1e7;
+        persp.near = Math.min(persp.near, 0.05);
+        persp.updateProjectionMatrix();
+      }
       if (c !== lastCamRef) {
         for (const oldCam of [...this.tiles.cameras]) this.tiles.deleteCamera(oldCam);
         this.tiles.setCamera(c);
@@ -360,8 +497,6 @@ export class GoogleEarthLayer {
     };
     this.world.renderer!.onBeforeUpdate.add(updateFn);
     this.updateUnsub = () => this.world.renderer!.onBeforeUpdate.remove(updateFn);
-
-    this._enabled = true;
   }
 
   private applyTileMemoryBudget(): void {
@@ -382,8 +517,43 @@ export class GoogleEarthLayer {
     }, 900);
   }
 
-  private detach(): void {
+  private pause(): void {
+    this.updateUnsub?.();
+    this.updateUnsub = null;
+    this.snapPending = false;
+    if (this.tiles) this.tiles.group.visible = false;
+    if (this.clipBox) this.clipBox.visible = false;
+    this.uninstallSky();
+    this.applyRendererBudget(false);
+    this._enabled = false;
+  }
+
+  private resume(): void {
     if (!this.tiles) return;
+    this.tiles.group.visible = true;
+    if (this.clipBox) this.clipBox.visible = true;
+    this.installSky();
+    this.applyRendererBudget(true);
+    if (this.siteClipPts.length >= 3) bindSiteClipMaterials(this.tiles.group);
+    this.startUpdateLoop();
+    this._enabled = true;
+  }
+
+  private async rebuildSession(): Promise<void> {
+    if (this.recreating) return;
+    this.recreating = true;
+    const want = this._enabled;
+    try {
+      this.detach();
+      if (want) await this.attach();
+    } catch (err) {
+      this.opts.onLoadError?.(describeGoogleTilesError((err as Error).message));
+    } finally {
+      this.recreating = false;
+    }
+  }
+
+  private detach(): void {
     if (this.tilesReadyTimer) {
       window.clearTimeout(this.tilesReadyTimer);
       this.tilesReadyTimer = 0;
@@ -393,8 +563,13 @@ export class GoogleEarthLayer {
     this.loadModelUnsub?.();
     this.loadModelUnsub = null;
     this.snapPending = false;
+    this.sessionAt = 0;
 
-    this.world.scene.three.remove(this.tiles.group);
+    if (this.tiles) {
+      this.world.scene.three.remove(this.tiles.group);
+      this.tiles.dispose();
+      this.tiles = null;
+    }
     if (this.clipBox) {
       this.world.scene.three.remove(this.clipBox);
       this.clipBox.geometry.dispose();
@@ -403,8 +578,6 @@ export class GoogleEarthLayer {
     }
     this.uninstallSky();
     this.applyRendererBudget(false);
-    this.tiles.dispose();
-    this.tiles = null;
     this.walkQuality = false;
     this._enabled = false;
   }
@@ -659,6 +832,7 @@ export class GoogleEarthLayer {
     }
     this.clipBox.scale.setScalar(r);
     this.clipBox.position.copy(this.clipCenter);
+    this.clipBox.visible = this._enabled;
   }
 }
 
@@ -788,7 +962,7 @@ varying vec3 vSiteWorldPos;`,
         inside = !inside;
       }
     }
-    if (inside && vSiteWorldPos.y <= uSiteClipYMax) discard;
+    if (inside && vSiteWorldPos.y >= uSiteClipYMin && vSiteWorldPos.y <= uSiteClipYMax) discard;
   }
 `,
       );

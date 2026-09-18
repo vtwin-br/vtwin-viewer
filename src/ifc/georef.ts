@@ -74,6 +74,18 @@ export function extraFromObject(object: {
 }
 
 /**
+ * Latitude/longitude WGS84 usáveis para ancorar o Google Earth.
+ * `(0, 0)` é o IfcSite «Default» do Revit — Null Island, sem malha fotorrealista.
+ */
+export function hasGeographicAnchor(g?: IfcGeoref | null): g is IfcGeoref & { lat: number; lon: number } {
+  const lat = g?.lat;
+  const lon = g?.lon;
+  if (lat == null || lon == null || !Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  if (Math.abs(lat) > 90 || Math.abs(lon) > 180) return false;
+  return Math.abs(lat) >= 1e-4 || Math.abs(lon) >= 1e-4;
+}
+
+/**
  * Cota gravada em IfcSite.RefElevation / IfcMapConversion.OrthogonalHeight.
  * `0` (e quase-zero) é o default STEP de muitos IFCs e não serve como elipsoide.
  */
@@ -129,7 +141,7 @@ export function extractGeoref(ifcApi: WebIFC.IfcAPI, modelId: number): IfcGeoref
     const lat = compoundToDecimal(site?.RefLatitude);
     const lon = compoundToDecimal(site?.RefLongitude);
     const elev = num(site?.RefElevation);
-    if (lat != null && lon != null) {
+    if (lat != null && lon != null && (Math.abs(lat) >= 1e-4 || Math.abs(lon) >= 1e-4)) {
       if (georef.source === "none") {
         georef.lat = lat;
         georef.lon = lon;

@@ -1,4 +1,5 @@
 import { emptySchedule } from "../schedule/range";
+import { hasGeographicAnchor } from "./georef";
 import { hashIfcBytes } from "./fragCache";
 import {
   buildCoordinationIfc,
@@ -28,7 +29,11 @@ export function createCoordinationSession(projectName: string): IfcSession {
 }
 
 export async function persistCoordinationSession(session: IfcSession): Promise<string> {
-  const bytes = session.stepTextBytes();
+  session.markPlanningForExport();
+  const bytes =
+    session.dirty || session.schedule.roots.length > 0
+      ? await session.exportBytes()
+      : session.stepTextBytes();
   const hash = await hashIfcBytes(bytes);
   await saveIfcBytes(hash, bytes);
   session.attachStore(hash);
@@ -45,8 +50,8 @@ export function seedCoordinationFromDisciplines(coord: IfcSession, sources: IfcS
   if (richest) {
     coord.adoptPlanningFrom(richest.schedule, { keepExternalProducts: true });
   }
-  if (!coord.schedule.georef) {
-    const geo = sources.find((s) => s.schedule.georef)?.schedule.georef;
+  if (!hasGeographicAnchor(coord.schedule.georef)) {
+    const geo = sources.find((s) => hasGeographicAnchor(s.schedule.georef))?.schedule.georef;
     if (geo) coord.schedule.georef = { ...geo };
   }
   if (!coord.getSiteLimit()) {

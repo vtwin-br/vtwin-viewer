@@ -216,11 +216,35 @@ export class EarthPanel {
     });
 
     // Paste do Google Maps
-    this.elPaste.addEventListener("input", () => {
-      const parsed = parseLatLon(this.elPaste.value);
-      if (!parsed) return;
-      this.commitLatLon(parsed.lat, parsed.lon);
-      this.elPaste.value = "";
+    const applyPaste = (raw: string) => {
+      const parsed = parseLatLon(raw);
+      if (parsed) {
+        this.elPaste.setCustomValidity("");
+        this.commitLatLon(parsed.lat, parsed.lon);
+        this.elPaste.value = "";
+        return;
+      }
+      const t = raw.trim();
+      if (!t) return;
+      if (/maps\.app\.goo\.gl|goo\.gl\/maps|maps\.app\.google/i.test(t)) {
+        this.elPaste.setCustomValidity(
+          "Este é um link curto. Abre o Maps, copia a URL da barra (tem de ter @lat,lon) ou cola só as coordenadas, p.ex. −12.97, −38.51.",
+        );
+        this.elPaste.reportValidity();
+        return;
+      }
+      if (/google\.[^/]+\/maps|maps\.google/i.test(t)) {
+        this.elPaste.setCustomValidity(
+          "Não li lat/lon neste URL. Cola a ligação completa com @lat,lon ou as coordenadas em decimal.",
+        );
+        this.elPaste.reportValidity();
+      }
+    };
+    this.elPaste.addEventListener("input", () => applyPaste(this.elPaste.value));
+    this.elPaste.addEventListener("change", () => applyPaste(this.elPaste.value));
+    this.elPaste.addEventListener("paste", (event) => {
+      const text = event.clipboardData?.getData("text") ?? "";
+      if (text) queueMicrotask(() => applyPaste(this.elPaste.value || text));
     });
 
     // Presets
@@ -346,27 +370,35 @@ function parseLatLon(text: string): { lat: number; lon: number } | null {
   if (!text) return null;
   const t = text.trim();
 
-  // 1) URL Google Maps com @lat,lon,zoom
+  // Place URLs: data=!3dLAT!4dLON (lat, lon)
+  const bang = t.match(/!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/);
+  if (bang) {
+    const lat = parseFloat(bang[1]!);
+    const lon = parseFloat(bang[2]!);
+    if (isLatLon(lat, lon)) return { lat, lon };
+  }
+
+  // URL Google Maps com @lat,lon[,zoom]
   const at = t.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
   if (at) {
-    const lat = parseFloat(at[1]);
-    const lon = parseFloat(at[2]);
+    const lat = parseFloat(at[1]!);
+    const lon = parseFloat(at[2]!);
     if (isLatLon(lat, lon)) return { lat, lon };
   }
 
-  // 2) ?q=lat,lon
-  const q = t.match(/[?&]q=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  // ?q= / ?query= / ?ll=
+  const q = t.match(/[?&](?:q|query|ll)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/i);
   if (q) {
-    const lat = parseFloat(q[1]);
-    const lon = parseFloat(q[2]);
+    const lat = parseFloat(q[1]!);
+    const lon = parseFloat(q[2]!);
     if (isLatLon(lat, lon)) return { lat, lon };
   }
 
-  // 3) Par decimal solto
+  // Par decimal solto
   const pair = t.match(/(-?\d+(?:\.\d+)?)[\s,;]+(-?\d+(?:\.\d+)?)/);
   if (pair) {
-    const lat = parseFloat(pair[1]);
-    const lon = parseFloat(pair[2]);
+    const lat = parseFloat(pair[1]!);
+    const lon = parseFloat(pair[2]!);
     if (isLatLon(lat, lon)) return { lat, lon };
   }
 

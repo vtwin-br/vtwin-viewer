@@ -37,6 +37,8 @@ import {
   wouldCreateCycle,
 } from "../schedule/links";
 import { formatMoney, parseMoney } from "../schedule/cost";
+import type { AssistReport } from "../projectPlan/linkAssist";
+import { fetchAiStatus, type AiStatus } from "../ai/client";
 
 const ZOOM_MIN = 4;
 const ZOOM_MAX = 56;
@@ -50,6 +52,7 @@ const ICON_UNLINK = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" 
 const ICON_DELETE = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 7h14M10 7V5h4v2M8 7l1 12h6l1-12" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const ICON_COLUMNS = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><rect x="4" y="5" width="4.2" height="14" rx="1"/><rect x="10" y="5" width="4.2" height="14" rx="1"/><rect x="16" y="5" width="4.2" height="14" rx="1"/></svg>`;
 const ICON_ADD = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke-linecap="round"/></svg>`;
+const ICON_ASSIST = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3l1.4 3.8L17 8.2l-3.6 1.4L12 13l-1.4-3.4L7 8.2l3.6-1.4z" stroke-linejoin="round"/><path d="M18.5 13.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z" stroke-linejoin="round"/></svg>`;
 
 type ColId = "wbs" | "name" | "prod" | "set" | "dur" | "pred" | "start" | "end" | "cost";
 
@@ -79,6 +82,10 @@ export interface ProjectWorkspaceOptions {
   onNativeChange?: (info: { timeChanged?: boolean; structure?: boolean }) => void;
   onDropGuids?: (ifcTaskId: number, guids: string[]) => void;
   onDropGroup?: (ifcTaskId: number, groupId: number) => void;
+  onSuggestLinks?: (tasks: PlanTask[]) => Promise<AssistReport>;
+  onRefineLinks?: (report: AssistReport, tasks: PlanTask[]) => Promise<AssistReport>;
+  onPreviewGuids?: (guids: string[]) => void;
+  onApplyLinkSuggestions?: (items: Array<{ ifcTaskId: number; guids: string[] }>) => void;
 }
 
 export class ProjectWorkspace {
@@ -106,6 +113,10 @@ export class ProjectWorkspace {
   private colVisible = Object.fromEntries(COLUMNS.map((c) => [c.id, true])) as Record<ColId, boolean>;
   private colWidths = Object.fromEntries(COLUMNS.map((c) => [c.id, c.width])) as Record<ColId, number>;
   private costRoll = new Map<string, number>();
+  private assist: AssistReport | null = null;
+  private assistBusy = false;
+  private assistFilter: "all" | "high" | "medium" = "all";
+  private aiStatus: AiStatus = { configured: false, provider: "", model: "" };
 
   constructor(root: HTMLElement, opts: ProjectWorkspaceOptions) {
     this.root = root;
@@ -118,6 +129,7 @@ export class ProjectWorkspace {
     });
     this.mount();
     this.bindShellEvents();
+    void this.refreshAiStatus();
   }
 
   setActive(active: boolean): void {
@@ -283,6 +295,7 @@ export class ProjectWorkspace {
             <button type="button" class="btn-secondary" data-act="model" aria-pressed="false" title="Pré-visualização BIM para ligar elementos">3D</button>
             <button type="button" class="btn-secondary pw-act-wide" data-act="from-ifc">IFC</button>
             <button type="button" class="btn-ghost pw-act-wide" data-act="import">CSV</button>
+            <button type="button" class="btn-secondary pw-act-wide" data-act="assist" title="Sugerir ligações 4D/5D ao modelo IFC">${ICON_ASSIST} IA</button>
             <div class="pw-overflow">
               <button type="button" class="icon-btn-plain pw-overflow-btn" data-act="more" aria-label="Mais ações" aria-haspopup="true" title="Mais ações">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="6" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="18" cy="12" r="1.4"/></svg>
@@ -291,6 +304,7 @@ export class ProjectWorkspace {
                 <button type="button" data-act="model">Pré-visualização 3D</button>
                 <button type="button" data-act="from-ifc">IFC</button>
                 <button type="button" data-act="import">CSV</button>
+                <button type="button" data-act="assist">Sugerir ligações 4D/5D</button>
               </div>
             </div>
             <div class="pw-zoom" role="group" aria-label="Zoom do Gantt">
@@ -326,12 +340,14 @@ export class ProjectWorkspace {
           </div>
           <div class="pw-gantt-split" data-el="gantt-split" role="separator" aria-orientation="vertical" aria-label="Largura da tabela" tabindex="0"></div>
           <div class="pw-chart">
+            <div class="pw-chart-tools-spacer" aria-hidden="true"></div>
             <div class="pw-scale" data-el="scale"></div>
             <div class="pw-chart-body" data-el="chart-body"></div>
           </div>
         </div>
       </div>
       <div class="pw-sync is-hidden" data-el="mapper" role="dialog" aria-modal="true" aria-labelledby="pw-map-title"></div>
+      <div class="pw-sync is-hidden" data-el="assist" role="dialog" aria-modal="true" aria-labelledby="pw-assist-title"></div>
       <div class="pw-menu" data-el="ctx" hidden></div>
       <div class="pw-menu pw-col-menu" data-el="col-menu" hidden></div>
       <div class="pw-toast" data-el="toast" hidden></div>
@@ -360,6 +376,7 @@ export class ProjectWorkspace {
       const act = (e.target as HTMLElement).closest("[data-act]")?.getAttribute("data-act");
       if (act === "import") this.fileInput?.click();
       if (act === "from-ifc") this.openIfcSchedule();
+      if (act === "assist") void this.startAssist();
       if (act === "model") this.opts.onToggleModel?.();
       if (act === "hide-gantt") this.opts.onHideGantt?.();
       if (act === "zoom-in") this.nudgeZoom(1);
@@ -407,6 +424,8 @@ export class ProjectWorkspace {
     this.applyColumnLayout();
     this.el("mapper")?.addEventListener("click", this.onMapperClick);
     this.el("mapper")?.addEventListener("change", this.onMapperChange);
+    this.el("assist")?.addEventListener("click", this.onAssistClick);
+    this.el("assist")?.addEventListener("change", this.onAssistChange);
     document.addEventListener("pointerdown", (e) => {
       const t = e.target as Node;
       const more = this.el("more-menu");
@@ -443,6 +462,10 @@ export class ProjectWorkspace {
   }
 
   private bindGantt(): void {
+    const gantt = this.el("gantt");
+    gantt?.style.setProperty("--pw-row-h", `${ROW_H}px`);
+    gantt?.style.setProperty("--pw-head-h", `${ROW_H}px`);
+    gantt?.style.setProperty("--pw-tools-h", `${ROW_H}px`);
     const table = this.el("table-body");
     const chart = this.el("chart-body");
     table?.addEventListener(
@@ -773,7 +796,7 @@ export class ProjectWorkspace {
     this.plan.maxDate = new Date(Math.max(...times));
   }
 
-  private writeImportedPlan(plan: ProjectPlan): void {
+  private writeImportedPlan(plan: ProjectPlan, opts?: { assist?: boolean }): void {
     const session = this.withSession();
     if (!session) return;
     try {
@@ -783,6 +806,7 @@ export class ProjectWorkspace {
       this.toast(
         `${created} IfcTask criada${created === 1 ? "" : "s"}, ${updated} atualizada${updated === 1 ? "" : "s"} no IFC. Exporte para confirmar.`,
       );
+      if (opts?.assist) void this.startAssist();
     } catch (err) {
       this.toast((err as Error).message);
     }
@@ -809,7 +833,7 @@ export class ProjectWorkspace {
     }
 
     if (imported) {
-      this.writeImportedPlan(imported);
+      this.writeImportedPlan(imported, { assist: true });
     } else if (extra.length) {
       this.toast(
         extra.map((a) => a.note || `${a.name} anexado só nesta sessão (ainda não é IfcDocumentReference).`).join(" "),
@@ -1510,10 +1534,11 @@ export class ProjectWorkspace {
       task.isMilestone ? 0 : (task.durationDays ?? (task.end ? diffDays(start, task.end) : 1)),
       0,
     );
-    const top = index * ROW_H + (task.isSummary ? 12 : 8);
+    const barH = task.isSummary ? 10 : 18;
+    const top = index * ROW_H + (ROW_H - barH) / 2;
     if (task.isMilestone) {
       const hit = task.linkedIfcTaskId != null && this.hitIfcIds.has(task.linkedIfcTaskId) ? " is-hit" : "";
-      return `<div class="pw-mile${hit}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="left:${left}px;top:${index * ROW_H + 10}px" title="${escapeAttr(task.name)}">
+      return `<div class="pw-mile${hit}" data-id="${escapeHtml(task.id)}" data-ifc="${task.linkedIfcTaskId ?? ""}" style="left:${left}px;top:${index * ROW_H + (ROW_H - 12) / 2}px" title="${escapeAttr(task.name)}">
         <span class="pw-bar-link is-start" data-link="start"></span>
         <span class="pw-bar-link is-end" data-link="end"></span>
       </div>`;
@@ -1915,7 +1940,7 @@ export class ProjectWorkspace {
       const plan = planFromMappedCsv(this.csvDraft, this.csvDraft.guessed);
       if (this.csvFile) plan.attachments.push(fileToAttachment(this.csvFile, "schedule"));
       this.closeMapper();
-      this.writeImportedPlan(plan);
+      this.writeImportedPlan(plan, { assist: true });
     } catch (err) {
       this.toast((err as Error).message);
     }
@@ -1925,6 +1950,231 @@ export class ProjectWorkspace {
     this.el("mapper")?.classList.add("is-hidden");
     this.csvDraft = null;
     this.csvFile = null;
+  }
+
+  private async startAssist(): Promise<void> {
+    if (!this.opts.onSuggestLinks) {
+      this.toast("Assistente 4D indisponível nesta vista.");
+      return;
+    }
+    const plan = this.plan;
+    if (!plan?.tasks.length) {
+      this.toast("Importe um cronograma (CSV/XML) ou abra as IfcTask do modelo.");
+      return;
+    }
+    if (!this.opts.getSession()) {
+      this.toast("Abra um IFC antes de sugerir ligações.");
+      this.opts.onRequestIfcImport();
+      return;
+    }
+    if (!this.modelOpen) this.opts.onToggleModel?.();
+    this.assistBusy = true;
+    this.assistFilter = "all";
+    this.renderAssistLoading("A ler o modelo IFC e a cruzar com o Gantt…");
+    try {
+      await this.refreshAiStatus();
+      this.assist = await this.opts.onSuggestLinks(plan.tasks);
+      this.renderAssist();
+    } catch (err) {
+      this.closeAssist();
+      this.toast((err as Error).message);
+    } finally {
+      this.assistBusy = false;
+    }
+  }
+
+  private renderAssistLoading(message: string): void {
+    const panel = this.el("assist");
+    if (!panel) return;
+    panel.classList.remove("is-hidden");
+    panel.innerHTML = `
+      <div class="pw-sync-card pw-assist-card">
+        <header>
+          <h3 id="pw-assist-title">Ligações 4D / 5D</h3>
+          <button type="button" class="pw-sync-close" data-act="close" aria-label="Fechar">×</button>
+        </header>
+        <p class="pw-sync-lead pw-assist-busy">${escapeHtml(message)}</p>
+      </div>`;
+  }
+
+  private async refreshAiStatus(): Promise<void> {
+    this.aiStatus = await fetchAiStatus();
+  }
+
+  private aiStatusNote(): string {
+    if (this.aiStatus.configured) {
+      const name = this.aiStatus.provider === "gemini" ? "Gemini" : this.aiStatus.provider === "groq" ? "Groq" : "OpenAI";
+      return `<p class="pw-assist-llm is-on">IA no servidor: <strong>${escapeHtml(name)}</strong> · ${escapeHtml(this.aiStatus.model)}. A chave não sai do backend.</p>`;
+    }
+    return `<p class="pw-assist-llm is-off">IA ainda não configurada no servidor. Coloca <code>AI_API_KEY</code> no <code>.env</code> (Gemini no Google AI Studio) e reinicia o <code>npm run dev</code>.</p>`;
+  }
+
+  private renderAssist(): void {
+    const panel = this.el("assist");
+    const report = this.assist;
+    if (!panel || !report) return;
+    panel.classList.remove("is-hidden");
+    const visible = report.suggestions.filter(
+      (s) =>
+        this.assistFilter === "all" ||
+        s.confidence === this.assistFilter ||
+        (this.assistFilter === "medium" && s.confidence === "high"),
+    );
+    const selected = report.suggestions.filter((s) => s.accepted);
+    const high = report.suggestions.filter((s) => s.confidence === "high").length;
+    const medium = report.suggestions.filter((s) => s.confidence === "medium").length;
+    const low = report.suggestions.filter((s) => s.confidence === "low").length;
+    const rows = visible
+      .map((s) => {
+        const i = report.suggestions.indexOf(s);
+        const cost = s.cost ? formatMoney(s.cost) : "—";
+        return `<tr class="pw-assist-row" data-assist-i="${i}">
+          <td><input type="checkbox" data-act="toggle-row" data-assist-i="${i}" ${s.accepted ? "checked" : ""} aria-label="Aceitar ${escapeAttr(s.name)}" /></td>
+          <td><span class="pw-assist-wbs">${escapeHtml(s.wbs || "—")}</span><strong>${escapeHtml(s.name)}</strong></td>
+          <td>${escapeHtml(s.bucketLabel)} <em>${s.count}</em></td>
+          <td>${escapeHtml(s.startLabel)} → ${escapeHtml(s.endLabel)}</td>
+          <td>${escapeHtml(cost)}</td>
+          <td><span class="pw-assist-conf is-${s.confidence}">${s.confidence === "high" ? "Alta" : s.confidence === "medium" ? "Média" : "Baixa"}</span>${s.source === "llm" ? " <span class='pw-assist-src'>IA</span>" : ""}</td>
+        </tr>`;
+      })
+      .join("");
+    const unmatched = report.unmatched.length
+      ? `<details class="pw-assist-miss"><summary>${report.unmatched.length} atividade${report.unmatched.length === 1 ? "" : "s"} sem proposta</summary>
+          <ul>${report.unmatched
+            .slice(0, 40)
+            .map((u) => `<li><strong>${escapeHtml(u.wbs || u.name)}</strong> — ${escapeHtml(u.reason)}</li>`)
+            .join("")}${report.unmatched.length > 40 ? `<li>… +${report.unmatched.length - 40}</li>` : ""}</ul>
+        </details>`
+      : "";
+    panel.innerHTML = `
+      <div class="pw-sync-card pw-assist-card">
+        <header>
+          <h3 id="pw-assist-title">Ligações 4D / 5D</h3>
+          <button type="button" class="pw-sync-close" data-act="close" aria-label="Fechar">×</button>
+        </header>
+        <p class="pw-sync-lead">Propostas por <strong>nível + tipo IFC + nome</strong>. Datas e custos do CSV mantêm-se. Clique numa linha para isolar no 3D; grave só o que confirmar.</p>
+        <div class="pw-sync-stats pw-assist-stats">
+          <div><dt>Propostas</dt><dd>${report.suggestions.length}</dd></div>
+          <div><dt>Alta / média / baixa</dt><dd>${high} / ${medium} / ${low}</dd></div>
+          <div><dt>Modelo</dt><dd>${report.catalog.products} elem. · ${report.catalog.storeys} níveis</dd></div>
+          <div><dt>Já ligadas</dt><dd>${report.skippedLinked}</dd></div>
+        </div>
+        <div class="pw-assist-filters" role="group" aria-label="Confiança">
+          <button type="button" class="pw-assist-chip${this.assistFilter === "all" ? " is-on" : ""}" data-act="filter" data-filter="all">Todas</button>
+          <button type="button" class="pw-assist-chip${this.assistFilter === "high" ? " is-on" : ""}" data-act="filter" data-filter="high">Alta</button>
+          <button type="button" class="pw-assist-chip${this.assistFilter === "medium" ? " is-on" : ""}" data-act="filter" data-filter="medium">Alta e média</button>
+          <button type="button" class="btn-ghost" data-act="select-high">Só alta</button>
+        </div>
+        <div class="pw-assist-table-wrap">
+          <table class="pw-assist-table">
+            <thead><tr><th></th><th>Atividade</th><th>Elementos IFC</th><th>Datas</th><th>Custo</th><th></th></tr></thead>
+            <tbody>
+              ${
+                rows ||
+                `<tr><td colspan="6">Nenhuma proposta neste recorte. Use a IA para casos ambíguos ou ligue à mão na árvore IFC.</td></tr>`
+              }
+            </tbody>
+          </table>
+        </div>
+        ${unmatched}
+        ${this.aiStatusNote()}
+        <div class="pw-sync-actions">
+          <button type="button" class="btn-primary" data-act="apply" ${selected.length && !this.assistBusy ? "" : "disabled"}>Gravar ${selected.length} ligação${selected.length === 1 ? "" : "ões"}</button>
+          <button type="button" class="btn-secondary" data-act="refine" ${this.assistBusy || !this.aiStatus.configured ? "disabled" : ""}>Refinar com IA</button>
+          <button type="button" class="btn-ghost" data-act="close">Cancelar</button>
+        </div>
+        <p class="pw-sync-note">A IA só recebe um catálogo compacto (níveis, tipos e amostras), não o IFC inteiro. Sem o servidor configurado, as regras locais bastam para nomes típicos (parede, laje, térreo…).</p>
+      </div>`;
+  }
+
+  private onAssistClick = (e: Event): void => {
+    const target = e.target as HTMLElement;
+    if (target.classList.contains("pw-sync")) {
+      this.closeAssist();
+      return;
+    }
+    const act = target.closest("[data-act]")?.getAttribute("data-act");
+    if (act === "close") this.closeAssist();
+    if (act === "apply") this.commitAssist();
+    if (act === "refine") void this.refineAssist();
+    if (act === "select-high") {
+      if (!this.assist) return;
+      for (const s of this.assist.suggestions) s.accepted = s.confidence === "high";
+      this.renderAssist();
+    }
+    if (act === "filter") {
+      const filter = target.closest("[data-filter]")?.getAttribute("data-filter");
+      if (filter === "all" || filter === "high" || filter === "medium") {
+        this.assistFilter = filter;
+        this.renderAssist();
+      }
+    }
+    if (act === "toggle-row") return;
+    const row = target.closest<HTMLElement>("[data-assist-i]");
+    if (row && this.assist && !target.closest("input")) {
+      const i = Number(row.dataset.assistI);
+      const suggestion = this.assist.suggestions[i];
+      if (!suggestion) return;
+      this.selectByIfcTaskId(suggestion.ifcTaskId);
+      this.opts.onPreviewGuids?.(suggestion.guids);
+    }
+  };
+
+  private onAssistChange = (e: Event): void => {
+    const target = e.target as HTMLElement;
+    if (target.getAttribute("data-act") === "toggle-row" && target instanceof HTMLInputElement) {
+      const i = Number(target.dataset.assistI);
+      const row = this.assist?.suggestions[i];
+      if (row) {
+        row.accepted = target.checked;
+        this.renderAssist();
+      }
+    }
+  };
+
+  private async refineAssist(): Promise<void> {
+    if (!this.assist || !this.opts.onRefineLinks) {
+      this.toast("Refinar com IA não está disponível.");
+      return;
+    }
+    await this.refreshAiStatus();
+    if (!this.aiStatus.configured) {
+      this.toast("A IA não está configurada no servidor. Defina AI_API_KEY no .env.");
+      this.renderAssist();
+      return;
+    }
+    this.assistBusy = true;
+    this.renderAssistLoading("A pedir à IA que resolva os casos ambíguos…");
+    try {
+      this.assist = await this.opts.onRefineLinks(this.assist, this.plan?.tasks ?? []);
+      this.renderAssist();
+    } catch (err) {
+      this.renderAssist();
+      this.toast((err as Error).message);
+    } finally {
+      this.assistBusy = false;
+    }
+  }
+
+  private commitAssist(): void {
+    if (!this.assist) return;
+    const items = this.assist.suggestions
+      .filter((s) => s.accepted && s.guids.length && s.ifcTaskId)
+      .map((s) => ({ ifcTaskId: s.ifcTaskId, guids: s.guids }));
+    if (!items.length) {
+      this.toast("Selecione pelo menos uma proposta.");
+      return;
+    }
+    this.opts.onApplyLinkSuggestions?.(items);
+    const n = items.reduce((sum, i) => sum + i.guids.length, 0);
+    this.closeAssist();
+    this.toast(`${items.length} atividade${items.length === 1 ? "" : "s"} ligadas a ${n} elemento${n === 1 ? "" : "s"}.`);
+  }
+
+  private closeAssist(): void {
+    this.assist = null;
+    this.assistBusy = false;
+    this.el("assist")?.classList.add("is-hidden");
   }
 
   private toast(msg: string): void {

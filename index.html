@@ -301,7 +301,7 @@
                       <small id="ep-source"></small>
                     </div>
                   </div>
-                  <button type="button" class="earth-panel-close" id="earth-panel-close" aria-label="Ocultar painel" title="Ocultar painel — o terreno continua visível">
+                  <button type="button" class="earth-panel-close" id="earth-panel-close" aria-label="Ocultar painel" title="Ocultar painel">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
                       <path d="M6 6l12 12M18 6L6 18" stroke-linecap="round" />
                     </svg>
@@ -324,7 +324,7 @@
                         id="ep-paste"
                         class="ep-text"
                         type="text"
-                        placeholder="−23.56, −46.65"
+                        placeholder="cola o URL completo ou −23.56, −46.65"
                         autocomplete="off"
                       />
                     </div>
@@ -373,7 +373,7 @@
                     </div>
                   </section>
 
-                  <section class="ep-section">
+                  <section class="ep-section ep-earth-only">
                     <div class="ep-row">
                       <div class="ep-label-row">
                         <label for="ep-terrain-y">Terreno Google</label>
@@ -484,10 +484,31 @@
               <button type="button" class="is-active" data-ms-tab="tree" role="tab" aria-selected="true">Árvore</button>
               <button type="button" data-ms-tab="sets" role="tab" aria-selected="false">Conjuntos</button>
             </div>
-            <div class="model-sets-search">
-              <input type="search" id="ifc-tree-search" placeholder="Filtrar" autocomplete="off" />
-            </div>
             <div class="model-sets-body" data-ms-pane="tree">
+              <div class="ifc-tree-tools">
+                <div class="ifc-view-seg" role="radiogroup" aria-label="Organização da árvore IFC">
+                  <button type="button" class="is-active" data-ifc-view="hierarchy" aria-pressed="true" title="Projeto, edifício, espaços e elementos">
+                    Hierarquia
+                  </button>
+                  <button type="button" data-ifc-view="levels" aria-pressed="false" title="Um ramo por IfcBuildingStorey">
+                    Níveis
+                  </button>
+                  <button type="button" data-ifc-view="types" aria-pressed="false" title="Agrupar por classe IFC (parede, laje, porta…)">
+                    Elementos
+                  </button>
+                </div>
+                <div class="ifc-tree-selects">
+                  <label class="ifc-tree-select" id="ifc-tree-model-wrap">
+                    <span>Modelo</span>
+                    <select id="ifc-tree-model" aria-label="Filtrar por modelo IFC"></select>
+                  </label>
+                  <label class="ifc-tree-select" id="ifc-tree-type-wrap">
+                    <span>Tipo IFC</span>
+                    <select id="ifc-tree-type" aria-label="Filtrar por tipo de elemento IFC"></select>
+                  </label>
+                </div>
+                <input type="search" id="ifc-tree-search" class="ifc-tree-search" placeholder="Filtrar nome, tipo ou GUID" autocomplete="off" />
+              </div>
               <div id="ifc-tree" class="ifc-tree"></div>
             </div>
             <div class="model-sets-body is-hidden" data-ms-pane="sets">

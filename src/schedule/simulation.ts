@@ -22,9 +22,8 @@ export interface SimulationStateBuckets {
  * active > pending > done
  * (uma task ainda em execucao "trava" o produto em amarelo).
  *
- * Produtos só ligados a tarefas SEM data não entram na simulação 4D:
- * ficam visíveis se forem construção; volumes espaciais (IfcSpace, etc.)
- * são ocultados pelo highlighter.
+ * Produtos só ligados a tarefas SEM data (e geometria sem ligação)
+ * não entram nos buckets: o highlighter oculta-os depois de iniciar a 4D.
  */
 export function computeStateBuckets(
   schedule: ScheduleData,

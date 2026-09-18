@@ -69,7 +69,8 @@ export function scheduleToJson(schedule: ScheduleData): JsonSchedule {
 export function scheduleFromJson(raw: unknown): ScheduleData | null {
   if (!raw || typeof raw !== "object") return null;
   const j = raw as Partial<JsonSchedule>;
-  if (j.v !== 1 || !Array.isArray(j.roots)) return null;
+  if (!Array.isArray(j.roots)) return null;
+  if (j.v != null && j.v !== 1) return null;
   const out = emptySchedule();
   out.projectId = j.projectId;
   out.workPlanId = j.workPlanId;

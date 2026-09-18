@@ -11,12 +11,15 @@ import { InspectorUI } from "./ui/inspector";
 import { SimHud } from "./ui/simHud";
 import { GoogleEarthLayer, type AnchorLLA } from "./viewer/earthTiles";
 import { EarthPanel } from "./ui/earthPanel";
-import { ModelGizmo } from "./viewer/modelGizmo";
-import { emptyExtraTransform, extraIsIdentity, extraFromObject, applyExtraToObject, georefSourceLabel, hasStoredSiteElevation, threeWorldToIfc } from "./ifc/georef";
+import { ModelGizmo, type GizmoMode } from "./viewer/modelGizmo";
+import { emptyExtraTransform, extraIsIdentity, extraFromObject, applyExtraToObject, georefSourceLabel, hasGeographicAnchor, hasStoredSiteElevation, threeWorldToIfc } from "./ifc/georef";
 import { initPanelSplitters, constrainPanelWidths } from "./ui/splitters";
 import { initModuleNav } from "./ui/moduleNav";
 import { initAppShell } from "./ui/appShell";
 import { ProjectWorkspace } from "./ui/projectWorkspace";
+import { buildBimCatalog, compactCatalog, type BimCatalog } from "./projectPlan/bimCatalog";
+import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projectPlan/linkAssist";
+import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
@@ -33,6 +36,7 @@ import { hasIfcBytes, loadIfcBytes, saveIfcBytes } from "./ifc/stepStore";
 import { getCachedModel, hashIfcBytes, saveCachedModel } from "./ifc/fragCache";
 import {
   downloadBytes,
+  isCoordinationEntry,
   isVtwinFileName,
   listOrphanSummary,
   looksLikeZip,
@@ -56,6 +60,23 @@ import { requestFragmentsUpdate } from "./viewer/fragmentsUpdate";
 import { ViewportModelRegistry } from "./viewer/modelRegistry";
 
 const WASM_URL = "/wasm/";
+
+function showEarthStatus(message: string | null): void {
+  let el = document.getElementById("earth-status");
+  if (!message) {
+    el?.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement("p");
+    el.id = "earth-status";
+    el.className = "earth-status";
+    el.setAttribute("role", "alert");
+    document.querySelector(".viewport-stage")?.appendChild(el);
+  }
+  el.hidden = false;
+  el.textContent = message;
+}
 
 async function main() {
   const overlay = document.getElementById("loader-overlay")!;
@@ -117,6 +138,13 @@ async function main() {
     return models.disciplines.find((m) => m.visible) ?? models.disciplines[0];
   };
 
+  /** Canteiro / recorte do terreno: sempre o extra da COORD, nunca o da disciplina ativa. */
+  const siteExtra = () => models.coordination?.session.getExtraTransform() ?? emptyExtraTransform();
+  const skipFitIds = () =>
+    models.all
+      .filter((m) => m.role === "coordination" || /^coord$/i.test(m.fileName.replace(/\.ifc$/i, "")))
+      .map((m) => m.id);
+
   const ensurePlanning = (): LoadedIfc | null => {
     if (!models.size) return null;
     if (models.coordination) return models.coordination;
@@ -126,11 +154,6 @@ async function main() {
       session,
       models.disciplines.map((d) => d.session),
     );
-    void persistCoordinationSession(session)
-      .then((hash) => {
-        entry.hash = hash;
-      })
-      .catch((err) => console.warn("COORD.ifc:", err));
     return entry;
   };
 
@@ -152,6 +175,7 @@ async function main() {
   let lastDate = new Date();
   let scheduleRef: ScheduleData | null = null;
   let highlighter: ScheduleHighlighter | null = null;
+  let lastAssistCatalog: BimCatalog | null = null;
   let simHud: SimHud | null = null;
   let loading = false;
   let dirty = true;
@@ -304,11 +328,67 @@ async function main() {
         onNativeChange: (info) => onGanttNativeChange(info),
         onDropGuids: (ifcTaskId, guids) => assignGuidsToFederatedTask(ifcTaskId, guids),
         onDropGroup: (ifcTaskId, groupId) => assignGroupToFederatedTask(ifcTaskId, groupId),
+        onSuggestLinks: async (tasks) => {
+          if (!highlighter) throw new Error("O visualizador 3D ainda não está pronto.");
+          const entries = models.visible
+            .filter((m) => m.role !== "coordination" && !/^coord$/i.test(m.fileName.replace(/\.ifc$/i, "")))
+            .map((m) => {
+              const model = viewportModels.get(m.id);
+              return model ? { model, modelId: m.id, label: m.displayName } : null;
+            })
+            .filter((item): item is { model: NonNullable<ReturnType<typeof viewportModels.get>>; modelId: string; label: string } => !!item);
+          if (!entries.length) {
+            throw new Error("Não há modelo IFC com geometria visível. Importe um IFC de disciplina (não só o COORD).");
+          }
+          const catalog = await buildBimCatalog(entries, highlighter);
+          lastAssistCatalog = catalog;
+          if (!catalog.buckets.length) {
+            throw new Error("Não encontrei elementos com geometria para ligar (paredes, lajes, etc.).");
+          }
+          return suggestProductLinks(tasks, catalog);
+        },
+        onRefineLinks: async (report, tasks) => {
+          const catalog = lastAssistCatalog;
+          if (!catalog) throw new Error("Volte a gerar as sugestões antes de refinar com IA.");
+          const picks = await refineWithAi({
+            tasks: compactTasksForLlm(tasks, report),
+            buckets: compactCatalog(catalog),
+          });
+          if (!picks.length) throw new Error("A IA não devolveu correspondências utilizáveis.");
+          return applyLlmPicks(report, catalog, tasks, picks);
+        },
+        onPreviewGuids: (guids) => {
+          void focusGuidsInView(guids);
+        },
+        onApplyLinkSuggestions: (items) => {
+          let lastGuids: string[] = [];
+          for (const item of items) {
+            const taskRef = resolvePlanningTask(item.ifcTaskId);
+            if (!taskRef) continue;
+            const members = item.guids.map((guid) => {
+              const ownerId = highlighter?.guidModelId(guid);
+              const localId = ownerId ? highlighter?.localIdOf(guid, ownerId) : undefined;
+              return { guid, expressIdHint: localId };
+            });
+            try {
+              const { guids } = taskRef.session.addProductsToTask(taskRef.nativeId, members);
+              lastGuids = guids;
+              projectWs?.applyProductGuids(item.ifcTaskId, guids);
+              bumpSimulation(item.guids);
+            } catch (err) {
+              projectWs?.notify((err as Error).message);
+            }
+          }
+          markIfcDirty();
+          refreshFederatedView({ structure: true });
+          if (lastGuids.length) void focusGuidsInView(lastGuids);
+        },
       })
     : null;
 
   let pauseTimeline = () => {};
   let disablePlanVizTools = () => {};
+  let restorePlanVizTools = () => {};
   let onLogisticsWorkspace = () => {};
   let highlightPlanTask: (task: { linkedIfcTaskId?: number } | null) => void = () => {};
   let focusGuidsInView = async (_guids: Iterable<string>, _opts?: { fit?: boolean }) => {};
@@ -317,6 +397,7 @@ async function main() {
   let setPlanModelOpen = (_open: boolean) => {};
   let refreshFederatedView = (_opts?: { structure?: boolean }) => {};
   let renderModelLayers = () => {};
+  let refitVisibleModels = () => {};
 
   const syncWorkspaceChrome = (id: WorkspaceId) => {
     const shellKind = workspaceShell(id);
@@ -328,8 +409,9 @@ async function main() {
     if (shellKind !== "schedule" && shellKind !== "logistics") {
       pauseTimeline();
       disablePlanVizTools();
-    } else if (shellKind !== "schedule") {
-      pauseTimeline();
+    } else {
+      if (shellKind !== "schedule") pauseTimeline();
+      restorePlanVizTools();
     }
     if (shellKind === "plan") {
       dirty = false;
@@ -348,6 +430,10 @@ async function main() {
         toggleSchedule.title = "Ocultar";
         toggleSchedule.setAttribute("aria-label", "Ocultar");
       }
+      void highlighter?.clearIsolation().then(() => {
+        dirty = true;
+        refitVisibleModels();
+      });
     } else if (shellKind === "logistics") {
       setPlanModelOpen(false);
       dirty = true;
@@ -567,10 +653,11 @@ async function main() {
         setStatus("Projeto");
         ensurePlanning();
         const coord = models.coordination;
-        if (coord && !coord.hash) {
-          coord.hash = await persistCoordinationSession(coord.session);
-        }
         if (coord) {
+          coord.session.markPlanningForExport();
+          if (!coord.hash || coord.session.dirty) {
+            coord.hash = await persistCoordinationSession(coord.session);
+          }
           for (const d of models.disciplines) {
             d.session.syncCoordinationBindings(coord.session.schedule);
           }
@@ -584,7 +671,8 @@ async function main() {
             if (!extraIsIdentity(extra)) entry.session.hydrateExtraTransform(extra);
           }
           let ifc: Uint8Array;
-          if (entry.session.dirty) {
+          const hasPlanning = entry.session.dirty;
+          if (hasPlanning) {
             ifc = await entry.session.exportBytes();
             entry.hash = entry.session.sourceHash ?? (await hashIfcBytes(ifc));
           } else if (entry.hash) {
@@ -763,6 +851,9 @@ async function main() {
       viewportEl.closest<HTMLElement>(".viewport-stage") ?? viewportEl,
     );
     highlighter = new ScheduleHighlighter(viewer.fragments);
+    refitVisibleModels = () => {
+      void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
+    };
     let modelGizmo: ModelGizmo | null = null;
     let walk: FirstPersonController | null = null;
     let lastWalkFragUpdate = 0;
@@ -818,7 +909,7 @@ async function main() {
       refreshWorkingUi();
       if (opts.fit !== false && ids.length) {
         const sets = highlighter.selectionItems();
-        if (sets.length) await fitCameraToItemSets(viewer, sets);
+        if (sets.length) await fitCameraToItemSets(viewer, sets, { skipModelIds: skipFitIds() });
       }
     };
 
@@ -828,8 +919,8 @@ async function main() {
         return;
       }
       const sets = highlighter?.selectionItems() ?? [];
-      if (sets.some((s) => s.localIds.length)) void fitCameraToItemSets(viewer, sets);
-      else void fitCameraToVisibleModels(viewer);
+      if (sets.some((s) => s.localIds.length)) void fitCameraToItemSets(viewer, sets, { skipModelIds: skipFitIds() });
+      else void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
     };
 
     highlightPlanTask = (task) => {
@@ -909,6 +1000,11 @@ async function main() {
           },
         })
       : null;
+    ifcTree?.attachFilterUi({
+      modelSelect: document.getElementById("ifc-tree-model") as HTMLSelectElement | null,
+      typeSelect: document.getElementById("ifc-tree-type") as HTMLSelectElement | null,
+      viewButtons: document.querySelectorAll<HTMLButtonElement>("[data-ifc-view]"),
+    });
     const setsList = setsListEl
       ? new SelectionSetsList(setsListEl, {
           onCreate: () => createSetFromSelection(),
@@ -1263,6 +1359,7 @@ async function main() {
       if (pane?.classList.contains("is-hidden")) return;
       applyIfcRelations(false);
       const entries = models.visible
+        .filter((m) => m.role !== "coordination" && !/^coord$/i.test(m.fileName.replace(/\.ifc$/i, "")))
         .map((m) => ({ entry: m, model: viewportModels.get(m.id) }))
         .filter((item): item is { entry: (typeof models.visible)[number]; model: NonNullable<typeof item.model> } => !!item.model)
         .map((m) => ({
@@ -1290,36 +1387,51 @@ async function main() {
       const extra = m.session.getExtraTransform();
       applyExtraToObject(viewportModel.object, extra);
       gizmo.fitSize(viewportModel.object);
-      earth.setClipCenter(extra.x, extra.y, extra.z);
+      const site = siteExtra();
+      earth.setClipCenter(site.x, site.y, site.z);
     };
 
     const applyActiveGeoref = (opts: { snap?: boolean; resetGizmo?: boolean } = {}) => {
-      const planning = models.coordination?.session ?? models.active?.session;
       const mesh = meshEntry();
-      const session = planning ?? mesh?.session;
-      if (!session) return;
-      const georef = planning?.schedule.georef ?? mesh?.session.schedule.georef;
+      const coordGeo = models.coordination?.session.schedule.georef;
+      const meshGeo = mesh?.session.schedule.georef;
+      if (models.coordination && !hasGeographicAnchor(coordGeo) && hasGeographicAnchor(meshGeo)) {
+        models.coordination.session.schedule.georef = { ...meshGeo };
+      }
+      const georef = [models.coordination?.session.schedule.georef, meshGeo].find(hasGeographicAnchor) ?? coordGeo ?? meshGeo;
+      if (!models.coordination && !mesh) return;
+      const extra = mesh?.session.getExtraTransform() ?? emptyExtraTransform();
       const storedAlt = georef?.elevation;
       const hasAlt = hasStoredSiteElevation(storedAlt);
-      const extra = mesh?.session.getExtraTransform() ?? session.getExtraTransform();
-      const anchor: AnchorLLA =
-        georef?.lat != null && georef.lon != null
-          ? {
-              lat: georef.lat,
-              lon: georef.lon,
-              altitude: hasAlt ? storedAlt! : 0,
-              heading: georef.heading,
-            }
-          : { ...FALLBACK_ANCHOR, heading: georef?.heading ?? 0 };
-      earth.setAnchor(anchor, { snap: !!opts.snap && !hasAlt && earth.enabled });
+      const live = earth.getAnchor();
+      if (hasGeographicAnchor(georef)) {
+        const anchor: AnchorLLA = {
+          lat: georef.lat,
+          lon: georef.lon,
+          altitude: hasAlt ? storedAlt! : 0,
+          heading: georef.heading,
+        };
+        earth.setAnchor(anchor, { snap: !!opts.snap && !hasAlt && earth.enabled });
+        if (hasAlt) earthPanel?.setTerrainHeight(anchor.altitude);
+        else earthPanel?.setTerrainHeight(null, earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC");
+      } else if (hasGeographicAnchor({ source: "none", heading: 0, lat: live.lat, lon: live.lon })) {
+        if (opts.snap && earth.enabled) earth.requestTerrainSnap();
+        earthPanel?.setTerrainHeight(
+          hasStoredSiteElevation(live.altitude) ? live.altitude : null,
+          earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC",
+        );
+      } else {
+        earth.setAnchor({ ...FALLBACK_ANCHOR, heading: georef?.heading ?? 0 }, { snap: !!opts.snap && earth.enabled });
+        earthPanel?.setTerrainHeight(null, earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC");
+      }
       earthPanel?.setState({
-        anchor,
+        anchor: earth.getAnchor(),
         hideRadius: earth.getHideRadius(),
         transform: extra,
       });
-      if (hasAlt) earthPanel?.setTerrainHeight(anchor.altitude);
-      else earthPanel?.setTerrainHeight(null, earth.enabled ? "a amostrar o terreno…" : "Assentar grava a cota no IFC");
-      earthPanel?.setSource(georef ? georefSourceLabel(georef) : "IFC sem coordenadas geográficas");
+      earthPanel?.setSource(
+        hasGeographicAnchor(georef) ? georefSourceLabel(georef) : "IFC sem coordenadas geográficas",
+      );
       attachGizmoToActive(opts.resetGizmo === true);
       earthPanel?.setMode(null);
       syncGizmo();
@@ -1387,6 +1499,7 @@ async function main() {
       heading: 0,
     };
     const apiKey = (import.meta.env?.VITE_GOOGLE_MAP_TILES_API_KEY as string | undefined) ?? "";
+    let earthWanted = false;
     let applyTerrainSnap: (alt: number) => void = () => {};
     let refreshSiteVisual = () => {};
     let onEarthTilesReady = () => {};
@@ -1399,6 +1512,11 @@ async function main() {
       onTerrainSnapFail: () => {
         earthPanel?.setTerrainHeight(null, "sem malha — clica Assentar outra vez");
       },
+      onLoadError: (message) => {
+        earthPanel?.setTerrainHeight(null, message);
+        showEarthStatus(message);
+        setEarthEnabledUi(earth.enabled);
+      },
       onTilesReady: () => onEarthTilesReady(),
     });
 
@@ -1408,7 +1526,7 @@ async function main() {
       btnEarthSettings?.classList.toggle("is-active", open);
       btnEarthSettings?.setAttribute("aria-pressed", open ? "true" : "false");
       if (btnEarthSettings) {
-        btnEarthSettings.title = open ? "Ocultar parâmetros do terreno" : "Mostrar parâmetros do terreno";
+        btnEarthSettings.title = open ? "Ocultar posição do modelo" : "Mostrar posição do modelo";
       }
       refreshLayoutRestore();
     };
@@ -1419,12 +1537,12 @@ async function main() {
       camera: viewer.world.camera as import("@thatopen/components").OrthoPerspectiveCamera,
       domElement: viewer.world.renderer!.three.domElement,
       onChange: (t) => {
-        earth.setClipCenter(t.x, t.y, t.z);
         earthPanel?.setTransform(t);
         const mesh = meshEntry();
         mesh?.session.setExtraTransform(t);
         if (mesh && !extraIsIdentity(t)) markIfcDirty();
-        refreshSiteVisual();
+        const site = siteExtra();
+        earth.setClipCenter(site.x, site.y, site.z);
       },
     });
     viewer.world.onCameraChanged.add(() => gizmo.updateCamera());
@@ -1458,7 +1576,7 @@ async function main() {
                 altitude: prev.altitude,
                 heading: prev.heading,
               },
-              { snap: geoMoved },
+              { snap: geoMoved && earth.enabled },
             );
             earth.setHideRadius(state.hideRadius);
             if (geoMoved && (models.active || models.coordination)) {
@@ -1473,11 +1591,11 @@ async function main() {
           },
           onTransformChange: (t) => {
             gizmo.apply(t);
-            earth.setClipCenter(t.x, t.y, t.z);
             const mesh = meshEntry();
             mesh?.session.setExtraTransform(t);
             if (mesh && !extraIsIdentity(t)) markIfcDirty();
-            refreshSiteVisual();
+            const site = siteExtra();
+            earth.setClipCenter(site.x, site.y, site.z);
           },
           onTerrainY: (delta) => {
             earth.raiseTerrain(delta);
@@ -1500,24 +1618,32 @@ async function main() {
       : null;
 
     const syncGizmo = () => {
-      const allow = earth.enabled && !walk?.enabled;
+      const allow = workspaceHasEarth(nav.getWorkspace()) && !walk?.enabled;
       gizmo.setAllowed(allow);
       if (!allow) earthPanel?.setMode(null);
+      if (btnEarthSettings) btnEarthSettings.hidden = !allow;
+    };
+
+    const toggleGizmoMode = (mode: GizmoMode) => {
+      if (!workspaceHasEarth(nav.getWorkspace()) || walk?.enabled) return;
+      const next = gizmo.getMode() === mode ? null : mode;
+      gizmo.setMode(next);
+      earthPanel?.setMode(next);
     };
 
     const setEarthEnabledUi = (enabled: boolean) => {
       btnEarth?.classList.toggle("is-active", enabled);
       btnEarth?.setAttribute("aria-pressed", enabled ? "true" : "false");
       if (btnEarth) btnEarth.title = enabled ? "Ocultar contexto Google Earth" : "Mostrar contexto Google Earth";
+      earthPanelRoot?.classList.toggle("is-earth-on", enabled);
       syncGizmo();
-      if (btnEarthSettings) btnEarthSettings.hidden = !enabled;
       if (enabled && !walk?.enabled) setEarthPanelOpen(true);
-      else if (!enabled) setEarthPanelOpen(false);
       const q = deviceGraphicsQuality();
       setAllModelsQuality(viewer.fragments, enabled ? Math.min(q, 0.45) : q);
       setWorldGridVisible(viewer.world, !enabled);
       refreshSiteVisual();
     };
+    syncGizmo();
 
     const canvas = viewer.world.renderer!.three.domElement;
     if (btnWalk && walkOverlay && walkHint) {
@@ -1559,10 +1685,9 @@ async function main() {
 
     const refreshSiteVisualNow = (draft?: import("three").Vector3[], skipUi = false) => {
       const planning = models.coordination?.session ?? models.active?.session;
-      const mesh = meshEntry();
-      const extra = mesh?.session.getExtraTransform() ?? emptyExtraTransform();
-      const limit = planning?.getSiteLimit() ?? mesh?.session.getSiteLimit() ?? null;
-      if (earth.enabled) {
+      const extra = siteExtra();
+      const limit = planning?.getSiteLimit() ?? null;
+      if (earth.hasTiles()) {
         const clip = siteOverlay.clipPolygon(limit, extra);
         if (clip) earth.setSiteClip(clip.xz, clip.yMin, clip.yMax);
         else earth.setSiteClip(null);
@@ -1593,14 +1718,13 @@ async function main() {
       },
       onComplete: (worldPts) => {
         const session = planningSession();
-        const mesh = meshEntry();
         logisticsWs?.setDrawing(false);
         setDrawHint(null);
         if (!session || worldPts.length < 3) {
           refreshSiteVisual();
           return;
         }
-        const extra = mesh?.session.getExtraTransform() ?? session.getExtraTransform();
+        const extra = siteExtra();
         const ifcPts = worldPts.map((p) => threeWorldToIfc(p, extra));
         const z = ifcPts.reduce((s, p) => s + p.z, 0) / ifcPts.length;
         const prev = session.getSiteLimit();
@@ -1636,7 +1760,7 @@ async function main() {
       ? new LogisticsWorkspace(logisticsRoot, {
           hasModel: () => models.size > 0,
           getLimit: () => (models.coordination?.session ?? models.active?.session)?.getSiteLimit() ?? null,
-          getExtra: () => meshEntry()?.session.getExtraTransform() ?? emptyExtraTransform(),
+          getExtra: () => siteExtra(),
           onDraw: () => {
             const mesh = meshEntry();
             if (!mesh && !models.size) {
@@ -1644,13 +1768,20 @@ async function main() {
               return;
             }
             ensurePlanning();
-            siteDraw.setPlaneY(mesh?.session.getExtraTransform().y ?? 0);
+            siteDraw.setPlaneY(siteExtra().y);
             logisticsWs?.setDrawing(true);
             siteDraw.startDraw();
             setDrawHint("Clica no terreno para os vértices do canteiro");
             if (apiKey && !earth.enabled) {
-              void earth.setEnabled(true).then(() => {
+              earthWanted = true;
+              void earth.setEnabled(true).then((how) => {
                 setEarthEnabledUi(earth.enabled);
+                if (earth.enabled) {
+                  showEarthStatus(null);
+                  applyActiveGeoref({ snap: how === "created" });
+                }
+              }).catch((err) => {
+                showEarthStatus((err as Error).message);
               });
             }
           },
@@ -1684,10 +1815,14 @@ async function main() {
         if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);
         if (apiKey && !earth.enabled) {
           try {
-            await earth.setEnabled(true);
+            earthWanted = true;
+            const how = await earth.setEnabled(true);
             setEarthEnabledUi(true);
+            showEarthStatus(null);
+            applyActiveGeoref({ snap: how === "created" });
           } catch (err) {
             console.warn("Terreno Google não ativou na logística:", err);
+            showEarthStatus((err as Error).message);
           }
         }
       })();
@@ -1696,18 +1831,30 @@ async function main() {
 
     disablePlanVizTools = () => {
       if (walk?.enabled) walk.disable();
-      gizmo.setAllowed(false);
-      earthPanel?.setMode(null);
+      syncGizmo();
+      setEarthPanelOpen(false);
+      showEarthStatus(null);
       if (earth.enabled) {
         void earth.setEnabled(false).then(() => setEarthEnabledUi(false));
-      } else {
-        setEarthPanelOpen(false);
       }
+    };
+    restorePlanVizTools = () => {
+      syncGizmo();
+      if (!earthWanted || !apiKey || earth.enabled) return;
+      if (!workspaceHasEarth(nav.getWorkspace())) return;
+      void earth.setEnabled(true).then((how) => {
+        setEarthEnabledUi(earth.enabled);
+        if (earth.enabled) {
+          showEarthStatus(null);
+          applyActiveGeoref({ snap: how === "created" });
+        }
+      }).catch((err) => {
+        showEarthStatus((err as Error).message);
+      });
     };
 
     btnEarthSettings?.addEventListener("click", () => {
       if (!workspaceHasEarth(nav.getWorkspace())) return;
-      if (!earth.enabled) return;
       setEarthPanelOpen(!earthPanel?.isVisible());
     });
 
@@ -1721,13 +1868,22 @@ async function main() {
         return;
       }
       const next = !earth.enabled;
+      earthWanted = next;
       try {
-        await earth.setEnabled(next);
+        const how = await earth.setEnabled(next);
         setEarthEnabledUi(earth.enabled);
+        if (next) {
+          showEarthStatus(null);
+          applyActiveGeoref({ snap: how === "created" });
+        } else {
+          showEarthStatus(null);
+        }
         if (walk?.enabled) earth.setWalkQuality(true);
       } catch (err) {
         console.error("Falha a (des)ativar Google Earth:", err);
-        window.alert(`Nao foi possivel ativar a camada Google Earth: ${(err as Error).message}`);
+        const message = (err as Error).message;
+        showEarthStatus(message);
+        window.alert(`Não foi possível ativar o Google Earth: ${message}`);
       }
     });
 
@@ -1889,20 +2045,21 @@ async function main() {
       let schema: import("./ifc/stepText").IfcSchemaKind;
       const packWarm = !!(opts?.frag && opts.schedule && opts.index && opts.schema);
       const cacheWarm = cached?.warmReady === true && !!cached.schedule && !!cached.index && !!cached.manifest;
+      const packedSchedule = opts?.schedule && opts.schedule.roots.length ? opts.schedule : null;
       const warm = packWarm || cacheWarm;
 
       if (packWarm) {
         setStatus("3D");
-        schedule = opts.schedule!;
+        schedule = packedSchedule ?? opts.schedule!;
         index = opts.index!;
         schema = opts.schema!;
         loaded = await loadFragments(viewer, opts.frag!, modelId);
         markLoad("vista:warm-load", "vista:cache");
       } else if (cacheWarm) {
         setStatus("3D");
-        schedule = cached.schedule!;
-        index = cached.index!;
-        schema = cached.manifest!.ifcSchema;
+        schedule = packedSchedule ?? cached.schedule!;
+        index = opts?.index ?? cached.index!;
+        schema = opts?.schema ?? cached.manifest!.ifcSchema;
         loaded = await loadFragments(viewer, cached.frag, modelId);
         markLoad("vista:warm-load", "vista:cache");
       } else {
@@ -1935,7 +2092,8 @@ async function main() {
           () => ({ modelId }),
         );
         schedule =
-          fromFragments ??
+          packedSchedule ??
+          (fromFragments && fromFragments.roots.length ? fromFragments : null) ??
           (await measureAsync(
             "vista:schedule:web-ifc-fallback",
             () => parseSchedule(prepared.bytes, WASM_URL),
@@ -2022,7 +2180,7 @@ async function main() {
       refreshInspector();
       refreshCost5d();
       markLoad("vista:load", "vista:load:start");
-      if (!opts?.skipFit) void fitCameraToVisibleModels(viewer);
+      if (!opts?.skipFit) void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
     };
 
     const loadFromBuffer = async (buffer: Uint8Array, fileName: string) => {
@@ -2045,7 +2203,15 @@ async function main() {
     }) => {
       const hash = member.entry.hash || (await hashIfcBytes(member.ifc));
       if (!(await hasIfcBytes(hash))) await saveIfcBytes(hash, member.ifc);
-      const schedule = member.schedule ?? emptySchedule();
+      let schedule = member.schedule && member.schedule.roots.length ? member.schedule : null;
+      if (!schedule && member.ifc.byteLength) {
+        try {
+          schedule = await parseSchedule(member.ifc, WASM_URL);
+        } catch (err) {
+          console.warn("Cronograma da COORD a partir do IFC:", err);
+        }
+      }
+      schedule ??= emptySchedule();
       const session = new IfcSession(member.ifc, member.entry.fileName, schedule, {
         index: member.index ?? undefined,
         storeHash: hash,
@@ -2085,28 +2251,47 @@ async function main() {
         selectedTask = null;
       }
       projectName = unpacked.manifest.name || fileName.replace(/\.vtwin$/i, "");
+      const members = [...unpacked.models].sort(
+        (a, b) =>
+          Number(isCoordinationEntry(b.entry, unpacked.manifest.rootId)) -
+          Number(isCoordinationEntry(a.entry, unpacked.manifest.rootId)),
+      );
       let index = 0;
-      for (const member of unpacked.models) {
-        setStatus(`${member.entry.fileName} (${index + 1}/${unpacked.models.length})`);
-        if (member.entry.role === "coordination") {
+      for (const member of members) {
+        setStatus(`${member.entry.fileName} (${index + 1}/${members.length})`);
+        if (isCoordinationEntry(member.entry, unpacked.manifest.rootId)) {
           await finishCoordinationModel(member);
           const entry = models.get(member.entry.id);
           if (entry && !member.entry.visible) models.setVisible(entry.id, false);
           index += 1;
           continue;
         }
-        const ingested = await ingestIfc(member.ifc, member.entry.fileName, {
-          modelId: member.entry.id,
-          skipDuplicateCheck: true,
-          frag: member.frag,
-          schedule: member.schedule,
-          index: member.index,
-          schema: member.entry.schema,
-        });
-        if (!ingested) continue;
+        let ingested: Awaited<ReturnType<typeof ingestIfc>> = null;
+        try {
+          ingested = await ingestIfc(member.ifc, member.entry.fileName, {
+            modelId: member.entry.id,
+            skipDuplicateCheck: true,
+            frag: member.frag,
+            schedule: member.schedule,
+            index: member.index,
+            schema: member.entry.schema,
+          });
+        } catch (err) {
+          console.warn(`IFC «${member.entry.fileName}» no projeto:`, err);
+        }
+        if (!ingested) {
+          if (member.schedule && member.schedule.roots.length) {
+            await finishCoordinationModel(member);
+            const fallback = models.get(member.entry.id);
+            if (fallback && !member.entry.visible) models.setVisible(fallback.id, false);
+            index += 1;
+            continue;
+          }
+          continue;
+        }
         await finishLoadedModel(ingested, {
           extra: member.entry.extra,
-          skipFit: index < unpacked.models.length - 1,
+          skipFit: index < members.length - 1,
         });
         const entry = models.get(ingested.modelId);
         if (entry && !member.entry.visible) {
@@ -2174,7 +2359,7 @@ async function main() {
       refreshInspector();
       refreshCost5d();
       setLoading(false);
-      void fitCameraToVisibleModels(viewer);
+      void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
       window.alert(listOrphanSummary(report, entry.displayName));
     };
 
@@ -2399,18 +2584,14 @@ async function main() {
           setPanelOpen("inspector", !!grid?.classList.contains("inspector-collapsed"));
           return;
         }
-        if (earth.enabled && (e.code === "KeyG" || e.code === "KeyT")) {
+        if (e.code === "KeyG" || (earth.enabled && e.code === "KeyT")) {
           e.preventDefault();
-          const next = gizmo.getMode() === "translate" ? null : "translate";
-          gizmo.setMode(next);
-          earthPanel?.setMode(next);
+          toggleGizmoMode("translate");
           return;
         }
-        if (earth.enabled && e.code === "KeyR") {
+        if (e.code === "KeyR") {
           e.preventDefault();
-          const next = gizmo.getMode() === "rotate" ? null : "rotate";
-          gizmo.setMode(next);
-          earthPanel?.setMode(next);
+          toggleGizmoMode("rotate");
         }
         return;
       }
@@ -2466,16 +2647,12 @@ async function main() {
       } else if (e.code === "KeyT" && !earth.enabled) {
         e.preventDefault();
         setPanelOpen("timeline", !!grid?.classList.contains("timeline-collapsed"));
-      } else if (earth.enabled && (e.code === "KeyG" || e.code === "KeyT")) {
+      } else if (e.code === "KeyG" || (earth.enabled && e.code === "KeyT")) {
         e.preventDefault();
-        const next = gizmo.getMode() === "translate" ? null : "translate";
-        gizmo.setMode(next);
-        earthPanel?.setMode(next);
-      } else if (earth.enabled && e.code === "KeyR") {
+        toggleGizmoMode("translate");
+      } else if (e.code === "KeyR") {
         e.preventDefault();
-        const next = gizmo.getMode() === "rotate" ? null : "rotate";
-        gizmo.setMode(next);
-        earthPanel?.setMode(next);
+        toggleGizmoMode("rotate");
       }
     });
 
