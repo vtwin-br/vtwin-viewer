@@ -97,7 +97,7 @@ export const APP_MODULES: AppModule[] = [
         id: "site-plan",
         label: "Logística",
         hint: "Equipamentos e quantidades",
-        description: "Guindaste, caminho, terreno e anotação no plano de obra",
+        description: "Guindaste, camião, caminho, terreno e anotação no plano de obra",
         workspace: "site-plan",
         icon: "logistics",
       },

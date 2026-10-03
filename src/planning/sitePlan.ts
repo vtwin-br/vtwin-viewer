@@ -23,6 +23,8 @@ export interface PlanPoint {
 
 export interface PlanCrane {
   id: string;
+  /** Slot do catálogo. O GLB em `public/models/` é só o visual. */
+  catalogId?: string;
   modelId?: string;
   x: number;
   y: number;
@@ -31,6 +33,19 @@ export interface PlanCrane {
   yaw: number;
   mastHeight: number;
   jibLength: number;
+  lineId?: string;
+}
+
+export interface PlanTruck {
+  id: string;
+  /** Slot do catálogo. O GLB em `public/models/` é só o visual. */
+  catalogId?: string;
+  modelId?: string;
+  x: number;
+  y: number;
+  z: number;
+  /** Radianos em torno do Z do IFC. */
+  yaw: number;
   lineId?: string;
 }
 
@@ -76,6 +91,7 @@ export interface SitePlan {
   format: typeof SITE_PLAN_FORMAT;
   version: typeof SITE_PLAN_VERSION;
   cranes: PlanCrane[];
+  trucks: PlanTruck[];
   paths: PlanPath[];
   terrains: PlanTerrain[];
   notes: PlanNote[];
@@ -103,6 +119,7 @@ export function emptySitePlan(): SitePlan {
     format: SITE_PLAN_FORMAT,
     version: SITE_PLAN_VERSION,
     cranes: [],
+    trucks: [],
     paths: [],
     terrains: [],
     notes: [],
@@ -119,6 +136,7 @@ export function cloneSitePlan(plan: SitePlan): SitePlan {
     format: SITE_PLAN_FORMAT,
     version: SITE_PLAN_VERSION,
     cranes: plan.cranes.map((item) => ({ ...item })),
+    trucks: plan.trucks.map((item) => ({ ...item })),
     paths: plan.paths.map((item) => ({ ...item, points: item.points.map((point) => ({ ...point })) })),
     terrains: plan.terrains.map((item) => ({ ...item, contour: item.contour.map((point) => ({ ...point })) })),
     notes: plan.notes.map((item) => ({ ...item })),
@@ -139,6 +157,7 @@ export function parseSitePlan(raw: unknown): SitePlan {
   }
   const plan = emptySitePlan();
   for (const item of asArray(j.cranes)) plan.cranes.push(readCrane(item));
+  for (const item of asArray(j.trucks)) plan.trucks.push(readTruck(item));
   for (const item of asArray(j.paths)) plan.paths.push(readPath(item));
   for (const item of asArray(j.terrains)) plan.terrains.push(readTerrain(item));
   for (const item of asArray(j.notes)) plan.notes.push(readNote(item));
@@ -147,7 +166,14 @@ export function parseSitePlan(raw: unknown): SitePlan {
 }
 
 export function planIsEmpty(plan: SitePlan): boolean {
-  return !plan.cranes.length && !plan.paths.length && !plan.terrains.length && !plan.notes.length && !plan.lines.length;
+  return (
+    !plan.cranes.length &&
+    !plan.trucks.length &&
+    !plan.paths.length &&
+    !plan.terrains.length &&
+    !plan.notes.length &&
+    !plan.lines.length
+  );
 }
 
 export function isoDate(date: Date): string {
@@ -203,6 +229,10 @@ export function measuresForPhase(
       measure: `${trimMeasure(crane.mastHeight)} × ${trimMeasure(crane.jibLength)} m`,
     });
   }
+  for (const truck of plan.trucks) {
+    if (!visible(truck.lineId)) continue;
+    rows.push({ id: truck.id, name: "Camião", measure: "" });
+  }
   for (const path of plan.paths) {
     if (!visible(path.lineId)) continue;
     rows.push({ id: path.id, name: "Caminho", measure: `${trimMeasure(pathLength(path))} m` });
@@ -219,8 +249,9 @@ export function measuresForPhase(
   return rows;
 }
 
-export function findPlanItem(plan: SitePlan, id: string): { kind: "crane" | "path" | "terrain" | "note" } | null {
+export function findPlanItem(plan: SitePlan, id: string): { kind: "crane" | "truck" | "path" | "terrain" | "note" } | null {
   if (plan.cranes.some((item) => item.id === id)) return { kind: "crane" };
+  if (plan.trucks.some((item) => item.id === id)) return { kind: "truck" };
   if (plan.paths.some((item) => item.id === id)) return { kind: "path" };
   if (plan.terrains.some((item) => item.id === id)) return { kind: "terrain" };
   if (plan.notes.some((item) => item.id === id)) return { kind: "note" };
@@ -237,11 +268,14 @@ export function removePlanItem(plan: SitePlan, id: string): void {
     list.splice(index, 1);
   };
   drop(plan.cranes);
+  drop(plan.trucks);
   drop(plan.paths);
   drop(plan.terrains);
   drop(plan.notes);
   for (const lineId of lineIds) {
-    const used = [...plan.cranes, ...plan.paths, ...plan.terrains, ...plan.notes].some((item) => item.lineId === lineId);
+    const used = [...plan.cranes, ...plan.trucks, ...plan.paths, ...plan.terrains, ...plan.notes].some(
+      (item) => item.lineId === lineId,
+    );
     if (!used) {
       const index = plan.lines.findIndex((line) => line.id === lineId);
       if (index >= 0) plan.lines.splice(index, 1);
@@ -253,6 +287,7 @@ export function removePlanItem(plan: SitePlan, id: string): void {
 export function importLegacyAssets(plan: SitePlan, assets: LegacySiteAsset[]): number {
   const known = new Set([
     ...plan.cranes.map((item) => item.id),
+    ...plan.trucks.map((item) => item.id),
     ...plan.notes.map((item) => item.id),
   ]);
   let added = 0;
@@ -262,12 +297,22 @@ export function importLegacyAssets(plan: SitePlan, assets: LegacySiteAsset[]): n
     if (asset.libraryKey === "grua") {
       plan.cranes.push({
         id: asset.globalId,
+        catalogId: "tower-crane",
         x: asset.x,
         y: asset.y,
         z: asset.z,
         yaw: asset.yaw,
         mastHeight: DEFAULT_MAST_HEIGHT,
         jibLength: DEFAULT_JIB_LENGTH,
+      });
+    } else if (asset.libraryKey === "camiao") {
+      plan.trucks.push({
+        id: asset.globalId,
+        catalogId: "dump-truck",
+        x: asset.x,
+        y: asset.y,
+        z: asset.z,
+        yaw: asset.yaw,
       });
     } else {
       plan.notes.push({
@@ -351,7 +396,7 @@ export function bytesIncludeMarker(bytes: Uint8Array, marker: string): boolean {
 
 function itemIdsForLine(plan: SitePlan, lineId: string): string[] {
   const ids: string[] = [];
-  for (const item of [...plan.cranes, ...plan.paths, ...plan.terrains, ...plan.notes]) {
+  for (const item of [...plan.cranes, ...plan.trucks, ...plan.paths, ...plan.terrains, ...plan.notes]) {
     if (item.lineId === lineId) ids.push(item.id);
   }
   return ids;
@@ -380,6 +425,10 @@ function readPoint(raw: unknown, label: string): PlanPoint {
   return { x, y, z };
 }
 
+function readCatalogId(raw: { catalogId?: unknown }, fallback: string): string {
+  return typeof raw.catalogId === "string" && raw.catalogId.trim() ? raw.catalogId.trim() : fallback;
+}
+
 function readModelId(raw: { modelId?: unknown }): string | undefined {
   return typeof raw.modelId === "string" && raw.modelId ? raw.modelId : undefined;
 }
@@ -396,7 +445,32 @@ function readCrane(raw: unknown): PlanCrane {
   const mastHeight = Number(item.mastHeight);
   const jibLength = Number(item.jibLength);
   if (![yaw, mastHeight, jibLength].every(Number.isFinite)) throw new Error("Guindaste sem rotação, mastro ou lança.");
-  return { id, ...point, yaw, mastHeight, jibLength, modelId: readModelId(item), lineId: readLineId(item) };
+  return {
+    id,
+    catalogId: readCatalogId(item, "tower-crane"),
+    ...point,
+    yaw,
+    mastHeight,
+    jibLength,
+    modelId: readModelId(item),
+    lineId: readLineId(item),
+  };
+}
+
+function readTruck(raw: unknown): PlanTruck {
+  const id = readId(raw);
+  const item = raw as Partial<PlanTruck>;
+  const point = readPoint(item, "Camião");
+  const yaw = Number(item.yaw);
+  if (!Number.isFinite(yaw)) throw new Error("Camião sem rotação.");
+  return {
+    id,
+    catalogId: readCatalogId(item, "dump-truck"),
+    ...point,
+    yaw,
+    modelId: readModelId(item),
+    lineId: readLineId(item),
+  };
 }
 
 function readPath(raw: unknown): PlanPath {

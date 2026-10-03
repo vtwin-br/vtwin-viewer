@@ -3,6 +3,7 @@ import { emptySchedule } from "../src/schedule/range";
 import { buildStepIndex } from "../src/ifc/stepIndex";
 import { packVtwin, unpackVtwin } from "../src/project/pack";
 import * as WebIFC from "web-ifc";
+import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { detectIfcSchema } from "../src/ifc/stepText";
 import {
@@ -16,6 +17,14 @@ import {
   pathLength,
   sitePlanToJson,
 } from "../src/planning/sitePlan";
+
+function glbNodeNames(file: string): string[] {
+  const buf = readFileSync(file);
+  if (buf.toString("utf8", 0, 4) !== "glTF") throw new Error(`${file} não é GLB.`);
+  const len = buf.readUInt32LE(12);
+  const json = JSON.parse(buf.subarray(20, 20 + len).toString("utf8")) as { nodes?: { name?: string }[] };
+  return (json.nodes ?? []).map((node) => node.name ?? "").filter(Boolean);
+}
 
 const projectGuid = "0000000000000000000000";
 if (detectIfcSchema("FILE_SCHEMA(('IFC2X3'));") !== "IFC2X3") throw new Error("Adaptador IFC2X3 inválido.");
@@ -168,6 +177,15 @@ plan.cranes.push({
   jibLength: DEFAULT_JIB_LENGTH,
   lineId: line.id,
 });
+plan.trucks.push({
+  id: "truck-1",
+  catalogId: "dump-truck",
+  x: 2,
+  y: 0,
+  z: 3,
+  yaw: 1.2,
+  lineId: line.id,
+});
 plan.paths.push({
   id: "path-1",
   points: [
@@ -192,8 +210,11 @@ plan.terrains.push({
 });
 plan.notes.push({ id: "note-1", x: 3, y: 2, z: 1, text: "Nota de obra", lineId: line.id });
 const planAgain = parseSitePlan(sitePlanToJson(plan));
-if (planAgain.cranes[0]?.yaw !== 0.5 || planAgain.lines[0]?.origin !== "planning") {
+if (planAgain.cranes[0]?.yaw !== 0.5 || planAgain.cranes[0]?.catalogId !== "tower-crane" || planAgain.lines[0]?.origin !== "planning") {
   throw new Error("O JSON de planejamento não preservou os parâmetros.");
+}
+if (planAgain.trucks[0]?.catalogId !== "dump-truck" || planAgain.trucks[0]?.yaw !== 1.2) {
+  throw new Error("O JSON de planejamento não preservou o camião.");
 }
 if (Math.abs(pathLength(planAgain.paths[0]!) - 14) > 1e-6) {
   throw new Error("O caminho não preservou a polilinha.");
@@ -227,8 +248,11 @@ const saved = unpacked.sitePlan;
 const crane = saved.cranes[0];
 const terrain = saved.terrains[0];
 const note = saved.notes[0];
-if (!crane || crane.x !== 10 || crane.mastHeight !== DEFAULT_MAST_HEIGHT || crane.jibLength !== DEFAULT_JIB_LENGTH || crane.yaw !== 0.5) {
+if (!crane || crane.x !== 10 || crane.mastHeight !== DEFAULT_MAST_HEIGHT || crane.jibLength !== DEFAULT_JIB_LENGTH || crane.yaw !== 0.5 || crane.catalogId !== "tower-crane") {
   throw new Error("O .vtwin não restaurou o guindaste.");
+}
+if (saved.trucks[0]?.catalogId !== "dump-truck" || saved.trucks[0]?.x !== 2 || saved.trucks[0]?.yaw !== 1.2) {
+  throw new Error("O .vtwin não restaurou o camião.");
 }
 if (!saved.paths[0] || saved.paths[0].points.length !== 3) throw new Error("O .vtwin não restaurou o caminho.");
 if (!terrain || terrain.operation !== "cut" || terrain.depth !== DEFAULT_TERRAIN_DEPTH || terrain.slope !== DEFAULT_TERRAIN_SLOPE || terrain.contour.length !== 4) {
@@ -262,9 +286,21 @@ const fullOpen = await unpackVtwin(full);
 let packedIfc = "";
 const packedBytes = fullOpen.models[0]?.ifc ?? new Uint8Array();
 for (let index = 0; index < packedBytes.length; index++) packedIfc += String.fromCharCode(packedBytes[index]!);
-if (packedIfc.includes("VISTA4D_SITE_ASSET") || packedIfc.includes("Nota de obra") || packedIfc.includes("'Guindaste'")) {
+if (
+  packedIfc.includes("VISTA4D_SITE_ASSET") ||
+  packedIfc.includes("Nota de obra") ||
+  packedIfc.includes("'Guindaste'") ||
+  packedIfc.includes("dump-truck") ||
+  packedIfc.includes("tower-crane")
+) {
   throw new Error("O IFC dentro do .vtwin ainda contém planejamento de obra.");
 }
+const craneNodes = glbNodeNames(resolve("public/models/tower-crane.glb"));
+for (const name of ["tower-crane", "mast", "crown", "jib", "trolley"]) {
+  if (!craneNodes.includes(name)) throw new Error(`public/models/tower-crane.glb perdeu o nó ${name}.`);
+}
+const truckNodes = glbNodeNames(resolve("public/models/dump-truck.glb"));
+if (!truckNodes.includes("dump-truck")) throw new Error("public/models/dump-truck.glb perdeu o nó dump-truck.");
 if (fullOpen.sitePlan.notes[0]?.text !== "Nota de obra") {
   throw new Error("Reabrir o .vtwin perdeu a anotação.");
 }

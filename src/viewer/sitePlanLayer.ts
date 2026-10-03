@@ -1,6 +1,8 @@
 import * as THREE from "three";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { ifcToThreePoint, threeWorldToIfc, type ModelExtraTransform } from "../ifc/georef";
-import type { PlanCrane, PlanNote, PlanPath, PlanPoint, PlanTerrain, SitePlan } from "../planning/sitePlan";
+import { DEFAULT_JIB_LENGTH, DEFAULT_MAST_HEIGHT, type PlanNote, type PlanPath, type PlanPoint, type PlanTerrain, type SitePlan } from "../planning/sitePlan";
+import { catalogSlot, catalogUrl, DUMP_TRUCK_ID, TOWER_CRANE_ID } from "../site/catalogModels";
 import type { SimulationStateBuckets } from "../schedule/simulation";
 
 interface BoundModel {
@@ -57,7 +59,14 @@ export class SitePlanLayer {
     };
 
     for (const crane of plan.cranes) {
-      place(crane.id, crane.modelId, () => buildCrane(crane), crane, crane.yaw);
+      this.ensureCatalog(crane.id, crane.modelId, crane, crane.yaw, crane.catalogId || TOWER_CRANE_ID, (visual) =>
+        fitTowerCrane(visual, crane.mastHeight, crane.jibLength),
+      );
+      live.add(crane.id);
+    }
+    for (const truck of plan.trucks) {
+      this.ensureCatalog(truck.id, truck.modelId, truck, truck.yaw, truck.catalogId || DUMP_TRUCK_ID, () => {});
+      live.add(truck.id);
     }
     for (const path of plan.paths) {
       const origin = path.points[0];
@@ -149,6 +158,54 @@ export class SitePlanLayer {
     this.paintSelection();
   }
 
+  private ensureCatalog(
+    id: string,
+    modelId: string | undefined,
+    at: PlanPoint,
+    yaw: number,
+    catalogId: string,
+    fit: (visual: THREE.Object3D) => void,
+  ): void {
+    const bound = this.boundFor(modelId);
+    if (!bound) return;
+    const slot = catalogSlot(catalogId, catalogId);
+    let root = this.meshes.get(id);
+    if (!root || root.userData.catalogId !== slot.id) {
+      if (root) {
+        root.removeFromParent();
+        disposeObject(root);
+      }
+      root = new THREE.Group();
+      root.name = id;
+      root.userData.catalogId = slot.id;
+      bound.group.add(root);
+      this.meshes.set(id, root);
+      const fallback = slot.kind === "crane" ? fallbackCrane() : fallbackTruck();
+      fallback.name = "fallback";
+      root.add(fallback);
+      const generation = (root.userData.generation = Number(root.userData.generation ?? 0) + 1);
+      const host = root;
+      void loadCatalogTemplate(catalogUrl(slot.file))
+        .then((template) => {
+          if (host.userData.generation !== generation || !host.parent) return;
+          fallback.removeFromParent();
+          disposeObject(fallback);
+          const visual = template.clone(true);
+          visual.name = "catalog-visual";
+          ownGeometry(visual);
+          host.add(visual);
+          fit(visual);
+          this.paintSelection();
+        })
+        .catch(() => {});
+    }
+    const point = ifcToThreePoint(at);
+    root.position.set(point.x, point.y, point.z);
+    root.rotation.y = -yaw;
+    const visual = root.getObjectByName("catalog-visual");
+    if (visual) fit(visual);
+  }
+
   private boundFor(modelId?: string): BoundModel | null {
     if (modelId && this.models.has(modelId)) return this.models.get(modelId) ?? null;
     return this.models.values().next().value ?? null;
@@ -159,14 +216,64 @@ export class SitePlanLayer {
   }
 }
 
-function buildCrane(crane: PlanCrane): THREE.Group {
+const templates = new Map<string, Promise<THREE.Object3D>>();
+
+function loadCatalogTemplate(url: string): Promise<THREE.Object3D> {
+  const cached = templates.get(url);
+  if (cached) return cached;
+  const pending = new Promise<THREE.Object3D>((resolve, reject) => {
+    new GLTFLoader().load(url, (gltf) => resolve(gltf.scene), undefined, reject);
+  });
+  templates.set(url, pending);
+  return pending;
+}
+
+/** O GLB está modelado no mastro e na lança nominais. Estes nós é que mudam. */
+function fitTowerCrane(root: THREE.Object3D, mastHeight: number, jibLength: number): void {
+  const mast = root.getObjectByName("mast");
+  if (mast) mast.scale.y = Math.max(2, mastHeight) / DEFAULT_MAST_HEIGHT;
+  const crown = root.getObjectByName("crown");
+  if (crown) {
+    const baseY = typeof crown.userData.baseY === "number" ? crown.userData.baseY : crown.position.y;
+    crown.userData.baseY = baseY;
+    crown.position.y = baseY + (mastHeight - DEFAULT_MAST_HEIGHT);
+  }
+  const jib = root.getObjectByName("jib");
+  if (jib) jib.scale.x = Math.max(2, jibLength) / DEFAULT_JIB_LENGTH;
+  const trolley = root.getObjectByName("trolley");
+  if (trolley) {
+    const baseX = typeof trolley.userData.baseX === "number" ? trolley.userData.baseX : trolley.position.x;
+    trolley.userData.baseX = baseX;
+    trolley.position.x = baseX + (jibLength - DEFAULT_JIB_LENGTH);
+  }
+}
+
+function ownGeometry(root: THREE.Object3D): void {
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh) return;
+    mesh.geometry = mesh.geometry.clone();
+    const material = mesh.material;
+    mesh.material = Array.isArray(material) ? material.map((item) => item.clone()) : material.clone();
+  });
+}
+
+function fallbackCrane(): THREE.Group {
   const group = new THREE.Group();
-  const mast = Math.max(2, crane.mastHeight);
-  const jib = Math.max(2, crane.jibLength);
   box(group, 2.2, 0.4, 2.2, 0, 0.2, 0, 0x44403c);
-  box(group, 0.7, mast, 0.7, 0, mast / 2, 0, 0xf59e0b);
-  box(group, jib, 0.4, 0.4, jib / 2 - 1, mast - 0.4, 0, 0x111827);
-  box(group, 1.4, 0.8, 1.4, -1.1, mast - 0.7, 0, 0x78350f);
+  box(group, 0.7, DEFAULT_MAST_HEIGHT, 0.7, 0, DEFAULT_MAST_HEIGHT / 2, 0, 0xf0b429);
+  box(group, DEFAULT_JIB_LENGTH, 0.35, 0.35, DEFAULT_JIB_LENGTH / 2, DEFAULT_MAST_HEIGHT, 0, 0x243038);
+  return group;
+}
+
+function fallbackTruck(): THREE.Group {
+  const group = new THREE.Group();
+  box(group, 7.2, 1.4, 2.4, 0, 1.3, 0, 0xf0b429);
+  box(group, 2.2, 1.3, 2.2, 1.8, 2.1, 0, 0xf0b429);
+  box(group, 0.5, 0.5, 0.3, 2.6, 0.35, 0.9, 0x161616);
+  box(group, 0.5, 0.5, 0.3, 2.6, 0.35, -0.9, 0x161616);
+  box(group, 0.5, 0.5, 0.3, -1.6, 0.35, 0.9, 0x161616);
+  box(group, 0.5, 0.5, 0.3, -1.6, 0.35, -0.9, 0x161616);
   return group;
 }
 

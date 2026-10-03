@@ -991,11 +991,26 @@ async function main() {
       const id = newPlanId();
       sitePlan.cranes.push({
         id,
+        catalogId: "tower-crane",
         modelId,
         ...point,
         yaw: 0,
         mastHeight: DEFAULT_MAST_HEIGHT,
         jibLength: DEFAULT_JIB_LENGTH,
+        lineId: line.id,
+      });
+      return id;
+    }
+    if (tool === "truck") {
+      planDraft = null;
+      const line = addPlanningLine(sitePlan, "Camião", dates.start, dates.end);
+      const id = newPlanId();
+      sitePlan.trucks.push({
+        id,
+        catalogId: "dump-truck",
+        modelId,
+        ...point,
+        yaw: 0,
         lineId: line.id,
       });
       return id;
@@ -1042,6 +1057,7 @@ async function main() {
     const id = siteLayer?.selected() ?? "";
     if (!id) return;
     const crane = sitePlan.cranes.find((item) => item.id === id);
+    const truck = sitePlan.trucks.find((item) => item.id === id);
     const terrain = sitePlan.terrains.find((item) => item.id === id);
     if (action === "remove") {
       removePlanItem(sitePlan, id);
@@ -1049,6 +1065,7 @@ async function main() {
       siteLayer?.select("");
       sitePlanner?.setSelected("");
     } else if (action === "rotate" && crane) crane.yaw += Math.PI / 4;
+    else if (action === "rotate" && truck) truck.yaw += Math.PI / 4;
     else if (action === "mast-up" && crane) crane.mastHeight += 1;
     else if (action === "mast-down" && crane) crane.mastHeight = Math.max(2, crane.mastHeight - 1);
     else if (action === "jib-up" && crane) crane.jibLength += 1;

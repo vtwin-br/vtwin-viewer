@@ -60,15 +60,17 @@ entram em `planning/site.json`?** Não se inventa um proxy IFC para os substitui
 | O quê | Onde fica |
 |---|---|
 | Hierarquia, psets, `IfcTask`, custo, documentos, classificação | IFC exportado |
-| Guindaste (posição, rotação, altura do mastro, comprimento da lança) | `planning/site.json` |
+| Guindaste (posição, rotação, altura do mastro, comprimento da lança, `catalogId: tower-crane`) | `planning/site.json` |
+| Camião basculante (posição, rotação, `catalogId: dump-truck`) | `planning/site.json` |
+| Visual do catálogo | `public/models/tower-crane.glb` e `public/models/dump-truck.glb`. Substituir o GLB no mesmo ficheiro troca o modelo sem mexer no IFC |
 | Caminho (polilinha) | `planning/site.json` |
 | Terreno (contorno, corte ou aterro, profundidade, inclinação) | `planning/site.json` |
 | Anotação (ponto e texto) | `planning/site.json` |
 | Linha extra de cronograma, com datas, `origin: "planning"` | `planning/site.json` |
 | Malha da vista, cor de simulação, hover, câmara, BCF, % do Gantt | Não se grava |
 
-O catálogo de peças e os projetos em base de dados ficam para mais tarde. Nesta
-versão a app é local-first: não há back-end.
+O catálogo visual começa nestes dois GLB. Peças e projetos em base de dados
+ficam para mais tarde. Nesta versão a app é local-first: não há back-end.
 
 ---
 
@@ -104,7 +106,7 @@ continuam no código e no mesmo `IfcSession`, fora dessa navegação.
 |---|---|---|
 | Planejamento | 4D | Relatório e simulação no viewport |
 | Planejamento | Gantt | Editor `IfcTask` |
-| Planejamento | Logística | Guindaste, caminho, terreno e anotação. Os parâmetros ficam em `planning/site.json`. A vista gera o 3D. Nada disto entra no STEP |
+| Planejamento | Logística | Guindaste, camião, caminho, terreno e anotação. Os parâmetros ficam em `planning/site.json`. O GLB do catálogo é só o visual. Nada disto entra no STEP |
 
 | Fora do menu | Estado |
 |---|---|
@@ -218,8 +220,9 @@ Não são bases de dados à parte. São **vistas** sobre o mesmo grafo IFC:
   conjuntos, ligação ao 3D, **custo 5D**). O valor da coluna Custo fica na
   tarefa e portanto nos mesmos produtos/conjuntos já ligados. Sem simulação,
   terreno ou caminhada. O viewport 3D, quando aberto, é pré-visualização BIM.
-- **Logística** — planejamento de obra na vista: guindaste, caminho, terreno
-  de corte ou aterro e anotação. Os parâmetros estão em `planning/site.json`.
+- **Logística** — planejamento de obra na vista: guindaste de torre, camião
+  basculante, caminho, terreno de corte ou aterro e anotação. Os parâmetros
+  estão em `planning/site.json`. O visual vem de `public/models/*.glb`.
   O limite de intervenção no `IfcSite` (polígono de recorte do mapa) continua
   a ser `IfcAnnotation`, fora deste menu.
 - **5D** — `IfcCostItem` / `IfcCostValue` ligados à mesma tarefa (coluna Custo
@@ -287,7 +290,8 @@ artefatos derivados; o IFC continua sendo a fonte e a saída interoperável.
 | `src/ifc/stepIndex.ts` | Índice expressId / GlobalId / tipo |
 | `src/ifc/stepStore.ts` | Bytes IFC em OPFS |
 | `src/ifc/fragCache.ts` | Cache IndexedDB de `.frag` + cronograma |
-| `src/planning/sitePlan.ts` | `planning/site.json`: guindaste, caminho, terreno, anotação, linha extra |
+| `src/planning/sitePlan.ts` | `planning/site.json`: guindaste, camião, caminho, terreno, anotação, linha extra |
+| `src/site/catalogModels.ts` | Slots `tower-crane` e `dump-truck` → GLB em `public/models/` |
 | `src/project/` | Pacote `.vtwin` (manifesto, ZIP, recase de GUID) |
 | `src/schedule/parseSchedule.ts` | Leitura nativa 4D/5D/grupos |
 | `src/schedule/links.ts` | FS/SS/FF/SF, folga e recálculo à frente |
@@ -318,4 +322,4 @@ inventado pela app): `IfcWorkPlan` «Engineering and Construction»,
 - **Pacote só malha** não contém o STEP. Abrir esse `.vtwin` mostra a malha e o snapshot; Exportar IFC só funciona se o IFC canónico ainda estiver no armazenamento local.
 - **`.mpp` binário** não é interpretado. O que se grava é a referência (`IfcDocumentReference`), não as tarefas. Tarefas entram por XML ou CSV.
 - **Apresentação ao cliente** (esconder o menu e reproduzir as fases) é uma vista. A câmara não entra no STEP.
-- **Planejamento de obra** (guindaste, caminho, corte/aterro, anotação, linha extra) não entra no STEP. Vive em `planning/site.json`. A malha é gerada na vista e não se grava. Proxies `VISTA4D_SITE_ASSET` de uma versão anterior são comentados no export.
+- **Planejamento de obra** (guindaste, camião, caminho, corte/aterro, anotação, linha extra) não entra no STEP. Vive em `planning/site.json`. O GLB do catálogo é o visual e não se grava no pacote. Proxies `VISTA4D_SITE_ASSET` de uma versão anterior são comentados no export.

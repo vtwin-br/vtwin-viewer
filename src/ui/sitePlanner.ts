@@ -3,7 +3,7 @@ import { measuresForPhase, type SitePlan } from "../planning/sitePlan";
 import { sitePhases } from "../site/phases";
 import type { ScheduleData } from "../schedule/types";
 
-export type PlanTool = "crane" | "path" | "terrain" | "note";
+export type PlanTool = "crane" | "truck" | "path" | "terrain" | "note";
 export type PlanAction = "rotate" | "remove" | "mast-up" | "mast-down" | "jib-up" | "jib-down" | "cut" | "fill";
 
 export interface SitePlannerOptions {
@@ -151,6 +151,7 @@ export class SitePlanner {
 
 const TOOLS: { key: PlanTool; name: string }[] = [
   { key: "crane", name: "Guindaste" },
+  { key: "truck", name: "Camião" },
   { key: "path", name: "Caminho" },
   { key: "terrain", name: "Terreno" },
   { key: "note", name: "Nota" },
@@ -158,6 +159,7 @@ const TOOLS: { key: PlanTool; name: string }[] = [
 
 function itemKind(plan: SitePlan, id: string): PlanTool | "" {
   if (plan.cranes.some((item) => item.id === id)) return "crane";
+  if (plan.trucks.some((item) => item.id === id)) return "truck";
   if (plan.paths.some((item) => item.id === id)) return "path";
   if (plan.terrains.some((item) => item.id === id)) return "terrain";
   if (plan.notes.some((item) => item.id === id)) return "note";
@@ -175,7 +177,7 @@ function toolsFor(kind: PlanTool | ""): string {
         ? `<button type="button" class="site-chip" data-act="cut">Corte</button><button type="button" class="site-chip" data-act="fill">Aterro</button>`
         : "";
   return `<div class="site-tools">
-    ${kind === "crane" ? `<button type="button" class="site-icon" data-act="rotate" aria-label="Rodar" title="Rodar">${ICON_ROTATE}</button>` : ""}
+    ${kind === "crane" || kind === "truck" ? `<button type="button" class="site-icon" data-act="rotate" aria-label="Rodar" title="Rodar">${ICON_ROTATE}</button>` : ""}
     ${extra}
     <button type="button" class="site-icon" data-act="remove" aria-label="Apagar" title="Apagar">${ICON_REMOVE}</button>
   </div>`;
@@ -194,6 +196,7 @@ function mark(key: PlanTool): string {
 
 const MARKS: Record<PlanTool, string> = {
   crane: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M9 20V6M5 6h14M16 6v5" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  truck: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 16V9h9v7M12 16V7h4l3 4v5" stroke-linejoin="round"/><circle cx="7" cy="17" r="1.4"/><circle cx="17" cy="17" r="1.4"/></svg>`,
   path: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 17c4-8 10-8 14 0" stroke-linecap="round"/><circle cx="5" cy="17" r="1.3"/><circle cx="19" cy="17" r="1.3"/></svg>`,
   terrain: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 18l6-8 4 5 3-4 5 7" stroke-linejoin="round"/></svg>`,
   note: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 21s6-5.2 6-10a6 6 0 10-12 0c0 4.8 6 10 6 10z" stroke-linejoin="round"/><circle cx="12" cy="11" r="1.6"/></svg>`,

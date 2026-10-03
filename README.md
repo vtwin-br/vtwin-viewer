@@ -64,7 +64,7 @@ abre esse modelo automaticamente.
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
-  - **Logística** — guindaste, caminho, terreno e anotação. `Ctrl+S` grava os parâmetros em `planning/site.json` dentro do `.vtwin`. Exportar IFC não os escreve no STEP
+  - **Logística** — guindaste de torre e camião basculante (`public/models/tower-crane.glb`, `public/models/dump-truck.glb`), caminho, terreno e anotação. O GLB é só o visual. `Ctrl+S` grava a instância em `planning/site.json` dentro do `.vtwin`. Exportar IFC não a escreve no STEP
 - Fora do menu, ainda no mesmo `IfcSession`: Dashboard, Visualizador,
   Documentação, Editor e Coordenação (`IfcRelInterferesElements`). BCF
   (tópico, câmara, markup) fica de fora do IFC.
