@@ -259,7 +259,7 @@ async function main() {
     };
     setChip("schedule", (ws === "schedule-4d" || ws === "logistics") && grid.classList.contains("schedule-collapsed"));
     const scheduleChip = bar.querySelector<HTMLElement>('[data-restore="schedule"]');
-    if (scheduleChip) scheduleChip.textContent = ws === "logistics" ? "Canteiro" : "Cronograma";
+    if (scheduleChip) scheduleChip.textContent = ws === "logistics" ? "Logística" : "Cronograma";
     setChip("inspector", grid.classList.contains("inspector-collapsed"));
     setChip("timeline", ws === "schedule-4d" && grid.classList.contains("timeline-collapsed"));
     setChip(
@@ -421,8 +421,10 @@ async function main() {
       shellKind === "coordination";
     if (panelTitle) {
       panelTitle.textContent =
-        shellKind === "logistics" || shellKind === "site"
+        shellKind === "site"
           ? "Canteiro"
+          : shellKind === "logistics"
+            ? "Logística"
           : shellKind === "dashboard"
             ? "Indicadores"
             : shellKind === "viewer"
@@ -483,11 +485,11 @@ async function main() {
     } else if (shellKind === "logistics") {
       setPlanModelOpen(false);
       dirty = true;
-      if (simKicker) simKicker.textContent = "Canteiro";
+      if (simKicker) simKicker.textContent = "Logística";
       currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
       if (toggleSchedule) {
-        toggleSchedule.title = "Ocultar canteiro";
-        toggleSchedule.setAttribute("aria-label", "Ocultar canteiro");
+        toggleSchedule.title = "Ocultar logística";
+        toggleSchedule.setAttribute("aria-label", "Ocultar logística");
       }
       onLogisticsWorkspace();
       if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);

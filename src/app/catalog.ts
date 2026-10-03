@@ -146,7 +146,7 @@ export const APP_MODULES: AppModule[] = [
       {
         id: "logistics",
         label: "Logística",
-        description: "Canteiro, limite de intervenção e platô no IFC",
+        description: "Limite de intervenção e platô no IFC",
         workspace: "logistics",
         icon: "logistics",
       },
