@@ -2,7 +2,9 @@ import {
   APP_MODULES,
   DEFAULT_WORKSPACE,
   findTool,
+  isNavWorkspace,
   isWorkspaceId,
+  navModules,
   workspaceShell,
   type WorkspaceId,
 } from "../app/catalog";
@@ -56,8 +58,8 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
     `;
 
     const scroll = root.querySelector(".module-nav-scroll")!;
-    for (const mod of APP_MODULES) {
-      if (mod.tools.length === 1) {
+    for (const mod of navModules()) {
+      if (mod.tools.length === 1 && !mod.pinned) {
         const tool = mod.tools[0];
         const on = tool.workspace === workspace;
         const btn = document.createElement("button");
@@ -78,12 +80,17 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
         continue;
       }
 
-      const open = groupsOpen[mod.id] !== false;
+      const open = mod.pinned || groupsOpen[mod.id] !== false;
       const current = mod.tools.some((t) => t.workspace === workspace);
       const section = document.createElement("section");
-      section.className = `module-group${open ? " is-open" : ""}${current ? " is-current" : ""}`;
+      section.className = `module-group${open ? " is-open" : ""}${current ? " is-current" : ""}${mod.pinned ? " is-pinned" : ""}`;
       section.dataset.module = mod.id;
-      section.innerHTML = `
+      section.innerHTML = mod.pinned
+        ? `
+        <h2 class="module-group-label">${escapeHtml(mod.label)}</h2>
+        <div class="module-tools" role="list"></div>
+      `
+        : `
         <button type="button" class="module-group-btn" aria-expanded="${open}" title="${escapeAttr(mod.label)}" data-tooltip="${escapeAttr(mod.label)}">
           <span class="module-icon">${navIcon(mod.icon)}</span>
           <span class="module-group-copy">
@@ -108,6 +115,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
           <span class="module-icon">${navIcon(tool.icon)}</span>
           <span class="module-tool-copy">
             <span class="module-tool-name">${escapeHtml(tool.label)}</span>
+            ${tool.hint ? `<span class="module-tool-desc">${escapeHtml(tool.hint)}</span>` : ""}
           </span>
         `;
         toolsEl.appendChild(btn);
@@ -207,7 +215,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
 function readWorkspace(): WorkspaceId {
   try {
     const v = localStorage.getItem(LS_WORKSPACE);
-    if (isWorkspaceId(v)) return v;
+    if (isWorkspaceId(v) && isNavWorkspace(v)) return v;
   } catch {
     /* ignore */
   }

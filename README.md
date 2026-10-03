@@ -58,22 +58,17 @@ abre esse modelo automaticamente.
     árvore espacial
   - `IfcGroup` `VISTA4D_SEARCH` + `Pset_Vista4dSearch` → search set
   - `IfcRelInterferesElements` (IFC4) → interferência gravada
-- Shell de módulos (`src/app/catalog.ts`), todos sobre o mesmo
-  `IfcSession` (trocar de módulo não descarrega o modelo):
+- Menu principal só de planejamento (`src/app/catalog.ts`), no mesmo
+  `IfcSession` (trocar de ferramenta não descarrega o modelo):
+  - **Logística** — biblioteca 3D (grua, camião, contentor…), sequência pelas fases do cronograma, quantidades (un, m, m³) e apresentação. O que fica gravado é `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`
   - **4D** — simulação no viewport, timeline, HUD 5D, Google Photorealistic
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
-  - **Canteiro** — biblioteca 3D (grua, camião, contentor…), sequência pelas fases do cronograma e quantidades (un, m, m³). O que fica gravado é `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`
-  - **Logística** — limite de canteiro (`IfcAnnotation`) e recorte do terreno
-  - **Dashboard** — indicadores calculados (tarefas, estado pela data,
-    custo, elementos ligados) com foco no 3D
-  - **Visualizador** — a mesma vista 3D, sem cronograma
-  - **Documentação** — documentos, folhas (`IfcDocumentReference`) e
-    tabelas (`IfcTable`)
-  - **Editor** — propriedades, classificação, árvore espacial e search sets
-  - **Coordenação** — gravar um par de elementos como
-    `IfcRelInterferesElements`. BCF (tópico, câmara, markup) fica de fora
+  - **Limite** — limite de canteiro (`IfcAnnotation`) e recorte do terreno
+- Fora do menu, ainda no mesmo `IfcSession`: Dashboard, Visualizador,
+  Documentação, Editor e Coordenação (`IfcRelInterferesElements`). BCF
+  (tópico, câmara, markup) fica de fora do IFC.
 - Estados 4D nos produtos com data: **pendente** oculto, **em execução**
   amarelo (`#F59E0B`), **concluído** cor original. Volumes espaciais sem
   tarefa ficam ocultos; o resto da construção permanece como contexto.

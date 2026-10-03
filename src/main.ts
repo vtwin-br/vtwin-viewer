@@ -257,9 +257,15 @@ async function main() {
       const btn = bar.querySelector<HTMLElement>(`[data-restore="${id}"]`);
       if (btn) btn.hidden = !on;
     };
-    setChip("schedule", (ws === "schedule-4d" || ws === "logistics") && grid.classList.contains("schedule-collapsed"));
+    setChip(
+      "schedule",
+      (ws === "schedule-4d" || ws === "logistics" || ws === "site-plan") && grid.classList.contains("schedule-collapsed"),
+    );
     const scheduleChip = bar.querySelector<HTMLElement>('[data-restore="schedule"]');
-    if (scheduleChip) scheduleChip.textContent = ws === "logistics" ? "Logística" : "Cronograma";
+    if (scheduleChip) {
+      scheduleChip.textContent =
+        ws === "logistics" ? "Limite" : ws === "site-plan" ? "Logística" : "Cronograma";
+    }
     setChip("inspector", grid.classList.contains("inspector-collapsed"));
     setChip("timeline", ws === "schedule-4d" && grid.classList.contains("timeline-collapsed"));
     setChip(
@@ -422,9 +428,9 @@ async function main() {
     if (panelTitle) {
       panelTitle.textContent =
         shellKind === "site"
-          ? "Canteiro"
+          ? "Logística"
           : shellKind === "logistics"
-            ? "Logística"
+            ? "Limite"
           : shellKind === "dashboard"
             ? "Indicadores"
             : shellKind === "viewer"
@@ -435,7 +441,9 @@ async function main() {
                   ? "Editor"
                   : shellKind === "coordination"
                     ? "Interferências"
-                    : "4D";
+                    : shellKind === "plan"
+                      ? "Gantt"
+                      : "4D";
     }
     if (toolShell) setPanelOpen("schedule", true, false);
     if (shellKind !== "schedule" && shellKind !== "logistics" && shellKind !== "site") {
@@ -469,7 +477,7 @@ async function main() {
     } else if (shellKind === "site") {
       setPlanModelOpen(false);
       dirty = true;
-      if (simKicker) simKicker.textContent = "Canteiro";
+      if (simKicker) simKicker.textContent = "Logística";
       currentDateEl.textContent = formatDateLabel(lastDate);
       if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);
     } else if (shellKind === "dashboard") {
@@ -485,11 +493,11 @@ async function main() {
     } else if (shellKind === "logistics") {
       setPlanModelOpen(false);
       dirty = true;
-      if (simKicker) simKicker.textContent = "Logística";
+      if (simKicker) simKicker.textContent = "Limite";
       currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
       if (toggleSchedule) {
-        toggleSchedule.title = "Ocultar logística";
-        toggleSchedule.setAttribute("aria-label", "Ocultar logística");
+        toggleSchedule.title = "Ocultar limite";
+        toggleSchedule.setAttribute("aria-label", "Ocultar limite");
       }
       onLogisticsWorkspace();
       if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);

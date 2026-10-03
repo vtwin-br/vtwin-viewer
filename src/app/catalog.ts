@@ -39,6 +39,7 @@ export type NavIconId =
   | "schedule4d"
   | "projectPlan"
   | "logistics"
+  | "limit"
   | "coordination"
   | "editor"
   | "collapse"
@@ -48,6 +49,8 @@ export interface AppTool {
   id: string;
   label: string;
   description: string;
+  /** Linha curta no menu. */
+  hint?: string;
   workspace: WorkspaceId;
   icon: NavIconId;
   /** Sem ecrã de trabalho — só o sítio no menu. */
@@ -60,21 +63,51 @@ export interface AppModule {
   description: string;
   icon: NavIconId;
   tools: AppTool[];
+  /** Fora do menu principal. O workspace continua a existir. */
+  nav?: boolean;
+  /** Grupo sempre aberto: o trabalho de planejamento não se esconde. */
+  pinned?: boolean;
 }
 
 export const APP_MODULES: AppModule[] = [
   {
-    id: "site",
-    label: "Canteiro",
-    description: "Plantar equipamentos, correr as fases e ler quantidades",
-    icon: "logistics",
+    id: "planning",
+    label: "Planejamento",
+    description: "Logística do canteiro, simulação 4D e cronograma",
+    icon: "planning",
+    pinned: true,
     tools: [
       {
         id: "site-plan",
-        label: "Canteiro",
-        description: "Biblioteca 3D, sequência 4D e quantidades por fase",
+        label: "Logística",
+        hint: "Equipamentos, fases e quantidades",
+        description: "Pousar a biblioteca no modelo, ler quantidades por fase e apresentar",
         workspace: "site-plan",
         icon: "logistics",
+      },
+      {
+        id: "schedule-4d",
+        label: "4D",
+        hint: "Reproduzir a obra",
+        description: "Simulação do cronograma no modelo",
+        workspace: "schedule-4d",
+        icon: "schedule4d",
+      },
+      {
+        id: "project-plan",
+        label: "Gantt",
+        hint: "Sequência das tarefas",
+        description: "Editor do cronograma (IfcTask)",
+        workspace: "project-plan",
+        icon: "projectPlan",
+      },
+      {
+        id: "logistics",
+        label: "Limite",
+        hint: "Contorno do terreno",
+        description: "Limite de intervenção e platô no IFC",
+        workspace: "logistics",
+        icon: "limit",
       },
     ],
   },
@@ -83,6 +116,7 @@ export const APP_MODULES: AppModule[] = [
     label: "Dashboard",
     description: "Indicadores calculados sobre o IFC e interação 3D",
     icon: "dashboard",
+    nav: false,
     tools: [
       {
         id: "dashboard",
@@ -98,6 +132,7 @@ export const APP_MODULES: AppModule[] = [
     label: "Visualizador",
     description: "Vista 3D do viewport já aberto",
     icon: "viewer",
+    nav: false,
     tools: [
       {
         id: "viewer",
@@ -113,6 +148,7 @@ export const APP_MODULES: AppModule[] = [
     label: "Documentação",
     description: "Documentos, folhas 2D e tabelas IFC",
     icon: "docs",
+    nav: false,
     tools: [
       {
         id: "docs",
@@ -124,39 +160,11 @@ export const APP_MODULES: AppModule[] = [
     ],
   },
   {
-    id: "planning",
-    label: "Planejamento",
-    description: "Relatório 4D, editor Gantt e logística",
-    icon: "planning",
-    tools: [
-      {
-        id: "schedule-4d",
-        label: "4D",
-        description: "Relatório e simulação do cronograma",
-        workspace: "schedule-4d",
-        icon: "schedule4d",
-      },
-      {
-        id: "project-plan",
-        label: "Gantt",
-        description: "Editor do cronograma (IfcTask)",
-        workspace: "project-plan",
-        icon: "projectPlan",
-      },
-      {
-        id: "logistics",
-        label: "Logística",
-        description: "Limite de intervenção e platô no IFC",
-        workspace: "logistics",
-        icon: "logistics",
-      },
-    ],
-  },
-  {
     id: "coordination",
     label: "Coordenação",
     description: "Interferências IfcRelInterferesElements",
     icon: "coordination",
+    nav: false,
     tools: [
       {
         id: "coordination",
@@ -172,6 +180,7 @@ export const APP_MODULES: AppModule[] = [
     label: "Editor",
     description: "Propriedades, classificação e estrutura espacial",
     icon: "editor",
+    nav: false,
     tools: [
       {
         id: "editor",
@@ -183,6 +192,15 @@ export const APP_MODULES: AppModule[] = [
     ],
   },
 ];
+
+/** O que o menu principal mostra. */
+export function navModules(): AppModule[] {
+  return APP_MODULES.filter((mod) => mod.nav !== false);
+}
+
+export function isNavWorkspace(id: WorkspaceId): boolean {
+  return navModules().some((mod) => mod.tools.some((tool) => tool.workspace === id));
+}
 
 export const DEFAULT_WORKSPACE: WorkspaceId = "site-plan";
 

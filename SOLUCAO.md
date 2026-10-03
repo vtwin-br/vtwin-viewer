@@ -72,18 +72,24 @@ A federação tem um IFC de coordenação (`COORD.ifc`, IFC4, sem malha de obra)
 
 ## 4. Módulos atuais (UI)
 
-A shell está em `src/app/catalog.ts`. Menu em dois níveis: domínio (1.º nível) e
-ferramenta / workspace (2.º nível). Um domínio com uma só ferramenta aparece
-como entrada direta.
+A shell está em `src/app/catalog.ts`. O menu principal é a árvore de
+planejamento. Dashboard, Visualizador, Documentação, Editor e Coordenação
+continuam no código e no mesmo `IfcSession`, fora dessa navegação.
 
-| Domínio | Ferramentas | Estado |
+| No menu | Ferramenta | Estado |
 |---|---|---|
-| Dashboard | Dashboard | Indicadores calculados (tarefas, estados pela data, custo, elementos ligados) e foco no 3D |
-| Visualizador | Visualizador | Vista 3D do viewport já aberto — não há segundo modelo |
-| Documentação | Documentação | `IfcDocumentReference` (documento e folha) e `IfcTable` |
-| Planejamento | 4D · Gantt · Logística | 4D = relatório/simulação; Gantt = editor `IfcTask`; Logística = limite de canteiro |
-| Coordenação | Coordenação | `IfcRelInterferesElements` (IFC4). BCF fica fora |
-| Editor | Editor | `IfcPropertySet`, classificação, contenção/agregação, search set |
+| Planejamento | Logística | Biblioteca no modelo, quantidades por fase e apresentação. Grava `IfcBuildingElementProxy` + `IfcElementQuantity` na `IfcTask` |
+| Planejamento | 4D | Relatório e simulação no viewport |
+| Planejamento | Gantt | Editor `IfcTask` |
+| Planejamento | Limite | Limite de canteiro (`IfcAnnotation`) |
+
+| Fora do menu | Estado |
+|---|---|
+| Dashboard | Indicadores calculados (tarefas, estados pela data, custo, elementos ligados) |
+| Visualizador | Vista 3D do viewport já aberto — não há segundo modelo |
+| Documentação | `IfcDocumentReference` (documento e folha) e `IfcTable` |
+| Coordenação | `IfcRelInterferesElements` (IFC4). BCF fica fora |
+| Editor | `IfcPropertySet`, classificação, contenção/agregação, search set |
 
 O ficheiro IFC em memória (`IfcSession`) é o mesmo em todos os módulos. Trocar
 de módulo não descarrega o modelo.
