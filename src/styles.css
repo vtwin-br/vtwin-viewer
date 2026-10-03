@@ -946,7 +946,9 @@ html.is-presenting .body-grid {
 
 html.is-presenting .site-library,
 html.is-presenting .site-lead,
-html.is-presenting .site-tools {
+html.is-presenting .site-tools,
+html.is-presenting .sim-hud,
+html.is-presenting .perf-stats {
   display: none;
 }
 

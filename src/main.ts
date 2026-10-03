@@ -1094,12 +1094,14 @@ async function main() {
           ? threeWorldToIfc(world, host.session.getExtraTransform())
           : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform());
         if (!point) return;
-        const owner = models.all.find((entry) => entry.session.schedule.byId.has(taskId))?.session ?? host.session;
+        const taskRef = models.resolveTask(taskId);
+        if (!taskRef) throw new Error("A fase escolhida não está neste IFC.");
+        const owner = taskRef.session;
         const asset =
           owner === host.session
-            ? host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0, taskId })
+            ? host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0, taskId: taskRef.nativeId })
             : host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0 });
-        if (owner !== host.session) owner.addProductsToTask(taskId, [{ guid: asset.globalId }]);
+        if (owner !== host.session) owner.addProductsToTask(taskRef.nativeId, [{ guid: asset.globalId }]);
         siteLayer.select(asset.globalId);
         sitePlanner.setSelected(asset.globalId);
         markIfcDirty();
