@@ -10,7 +10,6 @@ export interface SitePlannerOptions {
   sessions: () => IfcSession[];
   getSchedule: () => ScheduleData | null;
   onPlay: () => void;
-  onPresent: (on: boolean) => void;
   onAssetAction: (action: "rotate" | "remove") => void;
 }
 
@@ -19,7 +18,6 @@ export class SitePlanner {
   private libraryKey = "";
   private phaseId = 0;
   private selectedGuid = "";
-  private presenting = false;
 
   constructor(
     private readonly root: HTMLElement,
@@ -92,7 +90,6 @@ export class SitePlanner {
         <button type="button" class="btn-secondary" data-act="rotate" ${this.selectedGuid ? "" : "disabled"}>Rodar 45°</button>
         <button type="button" class="btn-secondary" data-act="remove" ${this.selectedGuid ? "" : "disabled"}>Apagar</button>
         <button type="button" class="btn-secondary" data-act="play">Reproduzir</button>
-        <button type="button" class="btn-primary${this.presenting ? " is-on" : ""}" data-act="present">${this.presenting ? "Sair da apresentação" : "Apresentar"}</button>
       </div>
       <h3 class="site-label">Quantidades${phase ? ` · ${escapeHtml(phase.name)}` : ""}</h3>
       ${
@@ -122,12 +119,6 @@ export class SitePlanner {
     }
     if (act === "play") {
       this.opts.onPlay();
-      return;
-    }
-    if (act === "present") {
-      this.presenting = !this.presenting;
-      this.opts.onPresent(this.presenting);
-      this.refresh();
       return;
     }
     if (act === "rotate" || act === "remove") this.opts.onAssetAction(act);

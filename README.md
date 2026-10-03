@@ -60,12 +60,11 @@ abre esse modelo automaticamente.
   - `IfcRelInterferesElements` (IFC4) → interferência gravada
 - Menu principal só de planejamento (`src/app/catalog.ts`), no mesmo
   `IfcSession` (trocar de ferramenta não descarrega o modelo):
-  - **Logística** — biblioteca 3D (grua, camião, contentor…), sequência pelas fases do cronograma, quantidades (un, m, m³) e apresentação. O que fica gravado é `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`
   - **4D** — simulação no viewport, timeline, HUD 5D, Google Photorealistic
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
-  - **Limite** — limite de canteiro (`IfcAnnotation`) e recorte do terreno
+  - **Logística** — quatro peças (grua, camião, betoneira, vedação). Cada uma pousada grava `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`. A biblioteca em si não entra no IFC
 - Fora do menu, ainda no mesmo `IfcSession`: Dashboard, Visualizador,
   Documentação, Editor e Coordenação (`IfcRelInterferesElements`). BCF
   (tópico, câmara, markup) fica de fora do IFC.

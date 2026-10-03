@@ -78,14 +78,6 @@ export const APP_MODULES: AppModule[] = [
     pinned: true,
     tools: [
       {
-        id: "site-plan",
-        label: "Logística",
-        hint: "Equipamentos, fases e quantidades",
-        description: "Pousar a biblioteca no modelo, ler quantidades por fase e apresentar",
-        workspace: "site-plan",
-        icon: "logistics",
-      },
-      {
         id: "schedule-4d",
         label: "4D",
         hint: "Reproduzir a obra",
@@ -102,9 +94,25 @@ export const APP_MODULES: AppModule[] = [
         icon: "projectPlan",
       },
       {
+        id: "site-plan",
+        label: "Logística",
+        hint: "Equipamentos e quantidades",
+        description: "Pousar grua, camião, betoneira e vedação e ler quantidades por fase",
+        workspace: "site-plan",
+        icon: "logistics",
+      },
+    ],
+  },
+  {
+    id: "site-limit",
+    label: "Limite",
+    description: "Limite de intervenção e platô no IFC",
+    icon: "limit",
+    nav: false,
+    tools: [
+      {
         id: "logistics",
         label: "Limite",
-        hint: "Contorno do terreno",
         description: "Limite de intervenção e platô no IFC",
         workspace: "logistics",
         icon: "limit",

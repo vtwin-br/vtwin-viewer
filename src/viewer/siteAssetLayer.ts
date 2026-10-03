@@ -181,14 +181,8 @@ function buildEquipment(asset: SiteAsset): THREE.Group {
     box(width, 0.08, depth, 0, height, 0, 0x334155);
     box(width, 0.08, depth, 0, height * 0.55, 0, 0x334155);
     for (let i = 0; i <= 4; i++) box(0.12, height, depth, -width / 2 + (width * i) / 4, height / 2, 0, 0x475569);
-  } else if (asset.libraryKey === "andaime") {
-    for (const x of [-width / 2 + 0.1, width / 2 - 0.1]) {
-      for (const z of [-depth / 2 + 0.1, depth / 2 - 0.1]) box(0.12, height, 0.12, x, height / 2, z, 0xd97706);
-    }
-    for (let level = 1; level <= 3; level++) box(width, 0.08, depth, 0, (height * level) / 3, 0, 0xfbbf24);
   } else {
     box(width, height, depth, 0, height / 2, 0);
-    if (asset.libraryKey === "contentor") box(width * 0.9, height * 0.7, 0.05, 0, height * 0.45, depth / 2 + 0.01, 0x7c2d12);
   }
   group.traverse((obj) => {
     obj.userData.siteAsset = asset.globalId;

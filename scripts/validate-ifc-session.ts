@@ -143,6 +143,12 @@ if (!output.includes("IFCQUANTITYCOUNT") || !output.includes("IFCQUANTITYLENGTH"
 if (!output.includes(`#${placed.proxyId}=IFCBUILDINGELEMENTPROXY`)) {
   throw new Error("O proxy da grua não ficou com o expressId ligado à tarefa.");
 }
+if (!output.includes(`(#${first.id}),$,#${placed.proxyId})`)) {
+  throw new Error("A grua não ficou em IfcRelAssignsToProduct da IfcTask.");
+}
+if (!new RegExp(`IFCRELCONTAINEDINSPATIALSTRUCTURE\\([^;]*'Canteiro'[^;]*\\(#${placed.proxyId}\\)`).test(output)) {
+  throw new Error("A grua não ficou na estrutura espacial.");
+}
 const again = new IfcSession(output, "out.ifc", emptySchedule());
 const reloaded = await again.hydrateSiteAssets();
 const crane = reloaded.find((asset) => asset.libraryKey === "grua");

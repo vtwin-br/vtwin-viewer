@@ -78,10 +78,9 @@ continuam no código e no mesmo `IfcSession`, fora dessa navegação.
 
 | No menu | Ferramenta | Estado |
 |---|---|---|
-| Planejamento | Logística | Biblioteca no modelo, quantidades por fase e apresentação. Grava `IfcBuildingElementProxy` + `IfcElementQuantity` na `IfcTask` |
 | Planejamento | 4D | Relatório e simulação no viewport |
 | Planejamento | Gantt | Editor `IfcTask` |
-| Planejamento | Limite | Limite de canteiro (`IfcAnnotation`) |
+| Planejamento | Logística | Quatro peças (grua, camião, betoneira, vedação). Cada instância grava `IfcBuildingElementProxy` + `IfcElementQuantity` na `IfcTask`. A biblioteca não entra no IFC |
 
 | Fora do menu | Estado |
 |---|---|
@@ -90,6 +89,7 @@ continuam no código e no mesmo `IfcSession`, fora dessa navegação.
 | Documentação | `IfcDocumentReference` (documento e folha) e `IfcTable` |
 | Coordenação | `IfcRelInterferesElements` (IFC4). BCF fica fora |
 | Editor | `IfcPropertySet`, classificação, contenção/agregação, search set |
+| Limite | Limite de canteiro (`IfcAnnotation`). Fora do menu deste corte |
 
 O ficheiro IFC em memória (`IfcSession`) é o mesmo em todos os módulos. Trocar
 de módulo não descarrega o modelo.

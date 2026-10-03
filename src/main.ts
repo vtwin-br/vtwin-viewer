@@ -949,10 +949,6 @@ async function main() {
       sessions: () => models.all.map((entry) => entry.session),
       getSchedule: () => scheduleRef,
       onPlay: () => timeline.togglePlay(),
-      onPresent: (on) => {
-        document.documentElement.classList.toggle("is-presenting", on);
-        if (on) setPanelOpen("inspector", false);
-      },
       onAssetAction: (action) => {
         const selected = siteLayer?.selected() ?? "";
         if (!selected) return;
