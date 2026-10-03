@@ -68,6 +68,8 @@ export interface Task {
   sourceFileName?: string;
   /** Pasta visual do ficheiro — não é uma IfcTask. */
   isFederationRoot?: boolean;
+  /** Linha extra de planejamento. Não é IfcTask e não entra no STEP. */
+  isPlanning?: boolean;
 }
 
 /** ObjectType gravado nos IfcGroup criados por esta app (selection sets 4D). */

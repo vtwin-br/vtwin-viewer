@@ -10,12 +10,12 @@ export interface PhaseQuantityLine {
   volume: number;
 }
 
-/** Fases que um planejador percorre: filhos directos do cronograma, com data. */
+/** Fases nativas que um planejador percorre. Linhas de planejamento não entram. */
 export function sitePhases(schedule: ScheduleData | null): Task[] {
   if (!schedule) return [];
-  const roots = schedule.roots.filter((task) => !task.isFederationRoot);
+  const roots = schedule.roots.filter((task) => !task.isFederationRoot && !task.isPlanning);
   const level = roots.flatMap((root) => (root.children.length ? root.children : [root]));
-  const dated = level.filter((task) => task.start && task.end && !task.isFederationRoot);
+  const dated = level.filter((task) => task.start && task.end && !task.isFederationRoot && !task.isPlanning);
   const source = dated.length ? dated : level.filter((task) => !task.isFederationRoot);
   return [...source].sort((a, b) => (a.start?.getTime() ?? 0) - (b.start?.getTime() ?? 0)).slice(0, 10);
 }

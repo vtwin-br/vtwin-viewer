@@ -27,7 +27,7 @@ abre esse modelo automaticamente.
 - Abre um ou vários **`.ifc`**, ou um pacote de projeto **`.vtwin`** (ZIP
   com membros federados, cache `.frag`, índice STEP e snapshot do
   cronograma). `Ctrl+O` / soltar ficheiros no ecrã.
-- **`Ctrl+S`** (ou o ícone de disquete) guarda o **projeto** `.vtwin`.
+- **`Ctrl+S`** (ou o ícone de disquete) guarda o **projeto** `.vtwin`, com o IFC e com `planning/site.json`.
   **`Ctrl+Shift+S`**, ou «Pacote só malha» no menu dos modelos, guarda o
   mesmo pacote **sem** os ficheiros `.ifc` (só malha `.frag`, índice e
   snapshot) para enviar ao cliente. **Exportar IFC** gera o STEP para
@@ -64,7 +64,7 @@ abre esse modelo automaticamente.
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
-  - **Logística** — quatro peças (grua, camião, betoneira, vedação). Cada uma pousada grava `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`. A biblioteca em si não entra no IFC
+  - **Logística** — guindaste, caminho, terreno e anotação. `Ctrl+S` grava os parâmetros em `planning/site.json` dentro do `.vtwin`. Exportar IFC não os escreve no STEP
 - Fora do menu, ainda no mesmo `IfcSession`: Dashboard, Visualizador,
   Documentação, Editor e Coordenação (`IfcRelInterferesElements`). BCF
   (tópico, câmara, markup) fica de fora do IFC.

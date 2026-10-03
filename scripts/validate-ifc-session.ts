@@ -5,7 +5,17 @@ import { packVtwin, unpackVtwin } from "../src/project/pack";
 import * as WebIFC from "web-ifc";
 import { resolve } from "node:path";
 import { detectIfcSchema } from "../src/ifc/stepText";
-import { phaseQuantities, sitePhases } from "../src/site/phases";
+import {
+  addPlanningLine,
+  DEFAULT_JIB_LENGTH,
+  DEFAULT_MAST_HEIGHT,
+  DEFAULT_TERRAIN_DEPTH,
+  DEFAULT_TERRAIN_SLOPE,
+  emptySitePlan,
+  parseSitePlan,
+  pathLength,
+  sitePlanToJson,
+} from "../src/planning/sitePlan";
 
 const projectGuid = "0000000000000000000000";
 if (detectIfcSchema("FILE_SCHEMA(('IFC2X3'));") !== "IFC2X3") throw new Error("Adaptador IFC2X3 inválido.");
@@ -25,6 +35,8 @@ DATA;
 #12=IFCRELCONTAINEDINSPATIALSTRUCTURE('3333333333333333333333',$,$,$,(#10),#11);
 #13=IFCWALL('4444444444444444444444',$,'Parede 2',$,$,$,$,$,$);
 #14=IFCBUILDING('5555555555555555555555',$,'Edificio',$,$,$,$,$,$,$,$);
+#90=IFCBUILDINGELEMENTPROXY('6666666666666666666666',$,'Grua','Guindaste','VISTA4D_SITE_ASSET',$,$,'grua',$);
+#91=IFCRELASSIGNSTOPRODUCT('7777777777777777777777',$,$,$,(#1),$,#90);
 ENDSEC;
 END-ISO-10303-21;
 `;
@@ -73,14 +85,6 @@ session.setSiteLimit({
   clipBuffer: 4,
   showPlateau: true,
 });
-
-const placed = session.placeSiteAsset({ libraryKey: "grua", x: 10, y: 4, z: 1, yaw: 0, taskId: first.id });
-session.placeSiteAsset({ libraryKey: "vedacao", x: 0, y: 0, z: 1, taskId: second.id });
-const phase = sitePhases(session.schedule).find((task) => task.id === first.id);
-const qty = phase ? phaseQuantities(session.schedule, session.listSiteAssets(), phase) : [];
-if (!qty.some((line) => line.key === "grua" && line.count === 1)) {
-  throw new Error("A quantidade da grua não entrou na fase.");
-}
 
 const sourceBytes = new Uint8Array(source.length);
 for (let index = 0; index < source.length; index++) sourceBytes[index] = source.charCodeAt(index);
@@ -134,35 +138,65 @@ if (!output.includes("IFCRELINTERFERESELEMENTS") || !output.includes("'Paredes s
 if (!output.includes("#10") || !/#\d+=IFCRELCONTAINEDINSPATIALSTRUCTURE\([^)]*#10,#14\)/.test(output) && !output.includes("#14")) {
   throw new Error("A mudança de contenção espacial não foi exportada.");
 }
-if (!output.includes("VISTA4D_SITE_ASSET") || !output.includes("IFCEXTRUDEDAREASOLID") || !output.includes("Qto_Vista4dSiteAsset")) {
-  throw new Error("O elemento de canteiro não foi exportado.");
+if (output.includes("VISTA4D_SITE_ASSET") || output.includes("Qto_Vista4dSiteAsset") || output.includes("'Guindaste'")) {
+  throw new Error("O export IFC ainda contém planejamento de obra.");
 }
-if (!output.includes("IFCQUANTITYCOUNT") || !output.includes("IFCQUANTITYLENGTH") || !output.includes("'grua'") || !output.includes("'vedacao'")) {
-  throw new Error("As quantidades do canteiro não foram exportadas.");
+if (!output.includes("/* site-asset #90 IFCBUILDINGELEMENTPROXY */")) {
+  throw new Error("O proxy de canteiro antigo não foi retirado do STEP.");
 }
-if (!output.includes(`#${placed.proxyId}=IFCBUILDINGELEMENTPROXY`)) {
-  throw new Error("O proxy da grua não ficou com o expressId ligado à tarefa.");
-}
-if (!output.includes(`(#${first.id}),$,#${placed.proxyId})`)) {
-  throw new Error("A grua não ficou em IfcRelAssignsToProduct da IfcTask.");
-}
-if (!new RegExp(`IFCRELCONTAINEDINSPATIALSTRUCTURE\\([^;]*'Canteiro'[^;]*\\(#${placed.proxyId}\\)`).test(output)) {
-  throw new Error("A grua não ficou na estrutura espacial.");
+if (!output.includes("/* site-asset #91 IFCRELASSIGNSTOPRODUCT */")) {
+  throw new Error("A ligação do guindaste à IfcTask não foi retirada do STEP.");
 }
 const again = new IfcSession(output, "out.ifc", emptySchedule());
 const reloaded = await again.hydrateSiteAssets();
-const crane = reloaded.find((asset) => asset.libraryKey === "grua");
-const fence = reloaded.find((asset) => asset.libraryKey === "vedacao");
-if (!crane || Math.abs(crane.x - 10) > 1e-4 || crane.count !== 1) {
-  throw new Error("A grua não voltou a ser lida do STEP.");
-}
-if (!fence || fence.length !== 12) {
-  throw new Error("A vedação não voltou com o comprimento.");
-}
+if (reloaded.length) throw new Error("O STEP reaberto ainda tem equipamento de canteiro.");
 const moved = /IFCRELCONTAINEDINSPATIALSTRUCTURE\([^;]*#10[^;]*#14\)/.test(output);
 if (!moved) throw new Error("A parede não passou a estar contida no IfcBuilding.");
 if (!output.endsWith("END-ISO-10303-21;\n")) {
   throw new Error("A estrutura STEP final ficou inválida.");
+}
+
+const plan = emptySitePlan();
+const line = addPlanningLine(plan, "Guindaste", new Date(2022, 11, 5), new Date(2023, 0, 20));
+plan.cranes.push({
+  id: "crane-1",
+  x: 10,
+  y: 4,
+  z: 1,
+  yaw: 0.5,
+  mastHeight: DEFAULT_MAST_HEIGHT,
+  jibLength: DEFAULT_JIB_LENGTH,
+  lineId: line.id,
+});
+plan.paths.push({
+  id: "path-1",
+  points: [
+    { x: 0, y: 0, z: 0 },
+    { x: 8, y: 0, z: 0 },
+    { x: 8, y: 6, z: 0 },
+  ],
+  lineId: line.id,
+});
+plan.terrains.push({
+  id: "terrain-1",
+  contour: [
+    { x: 0, y: 0, z: 1 },
+    { x: 12, y: 0, z: 1 },
+    { x: 12, y: 9, z: 1 },
+    { x: 0, y: 9, z: 1 },
+  ],
+  operation: "cut",
+  depth: DEFAULT_TERRAIN_DEPTH,
+  slope: DEFAULT_TERRAIN_SLOPE,
+  lineId: line.id,
+});
+plan.notes.push({ id: "note-1", x: 3, y: 2, z: 1, text: "Nota de obra", lineId: line.id });
+const planAgain = parseSitePlan(sitePlanToJson(plan));
+if (planAgain.cranes[0]?.yaw !== 0.5 || planAgain.lines[0]?.origin !== "planning") {
+  throw new Error("O JSON de planejamento não preservou os parâmetros.");
+}
+if (Math.abs(pathLength(planAgain.paths[0]!) - 14) > 1e-6) {
+  throw new Error("O caminho não preservou a polilinha.");
 }
 
 const mesh = await packVtwin(
@@ -182,13 +216,58 @@ const mesh = await packVtwin(
       role: "discipline",
     },
   ],
-  { meshOnly: true },
+  { meshOnly: true, sitePlan: plan },
 );
 const unpacked = await unpackVtwin(mesh);
 if (!unpacked.manifest.meshOnly) throw new Error("O pacote só malha não marcou meshOnly.");
 if (unpacked.models[0]?.ifc.byteLength) throw new Error("O pacote só malha ainda traz o STEP.");
 if (unpacked.models[0]?.frag?.byteLength !== 4) throw new Error("O pacote só malha perdeu o .frag.");
 if (!unpacked.models[0]?.index) throw new Error("O pacote só malha perdeu o índice.");
+const saved = unpacked.sitePlan;
+const crane = saved.cranes[0];
+const terrain = saved.terrains[0];
+const note = saved.notes[0];
+if (!crane || crane.x !== 10 || crane.mastHeight !== DEFAULT_MAST_HEIGHT || crane.jibLength !== DEFAULT_JIB_LENGTH || crane.yaw !== 0.5) {
+  throw new Error("O .vtwin não restaurou o guindaste.");
+}
+if (!saved.paths[0] || saved.paths[0].points.length !== 3) throw new Error("O .vtwin não restaurou o caminho.");
+if (!terrain || terrain.operation !== "cut" || terrain.depth !== DEFAULT_TERRAIN_DEPTH || terrain.slope !== DEFAULT_TERRAIN_SLOPE || terrain.contour.length !== 4) {
+  throw new Error("O .vtwin não restaurou o terreno.");
+}
+if (!note || note.text !== "Nota de obra" || note.x !== 3) throw new Error("O .vtwin não restaurou a anotação.");
+if (saved.lines[0]?.origin !== "planning" || saved.lines[0]?.start !== "2022-12-05") {
+  throw new Error("O .vtwin não restaurou a linha de planejamento.");
+}
+
+const full = await packVtwin(
+  "Obra",
+  [
+    {
+      id: "disc-1",
+      fileName: "disciplina.ifc",
+      schema: "IFC4",
+      hash: "abc123",
+      visible: true,
+      extra: { x: 0, y: 0, z: 0, yaw: 0 },
+      ifc: bytes,
+      frag: new Uint8Array([1, 2, 3, 4]),
+      schedule: emptySchedule(),
+      index: buildStepIndex(output),
+      role: "discipline",
+    },
+  ],
+  { sitePlan: plan },
+);
+const fullOpen = await unpackVtwin(full);
+let packedIfc = "";
+const packedBytes = fullOpen.models[0]?.ifc ?? new Uint8Array();
+for (let index = 0; index < packedBytes.length; index++) packedIfc += String.fromCharCode(packedBytes[index]!);
+if (packedIfc.includes("VISTA4D_SITE_ASSET") || packedIfc.includes("Nota de obra") || packedIfc.includes("'Guindaste'")) {
+  throw new Error("O IFC dentro do .vtwin ainda contém planejamento de obra.");
+}
+if (fullOpen.sitePlan.notes[0]?.text !== "Nota de obra") {
+  throw new Error("Reabrir o .vtwin perdeu a anotação.");
+}
 
 const api = new WebIFC.IfcAPI();
 api.SetWasmPath(`${resolve("node_modules/web-ifc").replace(/\\/g, "/")}/`, true);

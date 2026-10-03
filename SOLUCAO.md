@@ -24,27 +24,51 @@ O IFC não é um ficheiro de importação. **É o modelo de dados da aplicação
 
 ---
 
-## 2. Regra de ouro (o que “entra” na plataforma)
+## 2. Dois ficheiros, dois papéis
 
-Se o utilizador faz algo na UI e considera isso **gravado**, tem de existir no
-arquivo IFC exportado (**Exportar IFC**). `Ctrl+S` guarda o pacote de projeto
-(`.vtwin`) — atalho de sessão, não o formato mestre.
+Há duas coisas gravadas, e não se misturam.
 
-Antes de implementar uma funcionalidade, responder:
+**Exportar IFC** é o que os projetistas constroem e o 4D/5D nativo: hierarquia,
+property sets, cronograma `IfcTask`. Esse `.ifc` continua a ser o mestre
+BuildingSMART. Outro programa openBIM abre-o sem um esquema nosso.
+
+**O planejamento de obra** fica fora do schema. Guindaste, caminho de camião,
+terreno de corte e aterro, anotação de site e linha extra de cronograma que não
+é tarefa IFC vivem num formato do viewer, dentro do pacote `.vtwin`, no ficheiro
+`planning/site.json`. É paramétrico e versionado (`version: 1`).
+
+`Ctrl+S` grava o `.vtwin` com o IFC **e** com esse JSON. **Exportar IFC** ignora
+o JSON e não escreve essas entidades no STEP.
+
+O 3D do planejamento é gerado na vista a partir dos parâmetros. Não se grava
+malha, fotograma, cor de simulação, hover nem câmara. BCF, câmara, markup e a
+percentagem da barra do Gantt continuam fora do mestre.
+
+Nem todo elemento IFC tem tarefa. Itens de planejamento podem aparecer no
+cronograma como linhas extras, somadas ao 4D/5D nativo, marcadas como
+planejamento, sem serem escritas como `IfcTask`.
+
+Antes de implementar uma funcionalidade de **modelo BIM**, responder:
 
 1. **Em que entidade IFC isto vive?** (`IfcTask`, `IfcGroup`, `IfcCostValue`, …)
 2. **Em que relação IFC se liga ao resto?** (`IfcRelNests`, `IfcRelAssignsToProduct`, …)
 3. **O export STEP preserva isto?** Abrir o `.ifc` noutro programa confirma.
 
-| Resultado | Classificação |
-|---|---|
-| Sim às três | Funcionalidade da plataforma |
-| Só existe no ecrã / JSON / sessão | **Rascunho** — útil para trabalhar, não é “salvo no modelo” |
-| Não há entidade IFC adequada | Não inventar um esquema nosso; ou não fazer, ou mapear para o IFC mais próximo |
+Se a resposta for planejamento de obra, a pergunta é outra: **que parâmetros
+entram em `planning/site.json`?** Não se inventa um proxy IFC para os substituir.
 
-Cores da simulação 4D, hover e câmara **não** precisam de entidade: são vistas
-calculadas sobre dados que já estão no IFC (datas da `IfcTaskTime`, GUIDs dos
-produtos).
+| O quê | Onde fica |
+|---|---|
+| Hierarquia, psets, `IfcTask`, custo, documentos, classificação | IFC exportado |
+| Guindaste (posição, rotação, altura do mastro, comprimento da lança) | `planning/site.json` |
+| Caminho (polilinha) | `planning/site.json` |
+| Terreno (contorno, corte ou aterro, profundidade, inclinação) | `planning/site.json` |
+| Anotação (ponto e texto) | `planning/site.json` |
+| Linha extra de cronograma, com datas, `origin: "planning"` | `planning/site.json` |
+| Malha da vista, cor de simulação, hover, câmara, BCF, % do Gantt | Não se grava |
+
+O catálogo de peças e os projetos em base de dados ficam para mais tarde. Nesta
+versão a app é local-first: não há back-end.
 
 ---
 
@@ -56,7 +80,7 @@ O IFC é um **esquema**. A troca oficial mais usada é o **STEP Physical File**
 | Camada | Formato | Papel |
 |---|---|---|
 | Canónico (contrato BIM) | **IFC-SPF (`.ifc`)** | Importar, editar, exportar. Fonte da verdade. Cada disciplina no seu ficheiro. |
-| Pacote de projeto | **`.vtwin`** (ZIP) | Um clique: membros federados + `.frag` + índice + snapshot do cronograma. Não substitui o IFC. |
+| Pacote de projeto | **`.vtwin`** (ZIP) | Membros federados + `.frag` + índice + snapshot do cronograma + `planning/site.json`. O JSON é o planejamento de obra. O IFC dentro do pacote continua a ser o mestre BIM. |
 | Pacote só malha | **`.vtwin`** com `meshOnly` | O mesmo pacote sem os STEP (`model.ifc`). Serve para entregar a malha ao cliente. Sem o IFC canónico local, não há Exportar IFC. |
 | Arquivo / envio | `.ifcZIP` | Compressão do mesmo STEP. |
 | Visualização 3D | **Fragments** (That Open) | Runtime no viewport; cache IndexedDB e cópia dentro do `.vtwin`. |
@@ -80,7 +104,7 @@ continuam no código e no mesmo `IfcSession`, fora dessa navegação.
 |---|---|---|
 | Planejamento | 4D | Relatório e simulação no viewport |
 | Planejamento | Gantt | Editor `IfcTask` |
-| Planejamento | Logística | Quatro peças (grua, camião, betoneira, vedação). Cada instância grava `IfcBuildingElementProxy` + `IfcElementQuantity` na `IfcTask`. A biblioteca não entra no IFC |
+| Planejamento | Logística | Guindaste, caminho, terreno e anotação. Os parâmetros ficam em `planning/site.json`. A vista gera o 3D. Nada disto entra no STEP |
 
 | Fora do menu | Estado |
 |---|---|
@@ -124,9 +148,7 @@ IfcRelContainedInSpatialStructure   produto dentro de IfcSite / Building / Store
 IfcRelAggregates                    agregação entre elementos espaciais
 IfcGroup VISTA4D_SEARCH             search set; a consulta está em Pset_Vista4dSearch.Query
 IfcRelInterferesElements            interferência gravada (IFC4)
-IfcBuildingElementProxy VISTA4D_SITE_ASSET   equipamento de canteiro (caixa) + IfcLocalPlacement
-IfcElementQuantity Qto_Vista4dSiteAsset  contagem, comprimento e volume do equipamento
-IfcRelAssignsToProduct              o equipamento ligado à IfcTask da fase
+planning/site.json                  planejamento de obra (não é STEP)
 COORD.ifc (federação)               IfcProject + IfcSite; WorkPlan/Task/custo/canteiro/documentos
 Disciplina no export                IfcTask stub (mesmo GlobalId) + IfcRelAssignsToProduct
 ```
@@ -165,7 +187,7 @@ A app cria a COORD na primeira edição de Gantt, 5D, logística ou ao guardar `
 | Mover na árvore espacial | produto → `IfcRelContainedInSpatialStructure`; elemento espacial → `IfcRelAggregates` | Sim |
 | Search set | `IfcGroup` (`ObjectType = VISTA4D_SEARCH`) + membros `IfcRelAssignsToGroup` + consulta em `Pset_Vista4dSearch` / `Query` (`Tipo=IfcWall` ou `Pset.Prop=valor`) | Sim |
 | Interferência | `IfcRelInterferesElements` (IFC4). Dois GlobalId; se estiverem em ficheiros diferentes, a relação fica na COORD com proxies | Sim |
-| Equipamento de canteiro | `IfcBuildingElementProxy` (`ObjectType = VISTA4D_SITE_ASSET`) + caixa `IfcExtrudedAreaSolid` + `IfcElementQuantity` (`Count`, `Length`, `Volume`) + `IfcRelAssignsToProduct` à fase | Sim. A malha reconhecível (grua, camião…) é vista do `Tag`; o STEP leva a caixa, a posição e as quantidades |
+| Planejamento de obra | `planning/site.json` no `.vtwin`: guindaste, caminho, terreno, anotação, linha extra | Não. O export comenta proxies `VISTA4D_SITE_ASSET` que tenham ficado de uma versão anterior |
 
 Código de escrita: `src/ifc/ifcSession.ts` (patches STEP; o resto do ficheiro
 fica intacto). Leitura do cronograma: `src/schedule/parseSchedule.ts`.
@@ -179,7 +201,7 @@ O Gantt (`src/ui/projectWorkspace.ts`) é uma **vista** desse grafo, não um seg
 | Tópicos BCF, câmara, markup, vista do clash | — | Não há entidade IFC para o tópico BCF nem para a câmara. A câmara é vista calculada. O par de elementos, quando o utilizador o grava, é `IfcRelInterferesElements` — não um `.bcf` nosso |
 | Varredura automática de clash | não está na UI | Não há ficheiro de clash. O par que o utilizador grava é `IfcRelInterferesElements` |
 
-Cada linha do Gantt é uma `IfcTask`. Sem modelo IFC aberto não há cronograma para editar.
+Cada linha editável do Gantt é uma `IfcTask`. Uma linha com `origin: "planning"` aparece na árvore 4D e na linha do tempo, marcada como Plano, e não é escrita no STEP. Sem modelo IFC aberto não há cronograma nativo para editar. Nem todo elemento IFC tem tarefa.
 
 ---
 
@@ -196,10 +218,10 @@ Não são bases de dados à parte. São **vistas** sobre o mesmo grafo IFC:
   conjuntos, ligação ao 3D, **custo 5D**). O valor da coluna Custo fica na
   tarefa e portanto nos mesmos produtos/conjuntos já ligados. Sem simulação,
   terreno ou caminhada. O viewport 3D, quando aberto, é pré-visualização BIM.
-- **Logística** — limite de intervenção no `IfcSite` (polígono + cota). O Google
-  Photorealistic 3D Tiles é recortado em prisma nesse polígono; o platô é vista
-  sobre a mesma curva. Terreno e caminhada estão disponíveis. Equipamento e
-  rotas ainda não.
+- **Logística** — planejamento de obra na vista: guindaste, caminho, terreno
+  de corte ou aterro e anotação. Os parâmetros estão em `planning/site.json`.
+  O limite de intervenção no `IfcSite` (polígono de recorte do mapa) continua
+  a ser `IfcAnnotation`, fora deste menu.
 - **5D** — `IfcCostItem` / `IfcCostValue` ligados à mesma tarefa (coluna Custo
   do Gantt ou inspector); o HUD da ferramenta 4D acumula no tempo. A primeira
   edição cria `IfcCostSchedule` na COORD.
@@ -214,7 +236,7 @@ cronograma nativo no próprio ficheiro (ou importa CSV/XML para `IfcTask`).
 ## 7. Arquitetura de runtime (hoje)
 
 ```
-.vtwin (ZIP de sessão)  — manifesto + models/<id>/{model.ifc, model.frag, index, schedule}
+.vtwin (ZIP)  — manifesto + planning/site.json + models/<id>/{model.ifc, model.frag, index, schedule}
         ↓ abrir
 .ifc (SPF)  — ficheiro canónico, em OPFS enquanto a sessão está aberta
   ├─ IfcLoader / cache .frag versionado  → Fragments (malha + perfil semântico)
@@ -265,6 +287,7 @@ artefatos derivados; o IFC continua sendo a fonte e a saída interoperável.
 | `src/ifc/stepIndex.ts` | Índice expressId / GlobalId / tipo |
 | `src/ifc/stepStore.ts` | Bytes IFC em OPFS |
 | `src/ifc/fragCache.ts` | Cache IndexedDB de `.frag` + cronograma |
+| `src/planning/sitePlan.ts` | `planning/site.json`: guindaste, caminho, terreno, anotação, linha extra |
 | `src/project/` | Pacote `.vtwin` (manifesto, ZIP, recase de GUID) |
 | `src/schedule/parseSchedule.ts` | Leitura nativa 4D/5D/grupos |
 | `src/schedule/links.ts` | FS/SS/FF/SF, folga e recálculo à frente |
@@ -295,4 +318,4 @@ inventado pela app): `IfcWorkPlan` «Engineering and Construction»,
 - **Pacote só malha** não contém o STEP. Abrir esse `.vtwin` mostra a malha e o snapshot; Exportar IFC só funciona se o IFC canónico ainda estiver no armazenamento local.
 - **`.mpp` binário** não é interpretado. O que se grava é a referência (`IfcDocumentReference`), não as tarefas. Tarefas entram por XML ou CSV.
 - **Apresentação ao cliente** (esconder o menu e reproduzir as fases) é uma vista. A câmara não entra no STEP.
-- **Malha da biblioteca de canteiro** (grua, camião, etc.) é uma vista. O STEP grava a caixa, a posição, o `Tag` e as quantidades.
+- **Planejamento de obra** (guindaste, caminho, corte/aterro, anotação, linha extra) não entra no STEP. Vive em `planning/site.json`. A malha é gerada na vista e não se grava. Proxies `VISTA4D_SITE_ASSET` de uma versão anterior são comentados no export.

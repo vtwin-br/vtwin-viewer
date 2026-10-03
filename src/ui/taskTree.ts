@@ -232,7 +232,12 @@ export class TaskTreeUI {
       el.appendChild(ident);
     }
     el.appendChild(document.createTextNode(displayTaskName(task)));
-    if (task.isFederationRoot) {
+    if (task.isPlanning) {
+      const badge = document.createElement("span");
+      badge.className = "task-plan";
+      badge.textContent = "Plano";
+      el.appendChild(badge);
+    } else if (task.isFederationRoot) {
       const badge = document.createElement("span");
       badge.className = "task-file";
       badge.textContent = "IFC";

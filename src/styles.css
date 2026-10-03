@@ -978,15 +978,54 @@ button.header-project:hover,
 }
 
 .site-quantities li {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  padding: 8px 2px;
+  display: block;
+  padding: 0;
   border-bottom: 1px solid color-mix(in srgb, var(--vtwin-mist) 12%, transparent);
   color: var(--vtwin-mist);
   font-family: var(--font);
   font-size: 13px;
+}
+
+.site-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 2px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.site-line.is-on {
+  color: var(--vtwin-white);
+}
+
+.site-note-input {
+  width: 100%;
+  height: 32px;
+  margin: 0;
+  padding: 0 2px;
+  border: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--vtwin-mist) 32%, transparent);
+  border-radius: 0;
+  background: transparent;
+  color: var(--vtwin-white);
+  font-family: var(--font);
+  font-size: 13px;
+}
+
+.site-note-input::placeholder {
+  color: var(--vtwin-mineral);
+}
+
+.site-note-input:focus {
+  outline: none;
+  border-bottom-color: var(--vtwin-signal);
 }
 
 .site-qty {
@@ -2056,6 +2095,18 @@ html.is-presenting .perf-stats {
   margin-right: 6px;
   font-family: var(--mono);
   font-size: 10px;
+}
+
+.task-row .name .task-plan {
+  flex-shrink: 0;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--ink-3);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
 }
 
 .task-row .name .task-file {

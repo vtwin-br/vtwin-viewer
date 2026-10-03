@@ -41,6 +41,7 @@ import {
   insertBeforeLastEndsec,
   latin1ToBytes,
   maxExpressId,
+  parseStepSetIds,
   serializeEntity,
   stepSet,
   type IfcSchemaKind,
@@ -394,43 +395,6 @@ export class IfcSession {
     const text = await this.ensureText();
     this.siteAssets = parseSiteAssets(text, this.index);
     return this.listSiteAssets();
-  }
-
-  placeSiteAsset(input: { libraryKey: string; x: number; y: number; z: number; yaw?: number; taskId?: number }): SiteAsset {
-    const item = libraryItem(input.libraryKey);
-    if (!item) throw new Error("Esse equipamento não está na biblioteca do canteiro.");
-    if (input.taskId != null && !this.schedule.byId.has(input.taskId)) {
-      throw new Error("A fase escolhida não está neste IFC.");
-    }
-    const quantities = [item.count, item.length, item.volume].filter((value) => value > 0).length;
-    const planned = planSiteAssetIds(() => this.allocId(), {
-      needsContext: siteAssetNeedsContext(this.index),
-      quantities,
-      hasContainer: siteAssetHasContainer(this.index),
-    });
-    const asset: SiteAsset = {
-      proxyId: planned.proxyId,
-      globalId: createIfcGuid(),
-      libraryKey: item.key,
-      name: item.name,
-      x: input.x,
-      y: input.y,
-      z: input.z,
-      yaw: input.yaw ?? 0,
-      count: item.count,
-      length: item.length,
-      volume: item.volume,
-      clusterIds: planned.clusterIds,
-      isNew: true,
-      dirty: true,
-    };
-    this.rememberSiteProxy(asset.proxyId, asset.globalId);
-    this.siteAssets.push(asset);
-    this.siteAssetsDirty = true;
-    if (input.taskId != null) this.addProductsToTask(input.taskId, [{ guid: asset.globalId, expressIdHint: asset.proxyId }]);
-    this.changeSet.append({ kind: "semantic:write", target: "site-asset" });
-    this.dirty = true;
-    return cloneSiteAsset(asset);
   }
 
   moveSiteAsset(globalId: string, patch: { x?: number; y?: number; z?: number; yaw?: number }): SiteAsset {
@@ -2708,13 +2672,21 @@ export class IfcSession {
     newLines.push(...semantic.lines);
     replacements.push(...semantic.replacements);
 
-    if (this.siteAssetsDirty) {
-      for (const id of this.removedSiteAssetClusters) comment(id, "site-asset");
-      for (const asset of this.siteAssets) {
-        if (!asset.isNew && !asset.dirty) continue;
-        if (!asset.isNew) for (const id of asset.clusterIds) comment(id, "site-asset");
-        newLines.push(...serializeSiteAsset(asset, this.schema, oh, this.index));
+    const stepNow = this.step();
+    if (stepNow.includes("VISTA4D_SITE_ASSET") || this.removedSiteAssetClusters.length) {
+      if (stepNow.includes("VISTA4D_SITE_ASSET")) {
+        const proxies = new Set<number>();
+        for (const asset of parseSiteAssets(stepNow, this.index)) {
+          proxies.add(asset.proxyId);
+          for (const id of asset.clusterIds) comment(id, "site-asset");
+        }
+        for (const relId of idsOfType(this.index, "IFCRELASSIGNSTOPRODUCT")) {
+          const rel = this.find(relId);
+          const productId = parseStepSetIds(rel?.args[6])[0];
+          if (productId != null && proxies.has(productId)) comment(relId, "site-asset");
+        }
       }
+      for (const id of this.removedSiteAssetClusters) comment(id, "site-asset");
     }
 
     if (this.siteLimitDirty) {

@@ -22,8 +22,24 @@ import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projec
 import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
 import { ModuleWorkspace } from "./ui/moduleWorkspace";
-import { SitePlanner } from "./ui/sitePlanner";
-import { SiteAssetLayer } from "./viewer/siteAssetLayer";
+import { SitePlanner, type PlanAction, type PlanTool } from "./ui/sitePlanner";
+import {
+  addPlanningLine,
+  bytesIncludeMarker,
+  DEFAULT_JIB_LENGTH,
+  DEFAULT_MAST_HEIGHT,
+  DEFAULT_TERRAIN_DEPTH,
+  DEFAULT_TERRAIN_SLOPE,
+  emptySitePlan,
+  importLegacyAssets,
+  newPlanId,
+  overlaySitePlan,
+  removePlanItem,
+  type PlanPoint,
+  type SitePlan,
+} from "./planning/sitePlan";
+import { VISTA4D_SITE_ASSET } from "./site/types";
+import { SitePlanLayer } from "./viewer/sitePlanLayer";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
@@ -177,6 +193,8 @@ async function main() {
   let selectedTask: Task | null = null;
   let lastDate = new Date();
   let scheduleRef: ScheduleData | null = null;
+  /** Cronograma IFC, sem as linhas de planejamento. As fases da Logística leem daqui. */
+  let nativeScheduleRef: ScheduleData | null = null;
   let highlighter: ScheduleHighlighter | null = null;
   let lastAssistCatalog: BimCatalog | null = null;
   let simHud: SimHud | null = null;
@@ -408,7 +426,10 @@ async function main() {
   let refreshFederatedView = (_opts?: { structure?: boolean }) => {};
   let refreshModuleWorkspace = (_id: WorkspaceId) => {};
   let refreshSitePlanner = () => {};
-  let siteLayer: SiteAssetLayer | null = null;
+  let siteLayer: SitePlanLayer | null = null;
+  let sitePlan: SitePlan = emptySitePlan();
+  let planDirty = false;
+  let planDraft: { kind: "path" | "terrain"; id: string } | null = null;
   let sitePlanner: SitePlanner | null = null;
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
@@ -644,13 +665,14 @@ async function main() {
   };
 
   const syncFileChrome = () => {
-    const dirty = models.anyDirty();
+    const ifcDirty = models.anyDirty();
+    const dirty = ifcDirty || planDirty;
     const label = projectName ?? (models.size ? models.label() : "Abrir modelo");
     setFileLabel(label, dirty);
     if (fileExtEl) fileExtEl.textContent = projectName ? "VTWIN" : "IFC";
     if (btnExport) btnExport.disabled = models.size === 0;
     if (btnSaveProject) btnSaveProject.disabled = models.size === 0;
-    btnExport?.classList.toggle("is-dirty", dirty);
+    btnExport?.classList.toggle("is-dirty", ifcDirty);
     btnSaveProject?.classList.toggle("is-dirty", dirty);
     if (btnExportLabel) btnExportLabel.textContent = models.size > 1 ? "Exportar IFCs" : "Exportar IFC";
     const importLabel = document.getElementById("btn-import-label");
@@ -729,7 +751,8 @@ async function main() {
             if (!extraIsIdentity(extra)) entry.session.hydrateExtraTransform(extra);
           }
           let ifc: Uint8Array;
-          const hasPlanning = entry.session.dirty;
+          const stored = entry.hash ? await loadIfcBytes(entry.hash) : null;
+          const hasPlanning = entry.session.dirty || (stored ? bytesIncludeMarker(stored, VISTA4D_SITE_ASSET) : false);
           if (hasPlanning) {
             ifc = await entry.session.exportBytes();
             entry.hash = entry.session.sourceHash ?? (await hashIfcBytes(ifc));
@@ -773,7 +796,8 @@ async function main() {
           });
         }
         const name = projectName ?? models.label();
-        const bytes = await packVtwin(name, packed, { meshOnly });
+        const bytes = await packVtwin(name, packed, { meshOnly, sitePlan });
+        planDirty = false;
         const downloadName = meshOnly
           ? vtwinDownloadName(name).replace(/\.vtwin$/i, "-malha.vtwin")
           : vtwinDownloadName(name);
@@ -830,6 +854,10 @@ async function main() {
         return;
       }
       setPanelOpen("inspector", true);
+      if (task.isPlanning) {
+        refreshInspector();
+        return;
+      }
       const gids = scheduleRef?.productGuidsByTask.get(task.id) ?? task.productGuids;
       void focusGuidsInView(gids);
       refreshInspector();
@@ -941,37 +969,114 @@ async function main() {
     refreshModuleWorkspace(nav.getWorkspace());
   }
 
+  const phaseWindow = (): { start: Date; end: Date } => {
+    const phase = scheduleRef?.byId.get(sitePlanner?.phaseTaskId() ?? 0);
+    const start = phase?.start ?? scheduleRef?.minDate ?? new Date();
+    const end = phase?.end ?? scheduleRef?.maxDate ?? start;
+    return { start, end };
+  };
+
+  const touchPlan = (ids: string[] = []) => {
+    planDirty = true;
+    syncFileChrome();
+    if (ids.length) bumpSimulation(ids);
+    refreshFederatedView({ structure: true });
+  };
+
+  const commitPlanItem = (tool: PlanTool, point: PlanPoint, modelId: string): string => {
+    const dates = phaseWindow();
+    if (tool === "crane") {
+      planDraft = null;
+      const line = addPlanningLine(sitePlan, "Guindaste", dates.start, dates.end);
+      const id = newPlanId();
+      sitePlan.cranes.push({
+        id,
+        modelId,
+        ...point,
+        yaw: 0,
+        mastHeight: DEFAULT_MAST_HEIGHT,
+        jibLength: DEFAULT_JIB_LENGTH,
+        lineId: line.id,
+      });
+      return id;
+    }
+    if (tool === "path") {
+      if (!planDraft || planDraft.kind !== "path") {
+        const line = addPlanningLine(sitePlan, "Caminho", dates.start, dates.end);
+        const id = newPlanId();
+        sitePlan.paths.push({ id, modelId, points: [point], lineId: line.id });
+        planDraft = { kind: "path", id };
+        return id;
+      }
+      sitePlan.paths.find((item) => item.id === planDraft?.id)?.points.push(point);
+      return planDraft.id;
+    }
+    if (tool === "terrain") {
+      if (!planDraft || planDraft.kind !== "terrain") {
+        const line = addPlanningLine(sitePlan, "Terreno", dates.start, dates.end);
+        const id = newPlanId();
+        sitePlan.terrains.push({
+          id,
+          modelId,
+          contour: [point],
+          operation: "cut",
+          depth: DEFAULT_TERRAIN_DEPTH,
+          slope: DEFAULT_TERRAIN_SLOPE,
+          lineId: line.id,
+        });
+        planDraft = { kind: "terrain", id };
+        return id;
+      }
+      sitePlan.terrains.find((item) => item.id === planDraft?.id)?.contour.push(point);
+      return planDraft.id;
+    }
+    planDraft = null;
+    const text = sitePlanner?.noteText() || "Nota";
+    const line = addPlanningLine(sitePlan, text, dates.start, dates.end);
+    const id = newPlanId();
+    sitePlan.notes.push({ id, modelId, ...point, text, lineId: line.id });
+    return id;
+  };
+
+  const applyPlanAction = (action: PlanAction) => {
+    const id = siteLayer?.selected() ?? "";
+    if (!id) return;
+    const crane = sitePlan.cranes.find((item) => item.id === id);
+    const terrain = sitePlan.terrains.find((item) => item.id === id);
+    if (action === "remove") {
+      removePlanItem(sitePlan, id);
+      if (planDraft?.id === id) planDraft = null;
+      siteLayer?.select("");
+      sitePlanner?.setSelected("");
+    } else if (action === "rotate" && crane) crane.yaw += Math.PI / 4;
+    else if (action === "mast-up" && crane) crane.mastHeight += 1;
+    else if (action === "mast-down" && crane) crane.mastHeight = Math.max(2, crane.mastHeight - 1);
+    else if (action === "jib-up" && crane) crane.jibLength += 1;
+    else if (action === "jib-down" && crane) crane.jibLength = Math.max(2, crane.jibLength - 1);
+    else if (action === "cut" && terrain) terrain.operation = "cut";
+    else if (action === "fill" && terrain) terrain.operation = "fill";
+    else return;
+    touchPlan([id]);
+  };
+
   const siteRoot = document.getElementById("site-planner");
   if (siteRoot) {
     sitePlanner = new SitePlanner(siteRoot, {
       getWorkspace: () => nav.getWorkspace(),
       hasModel: () => models.size > 0,
-      sessions: () => models.all.map((entry) => entry.session),
-      getSchedule: () => scheduleRef,
-      onMode: (placing) => viewportEl.classList.toggle("is-site-place", placing),
-      onAssetAction: (action) => {
-        const selected = siteLayer?.selected() ?? "";
-        if (!selected) return;
-        for (const entry of models.all) {
-          const asset = entry.session.listSiteAssets().find((item) => item.globalId === selected);
-          if (!asset) continue;
-          if (action === "remove") {
-            entry.session.removeSiteAsset(selected);
-            siteLayer?.select("");
-            sitePlanner?.setSelected("");
-          } else {
-            entry.session.moveSiteAsset(selected, { yaw: asset.yaw + Math.PI / 4 });
-          }
-          markIfcDirty();
-          bumpSimulation([selected]);
-          refreshFederatedView({ structure: true });
-          return;
-        }
+      getPlan: () => sitePlan,
+      getSchedule: () => nativeScheduleRef,
+      onMode: (placing) => {
+        viewportEl.classList.toggle("is-site-place", placing);
+        const tool = sitePlanner?.tool();
+        if (planDraft && tool !== planDraft.kind) planDraft = null;
       },
+      onSelect: (id) => siteLayer?.select(id),
+      onAssetAction: (action) => applyPlanAction(action),
     });
     refreshSitePlanner = () => {
       sitePlanner?.refresh();
-      siteLayer?.sync();
+      siteLayer?.sync(sitePlan);
     };
     refreshSitePlanner();
   }
@@ -984,7 +1089,7 @@ async function main() {
       viewportEl.closest<HTMLElement>(".viewport-stage") ?? viewportEl,
     );
     highlighter = new ScheduleHighlighter(viewer.fragments);
-    siteLayer = new SiteAssetLayer();
+    siteLayer = new SitePlanLayer();
     refitVisibleModels = () => {
       void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
     };
@@ -1083,10 +1188,10 @@ async function main() {
 
     btnFit?.addEventListener("click", () => fitCurrentView());
 
-    const placeLibraryOnModel = async (e: PointerEvent, canvas: HTMLElement) => {
+    const placeOnModel = async (e: PointerEvent, canvas: HTMLElement) => {
       if (!siteLayer || !sitePlanner || !highlighter) return;
-      const taskId = sitePlanner.phaseTaskId();
-      if (taskId <= 0) return;
+      const tool = sitePlanner.tool();
+      if (!tool || sitePlanner.phaseTaskId() <= 0) return;
       try {
         const surface = await highlighter.pickSurface(viewer.world.camera.three, e, canvas);
         const host =
@@ -1100,19 +1205,10 @@ async function main() {
           ? threeWorldToIfc(world, host.session.getExtraTransform())
           : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform());
         if (!point) return;
-        const taskRef = models.resolveTask(taskId);
-        if (!taskRef) throw new Error("A fase escolhida não está neste IFC.");
-        const owner = taskRef.session;
-        const asset =
-          owner === host.session
-            ? host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0, taskId: taskRef.nativeId })
-            : host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0 });
-        if (owner !== host.session) owner.addProductsToTask(taskRef.nativeId, [{ guid: asset.globalId }]);
-        siteLayer.select(asset.globalId);
-        sitePlanner.setSelected(asset.globalId);
-        markIfcDirty();
-        bumpSimulation([asset.globalId]);
-        refreshFederatedView({ structure: true });
+        const id = commitPlanItem(tool, point, host.id);
+        siteLayer.select(id);
+        sitePlanner.setSelected(id);
+        touchPlan([id]);
       } catch (err) {
         setStatus((err as Error).message);
       }
@@ -1131,14 +1227,14 @@ async function main() {
       if (boxSelect?.isDragging()) return;
       if (nav.getWorkspace() === "site-plan" && siteLayer && sitePlanner && highlighter) {
         const canvas = viewer.world.renderer?.three.domElement ?? viewportEl;
-        const picked = siteLayer.pickAsset(viewer.world.camera.three, e, canvas);
-        if (picked) {
+        const picked = siteLayer.pickItem(viewer.world.camera.three, e, canvas);
+        if (picked && sitePlanner.tool() !== "path" && sitePlanner.tool() !== "terrain") {
           siteLayer.select(picked);
           sitePlanner.setSelected(picked);
           return;
         }
         if (sitePlanner.placing()) {
-          void placeLibraryOnModel(e, canvas);
+          void placeOnModel(e, canvas);
           return;
         }
       }
@@ -1623,7 +1719,9 @@ async function main() {
     refreshFederatedView = (opts) => {
       const keepId = selectedTask?.id ?? null;
       earth.setIfcModelCount(models.visible.length);
-      scheduleRef = models.size ? models.mergedSchedule() : emptySchedule();
+      const nativeSchedule = models.size ? models.mergedSchedule() : emptySchedule();
+      nativeScheduleRef = models.size ? nativeSchedule : null;
+      scheduleRef = overlaySitePlan(nativeSchedule, sitePlan);
       const schedule = scheduleRef;
       const structure = opts?.structure !== false;
       if (!models.size || schedule.roots.length === 0) {
@@ -1661,7 +1759,7 @@ async function main() {
         scheduleCountEl.textContent = String(schedule.leafTaskCount);
         scheduleCountEl.title = `${schedule.leafTaskCount} tarefas-folha`;
       }
-      if (structure) projectWs?.bindFromIfc(schedule, models.label());
+      if (structure) projectWs?.bindFromIfc(nativeSchedule, models.label());
       if (structure) bindSpatialTree();
       else applyIfcRelations(false);
       renderSets();
@@ -2146,6 +2244,7 @@ async function main() {
           viewportModels.attach(id, model);
           models.setVisible(id, true);
           applyExtraToObject(model.object, entry.session.getExtraTransform());
+          siteLayer?.bind(id, model.object);
           if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
           await highlighter.addModel(id, model, collectAllGuids(models.mergedSchedule()));
         } catch (err) {
@@ -2179,6 +2278,7 @@ async function main() {
         await walk?.setModel(null);
         selectedTask = null;
         scheduleRef = emptySchedule();
+        nativeScheduleRef = null;
         tree.setSchedule(emptySchedule());
         timeline.bindSchedule(emptySchedule());
         timeline.setIdle(true);
@@ -2186,6 +2286,9 @@ async function main() {
         ifcTree?.clear();
         setImportVisible(true);
         projectName = null;
+        sitePlan = emptySitePlan();
+        planDirty = false;
+        planDraft = null;
       } else {
         attachGizmoToActive(false);
         syncWalkModels();
@@ -2296,6 +2399,7 @@ async function main() {
       });
       await session.hydrateSiteLimit();
       await session.hydrateSiteAssets();
+      if (importLegacyAssets(sitePlan, session.listSiteAssets())) planDirty = true;
       recordMetric("vista:model:loaded", 0, {
         fileName,
         sourceByteLength,
@@ -2337,7 +2441,7 @@ async function main() {
       });
       viewportModels.attach(entry.id, ingested.model);
       applyExtraToObject(ingested.model.object, ingested.session.getExtraTransform());
-      siteLayer?.bind(entry.id, ingested.model.object, entry.session);
+      siteLayer?.bind(entry.id, ingested.model.object);
       setStatus(entry.displayName);
       if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
       await highlighter.addModel(entry.id, ingested.model, collectAllGuids(models.mergedSchedule()));
@@ -2409,6 +2513,7 @@ async function main() {
       if (member.entry.extra) session.hydrateExtraTransform(member.entry.extra);
       await session.hydrateSiteLimit();
       await session.hydrateSiteAssets();
+      if (importLegacyAssets(sitePlan, session.listSiteAssets())) planDirty = true;
       models.add({
         id: member.entry.id,
         fileName: member.entry.fileName,
@@ -2442,6 +2547,9 @@ async function main() {
         selectedTask = null;
       }
       projectName = unpacked.manifest.name || fileName.replace(/\.vtwin$/i, "");
+      sitePlan = unpacked.sitePlan;
+      planDirty = false;
+      planDraft = null;
       const members = [...unpacked.models].sort(
         (a, b) =>
           Number(isCoordinationEntry(b.entry, unpacked.manifest.rootId)) -
@@ -2574,6 +2682,7 @@ async function main() {
       models.rename(id, fileName);
       ingested.session.fileName = entry.fileName;
       viewportModels.attach(id, ingested.model);
+      siteLayer?.bind(id, ingested.model.object);
       if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
       await highlighter.addModel(id, ingested.model, collectAllGuids(models.mergedSchedule()));
       models.setActive(id);
@@ -2595,6 +2704,7 @@ async function main() {
     const resetEmptyWorkspace = () => {
       selectedTask = null;
       scheduleRef = emptySchedule();
+      nativeScheduleRef = null;
       tree.setSchedule(emptySchedule());
       timeline.bindSchedule(emptySchedule());
       timeline.setIdle(true);
@@ -2607,6 +2717,10 @@ async function main() {
       refreshCost5d();
       setImportVisible(true);
       projectName = null;
+      sitePlan = emptySitePlan();
+      planDirty = false;
+      planDraft = null;
+      siteLayer?.sync(sitePlan);
     };
 
     const importFiles = async (files: File[]) => {
@@ -2623,6 +2737,11 @@ async function main() {
           const buffer = new Uint8Array(await vtwin.arrayBuffer());
           await loadFromVtwin(buffer, vtwin.name);
         } else {
+          if (!models.size) {
+            sitePlan = emptySitePlan();
+            planDirty = false;
+            planDraft = null;
+          }
           for (const file of ifcs) {
             const buffer = new Uint8Array(await file.arrayBuffer());
             await loadFromBuffer(buffer, file.name);

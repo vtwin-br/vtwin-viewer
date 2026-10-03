@@ -9,6 +9,7 @@ export function scheduleToPlan(schedule: ScheduleData, ifcFileName?: string): Pr
   const tasks: PlanTask[] = [];
   const walk = (nodes: Task[], level: number) => {
     for (const t of nodes) {
+      if (t.isPlanning) continue;
       const duration =
         t.start && t.end ? Math.max(0, diffDays(t.start, t.end)) : t.isMilestone ? 0 : undefined;
       tasks.push({
