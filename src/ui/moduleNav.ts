@@ -86,10 +86,7 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
       section.className = `module-group${open ? " is-open" : ""}${current ? " is-current" : ""}${mod.pinned ? " is-pinned" : ""}`;
       section.dataset.module = mod.id;
       section.innerHTML = mod.pinned
-        ? `
-        <h2 class="module-group-label">${escapeHtml(mod.label)}</h2>
-        <div class="module-tools" role="list"></div>
-      `
+        ? `<div class="module-tools" role="list"></div>`
         : `
         <button type="button" class="module-group-btn" aria-expanded="${open}" title="${escapeAttr(mod.label)}" data-tooltip="${escapeAttr(mod.label)}">
           <span class="module-icon">${navIcon(mod.icon)}</span>
@@ -115,7 +112,6 @@ export function initModuleNav(opts: ModuleNavOptions): ModuleNavApi {
           <span class="module-icon">${navIcon(tool.icon)}</span>
           <span class="module-tool-copy">
             <span class="module-tool-name">${escapeHtml(tool.label)}</span>
-            ${tool.hint ? `<span class="module-tool-desc">${escapeHtml(tool.hint)}</span>` : ""}
           </span>
         `;
         toolsEl.appendChild(btn);

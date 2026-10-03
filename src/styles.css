@@ -839,15 +839,13 @@ button.header-project:hover,
   color: var(--vtwin-white);
 }
 
-.body-grid[data-shell="site"] .panel-sub {
-  color: var(--vtwin-mineral);
-}
-
-.body-grid[data-shell="site"] .panel-badge {
-  border: 1px solid color-mix(in srgb, var(--vtwin-mist) 28%, transparent);
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--vtwin-mist);
+.body-grid[data-shell="site"] .panel-sub,
+.body-grid[data-shell="site"] .panel-badge,
+.body-grid[data-shell="site"] .sim-hud,
+.body-grid[data-shell="site"] .perf-stats,
+.body-grid[data-shell="site"] #btn-hud-cost,
+.body-grid[data-shell="site"] .plan-link-tools {
+  display: none !important;
 }
 
 .body-grid[data-shell="site"] .panel-collapse {
@@ -876,98 +874,107 @@ button.header-project:hover,
   display: none !important;
 }
 
-.site-lead,
-.site-note {
-  margin: 0;
-  color: var(--vtwin-mist);
-  font-family: var(--font);
-  font-size: 13px;
-  line-height: 1.45;
-}
-
-.site-label {
-  margin: 4px 0 0;
-  font-family: var(--font-display);
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--vtwin-mineral);
-}
-
 .site-library {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.site-card,
-.site-chip {
-  border: 2px solid color-mix(in srgb, var(--vtwin-mist) 70%, var(--vtwin-white));
-  background: var(--vtwin-white);
-  border-radius: var(--radius-lg);
-  color: var(--vtwin-obsidian);
-  text-align: left;
-  cursor: pointer;
-  box-shadow: none;
-}
-
-.site-card {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  padding: 10px 12px;
 }
 
-.site-card strong {
-  font-family: var(--font-display);
+.site-piece {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 36px;
+  padding: 0 10px 0 12px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--vtwin-white);
+  font-family: var(--font);
   font-size: 13px;
-  font-weight: 600;
-  color: var(--vtwin-obsidian);
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
 }
 
-.site-card span {
-  font-family: var(--mono);
-  color: var(--vtwin-mineral);
-  font-size: 12px;
+.site-piece::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
 }
 
-.site-card.is-on,
-.site-chip.is-on {
-  border-color: var(--vtwin-signal);
-  background: var(--vtwin-white);
+.site-piece:hover {
+  background: color-mix(in srgb, var(--vtwin-white) 8%, transparent);
 }
 
-.site-card:focus-visible,
-.site-chip:focus-visible,
-.site-planner .btn-secondary:focus-visible,
-.site-planner .btn-primary:focus-visible {
-  outline: 2px solid var(--vtwin-signal);
-  outline-offset: 2px;
+.site-piece.is-on {
+  background: color-mix(in srgb, var(--vtwin-white) 10%, transparent);
 }
 
-.site-phases,
-.site-tools {
+.site-piece.is-on::before {
+  background: var(--vtwin-signal);
+}
+
+.site-mark {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  color: var(--vtwin-mist);
+}
+
+.site-piece.is-on .site-mark {
+  color: var(--vtwin-signal);
+}
+
+.site-mark svg,
+.site-icon svg {
+  width: 18px;
+  height: 18px;
+}
+
+.site-phases {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding-top: 8px;
 }
 
 .site-chip {
-  padding: 6px 10px;
+  padding: 5px 10px;
+  border: 1px solid color-mix(in srgb, var(--vtwin-mist) 32%, transparent);
   border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--vtwin-mist);
   font-family: var(--font);
   font-size: 12px;
   font-weight: 500;
+  cursor: pointer;
+}
+
+.site-chip:hover {
+  color: var(--vtwin-white);
+  border-color: color-mix(in srgb, var(--vtwin-mist) 70%, transparent);
+}
+
+.site-chip.is-on {
+  border-color: var(--vtwin-signal);
+  color: var(--vtwin-white);
 }
 
 .site-quantities {
   list-style: none;
-  margin: 0;
+  margin: 12px 0 0;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  border-top: 1px solid color-mix(in srgb, var(--vtwin-mist) 18%, transparent);
 }
 
 .site-quantities li {
@@ -975,60 +982,54 @@ button.header-project:hover,
   justify-content: space-between;
   align-items: baseline;
   gap: 12px;
-  padding: 8px 12px;
-  border-radius: var(--radius-lg);
-  background: var(--vtwin-white);
-  border: 1px solid color-mix(in srgb, var(--vtwin-mist) 80%, var(--vtwin-white));
-  color: var(--vtwin-obsidian);
-}
-
-.site-quantities span {
+  padding: 8px 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--vtwin-mist) 12%, transparent);
+  color: var(--vtwin-mist);
   font-family: var(--font);
   font-size: 13px;
-  color: var(--vtwin-structural);
 }
 
-.site-quantities strong {
+.site-qty {
   font-family: var(--mono);
   font-size: 12px;
   font-weight: 500;
-  color: var(--vtwin-obsidian);
+  color: var(--vtwin-white);
+  font-variant-numeric: tabular-nums;
 }
 
-.site-planner .btn-secondary,
-.site-planner .btn-primary {
+.site-tools {
+  display: flex;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.site-icon {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: none;
   border-radius: var(--radius-sm);
-  font-family: var(--font);
-  box-shadow: none;
+  background: transparent;
+  color: var(--vtwin-mist);
+  cursor: pointer;
 }
 
-.site-planner .btn-secondary {
-  border: 1px solid color-mix(in srgb, var(--vtwin-mist) 36%, transparent);
-  background: transparent;
+.site-icon:hover {
+  background: color-mix(in srgb, var(--vtwin-white) 8%, transparent);
   color: var(--vtwin-white);
 }
 
-.site-planner .btn-secondary:hover {
-  border-color: var(--vtwin-mist);
-  background: color-mix(in srgb, var(--vtwin-white) 8%, transparent);
+.site-piece:focus-visible,
+.site-chip:focus-visible,
+.site-icon:focus-visible {
+  outline: 2px solid var(--vtwin-signal);
+  outline-offset: 2px;
 }
 
-.site-planner .btn-primary {
-  border: 1px solid var(--vtwin-white);
-  background: var(--vtwin-white);
-  color: var(--vtwin-obsidian);
-  font-weight: 600;
-}
-
-.site-planner .btn-primary:hover {
-  background: var(--vtwin-mist);
-  border-color: var(--vtwin-mist);
-}
-
-.site-planner .btn-primary.is-on {
-  border: 2px solid var(--vtwin-signal);
-  background: transparent;
-  color: var(--vtwin-signal);
+.body-grid[data-shell="site"] .viewport-canvas.is-site-place,
+.body-grid[data-shell="site"] .viewport-canvas.is-site-place canvas {
+  cursor: crosshair;
 }
 
 html.is-presenting #module-nav {
@@ -1392,9 +1393,10 @@ html.is-presenting .perf-stats {
   color: var(--vtwin-mineral);
 }
 
-.module-group.is-pinned .module-group-label {
-  margin: 0;
-  padding: 4px 12px 8px;
+.module-group.is-pinned .module-tools {
+  margin: 4px 4px 0;
+  padding: 0;
+  border-left: none;
 }
 
 .module-chevron {

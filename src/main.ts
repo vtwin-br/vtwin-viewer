@@ -948,7 +948,7 @@ async function main() {
       hasModel: () => models.size > 0,
       sessions: () => models.all.map((entry) => entry.session),
       getSchedule: () => scheduleRef,
-      onPlay: () => timeline.togglePlay(),
+      onMode: (placing) => viewportEl.classList.toggle("is-site-place", placing),
       onAssetAction: (action) => {
         const selected = siteLayer?.selected() ?? "";
         if (!selected) return;
