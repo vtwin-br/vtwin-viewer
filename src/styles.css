@@ -5550,8 +5550,20 @@ html.is-presenting .perf-stats {
   min-height: 0;
 }
 
-.inspector-body.is-hidden {
+.inspector-body.is-hidden,
+#element-color.is-hidden {
   display: none;
+}
+
+#prop-element-pour {
+  align-self: flex-start;
+  color: var(--ink);
+  border-color: var(--line-strong);
+}
+
+#prop-element-pour:hover {
+  color: var(--ink);
+  border-color: var(--accent);
 }
 
 .insp-hero {
