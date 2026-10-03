@@ -44,14 +44,32 @@ export interface UnpackedVtwin {
   models: UnpackedVtwinModel[];
 }
 
+export interface VtwinPackOptions {
+  /** Pacote para o cliente: .frag + índice + cronograma, sem duplicar os STEP. */
+  meshOnly?: boolean;
+}
+
 const ZIP_OPTS = { level: 6 as const };
 
 export function looksLikeZip(bytes: Uint8Array): boolean {
   return bytes.length >= 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && (bytes[2] === 0x03 || bytes[2] === 0x05);
 }
 
-export async function packVtwin(name: string, models: VtwinPackModel[]): Promise<Uint8Array> {
+export async function packVtwin(
+  name: string,
+  models: VtwinPackModel[],
+  opts?: VtwinPackOptions,
+): Promise<Uint8Array> {
   if (!models.length) throw new Error("Não há modelos para guardar no projeto.");
+  const meshOnly = opts?.meshOnly === true;
+  if (meshOnly) {
+    for (const model of models) {
+      if (model.role === "coordination") continue;
+      if (!model.frag?.byteLength) {
+        throw new Error(`«${model.fileName}» não tem malha para o pacote do cliente.`);
+      }
+    }
+  }
   const rootId = models.find((m) => m.role === "coordination")?.id ?? null;
   const manifest: VtwinManifest = {
     format: VTWIN_FORMAT,
@@ -59,6 +77,7 @@ export async function packVtwin(name: string, models: VtwinPackModel[]): Promise
     name: name.trim() || "Projeto",
     createdAt: new Date().toISOString(),
     rootId,
+    meshOnly,
     models: models.map((m) => ({
       id: m.id,
       fileName: m.fileName,
@@ -74,7 +93,7 @@ export async function packVtwin(name: string, models: VtwinPackModel[]): Promise
   };
   for (const m of models) {
     const dir = `models/${modelZipDir(m.id)}`;
-    files[`${dir}/model.ifc`] = m.ifc;
+    if (!meshOnly) files[`${dir}/model.ifc`] = m.ifc;
     files[`${dir}/schedule.json`] = strToU8(JSON.stringify(scheduleToJson(m.schedule)));
     files[`${dir}/index.json`] = strToU8(JSON.stringify(serializeStepIndex(m.index)));
     if (m.frag && m.frag.byteLength > 0) files[`${dir}/model.frag`] = m.frag;
@@ -91,7 +110,9 @@ export async function unpackVtwin(bytes: Uint8Array): Promise<UnpackedVtwin> {
   for (const entry of manifest.models) {
     const dir = `models/${modelZipDir(entry.id)}`;
     const ifc = files[`${dir}/model.ifc`];
-    if (!ifc?.byteLength) throw new Error(`Falta o IFC de «${entry.fileName}» no projeto.`);
+    if (!ifc?.byteLength && !manifest.meshOnly) {
+      throw new Error(`Falta o IFC de «${entry.fileName}» no projeto.`);
+    }
     const scheduleRaw = files[`${dir}/schedule.json`];
     const indexRaw = files[`${dir}/index.json`];
     let schedule: ScheduleData | null = null;
@@ -112,7 +133,7 @@ export async function unpackVtwin(bytes: Uint8Array): Promise<UnpackedVtwin> {
     }
     models.push({
       entry,
-      ifc,
+      ifc: ifc ?? new Uint8Array(),
       frag: files[`${dir}/model.frag`] ?? null,
       schedule,
       index,

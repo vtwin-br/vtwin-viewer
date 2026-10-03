@@ -28,8 +28,11 @@ abre esse modelo automaticamente.
   com membros federados, cache `.frag`, índice STEP e snapshot do
   cronograma). `Ctrl+O` / soltar ficheiros no ecrã.
 - **`Ctrl+S`** (ou o ícone de disquete) guarda o **projeto** `.vtwin`.
-  **Exportar IFC** gera o STEP para Bonsai/Revit — não substitui o
-  pacote de projeto.
+  **`Ctrl+Shift+S`**, ou «Pacote só malha» no menu dos modelos, guarda o
+  mesmo pacote **sem** os ficheiros `.ifc` (só malha `.frag`, índice e
+  snapshot) para enviar ao cliente. **Exportar IFC** gera o STEP para
+  Bonsai/Revit — não substitui o pacote de projeto. Um `.vtwin` só malha
+  não traz o STEP; exportar exige o IFC canónico ainda guardado localmente.
 - Federação: cada disciplina mantém o seu STEP. A app cria um IFC de
   coordenação (`COORD.ifc`, IFC4, sem malha de obra) dono do
   `IfcWorkPlan`, custo 5D, canteiro e georref de projeto. A ligação
@@ -46,14 +49,30 @@ abre esse modelo automaticamente.
   - `IfcRelSequence` + folga → predecessoras FS/SS/FF/SF
   - `IfcRelAssignsToProduct` / `IfcRelAssignsToProcess` → task ↔ 3D
   - `IfcCostSchedule` / `IfcCostItem` / `IfcCostValue` → 5D
-- Shell de módulos (`src/app/catalog.ts`):
+  - `IfcPropertySet` / `IfcPropertySingleValue` e
+    `IfcClassificationReference` → propriedades e classificação
+  - `IfcDocumentReference` → documentos e folhas (o PDF ou `.mpp` do
+    Gantt grava a referência; o `.mpp` binário não é lido)
+  - `IfcTable` → tabelas, com um `IfcDocumentReference` do mesmo nome
+  - `IfcRelContainedInSpatialStructure` / `IfcRelAggregates` → mover na
+    árvore espacial
+  - `IfcGroup` `VISTA4D_SEARCH` + `Pset_Vista4dSearch` → search set
+  - `IfcRelInterferesElements` (IFC4) → interferência gravada
+- Shell de módulos (`src/app/catalog.ts`), todos sobre o mesmo
+  `IfcSession` (trocar de módulo não descarrega o modelo):
   - **4D** — simulação no viewport, timeline, HUD 5D, Google Photorealistic
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
   - **Logística** — limite de canteiro (`IfcAnnotation`) e recorte do terreno
-  - Dashboard, Visualizador, Documentação, Coordenação (BCF/clash) e
-    Editor — placeholders no menu
+  - **Dashboard** — indicadores calculados (tarefas, estado pela data,
+    custo, elementos ligados) com foco no 3D
+  - **Visualizador** — a mesma vista 3D, sem cronograma
+  - **Documentação** — documentos, folhas (`IfcDocumentReference`) e
+    tabelas (`IfcTable`)
+  - **Editor** — propriedades, classificação, árvore espacial e search sets
+  - **Coordenação** — gravar um par de elementos como
+    `IfcRelInterferesElements`. BCF (tópico, câmara, markup) fica de fora
 - Estados 4D nos produtos com data: **pendente** oculto, **em execução**
   amarelo (`#F59E0B`), **concluído** cor original. Volumes espaciais sem
   tarefa ficam ocultos; o resto da construção permanece como contexto.
@@ -64,6 +83,7 @@ abre esse modelo automaticamente.
 |---|---|
 | `Ctrl+O` | Abrir `.ifc` / `.vtwin` |
 | `Ctrl+S` | Guardar projeto `.vtwin` |
+| `Ctrl+Shift+S` | Guardar pacote só malha (sem os IFC) |
 | `V` | (4D / Logística) modo voo / orbit vs caminhada, conforme o workspace |
 
 ## Scripts
@@ -90,6 +110,7 @@ src/
 │  ├─ coordination.ts      # cria/sementeia COORD.ifc
 │  ├─ coordinationIfc.ts   # STEP mínimo IFC4 (Project + Site)
 │  ├─ scheduleWrite.ts     # serialize WorkPlan / Task / RelSequence / custo
+│  ├─ semanticWrite.ts     # pset, classificação, documento, tabela, contenção
 │  ├─ stepStore.ts         # bytes IFC em OPFS
 │  └─ fragCache.ts         # cache IndexedDB de .frag
 ├─ project/                # pacote .vtwin (manifesto, ZIP, recase de GUID)

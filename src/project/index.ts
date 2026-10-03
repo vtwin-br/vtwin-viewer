@@ -9,6 +9,6 @@ export {
   type VtwinModelEntry,
   type VtwinModelRole,
 } from "./manifest";
-export { packVtwin, unpackVtwin, looksLikeZip, type UnpackedVtwin, type UnpackedVtwinModel, type VtwinPackModel } from "./pack";
+export { packVtwin, unpackVtwin, looksLikeZip, type UnpackedVtwin, type UnpackedVtwinModel, type VtwinPackModel, type VtwinPackOptions } from "./pack";
 export { rematchProductGuids, listOrphanSummary, type GuidRematchReport } from "./rematch";
 export { downloadBytes, vtwinDownloadName } from "./download";

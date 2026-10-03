@@ -26,7 +26,8 @@ export type IfcSemanticChange =
   | { kind: "siteLimit:clear" }
   | { kind: "sequence:link"; predId: number; succId: number }
   | { kind: "sequence:unlink"; predId: number; succId: number }
-  | { kind: "sequence:update"; predId: number; succId: number };
+  | { kind: "sequence:update"; predId: number; succId: number }
+  | { kind: "semantic:write"; target: string };
 
 export interface IfcChangeSetSnapshot {
   revision: number;

@@ -96,6 +96,8 @@ export interface IfcAssociatedDocument {
   identification?: string;
   location?: string;
   description?: string;
+  /** ExpressID do IfcDocumentReference, quando já existe no STEP. */
+  expressId?: number;
 }
 
 export interface ScheduleData {

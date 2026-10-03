@@ -25,6 +25,8 @@ export interface VtwinManifest {
   createdAt: string;
   /** IFC de coordenação (COORD.ifc) quando o projeto tem raiz. */
   rootId: string | null;
+  /** Pacote só malha (sem IFCs completos) para cliente. */
+  meshOnly?: boolean;
   models: VtwinModelEntry[];
 }
 
@@ -64,6 +66,7 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     throw new Error("O projeto não contém modelos.");
   }
   const rootId = typeof j.rootId === "string" && j.rootId ? j.rootId : null;
+  const meshOnly = j.meshOnly === true;
   const models: VtwinModelEntry[] = j.models.map((m, i) => {
     if (!m || typeof m !== "object") throw new Error(`Modelo #${i + 1} inválido no manifesto.`);
     if (typeof m.id !== "string" || !m.id) throw new Error(`Modelo #${i + 1} sem id.`);
@@ -94,6 +97,7 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     name: j.name.trim(),
     createdAt: typeof j.createdAt === "string" ? j.createdAt : new Date().toISOString(),
     rootId,
+    meshOnly,
     models,
   };
 }

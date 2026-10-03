@@ -801,6 +801,14 @@ export class ProjectWorkspace {
     if (!session) return;
     try {
       const { created, updated } = session.importOutline(planToOutlineRows(plan), plan.name);
+      for (const attachment of plan.attachments) {
+        session.addDocumentReference({
+          name: attachment.name,
+          location: attachment.name,
+          identification: "SOURCE",
+          description: attachment.note || attachment.mime,
+        });
+      }
       this.opts.onNativeChange?.({ structure: true, timeChanged: true });
       this.rebind();
       this.toast(
@@ -834,10 +842,27 @@ export class ProjectWorkspace {
 
     if (imported) {
       this.writeImportedPlan(imported, { assist: true });
-    } else if (extra.length) {
-      this.toast(
-        extra.map((a) => a.note || `${a.name} anexado só nesta sessão (ainda não é IfcDocumentReference).`).join(" "),
-      );
+    }
+    if (extra.length) {
+      const session = this.withSession();
+      if (session) {
+        for (const attachment of extra) {
+          session.addDocumentReference({
+            name: attachment.name,
+            location: attachment.name,
+            identification: attachment.kind === "schedule" ? "SCHEDULE" : "DOCUMENT",
+            description: attachment.note || attachment.mime,
+          });
+        }
+        this.opts.onNativeChange?.({ structure: true });
+        this.toast(
+          extra
+            .map((attachment) => attachment.note || `${attachment.name} gravado como IfcDocumentReference.`)
+            .join(" "),
+        );
+      } else {
+        this.toast("Abra um IFC para gravar o documento como IfcDocumentReference.");
+      }
     }
 
     if (warnings.length) this.toast(warnings.join(" "));

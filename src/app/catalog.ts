@@ -18,7 +18,16 @@ export type WorkspaceId =
   | "coordination"
   | "editor";
 
-export type WorkspaceShell = "schedule" | "plan" | "logistics" | "placeholder";
+export type WorkspaceShell =
+  | "schedule"
+  | "plan"
+  | "logistics"
+  | "dashboard"
+  | "viewer"
+  | "docs"
+  | "editor"
+  | "coordination"
+  | "placeholder";
 
 export type NavIconId =
   | "dashboard"
@@ -55,48 +64,45 @@ export const APP_MODULES: AppModule[] = [
   {
     id: "dashboard",
     label: "Dashboard",
-    description: "Indicadores e interação com o modelo 3D",
+    description: "Indicadores calculados sobre o IFC e interação 3D",
     icon: "dashboard",
     tools: [
       {
         id: "dashboard",
         label: "Dashboard",
-        description: "Indicadores e interação com o modelo 3D",
+        description: "Indicadores calculados sobre o cronograma, o custo e as ligações 3D",
         workspace: "dashboard",
         icon: "dashboard",
-        placeholder: true,
       },
     ],
   },
   {
     id: "viewer",
     label: "Visualizador",
-    description: "Vista 3D do modelo IFC",
+    description: "Vista 3D do viewport já aberto",
     icon: "viewer",
     tools: [
       {
         id: "viewer",
         label: "Visualizador",
-        description: "Vista 3D do modelo IFC",
+        description: "Vista 3D do modelo IFC já aberto",
         workspace: "viewer",
         icon: "viewer",
-        placeholder: true,
       },
     ],
   },
   {
     id: "docs",
     label: "Documentação",
-    description: "Documentos, folhas 2D e tabelas no esquema IFC",
+    description: "Documentos, folhas 2D e tabelas IFC",
     icon: "docs",
     tools: [
       {
         id: "docs",
         label: "Documentação",
-        description: "Documentos, folhas 2D e tabelas no esquema IFC",
+        description: "IfcDocumentReference, folhas e IfcTable no mesmo IFC",
         workspace: "docs",
         icon: "docs",
-        placeholder: true,
       },
     ],
   },
@@ -132,32 +138,30 @@ export const APP_MODULES: AppModule[] = [
   {
     id: "coordination",
     label: "Coordenação",
-    description: "BCF, clash e coordenação de modelos",
+    description: "Interferências IfcRelInterferesElements",
     icon: "coordination",
     tools: [
       {
         id: "coordination",
         label: "Coordenação",
-        description: "BCF, clash e coordenação de modelos",
+        description: "Interferências gravadas como IfcRelInterferesElements",
         workspace: "coordination",
         icon: "coordination",
-        placeholder: true,
       },
     ],
   },
   {
     id: "editor",
     label: "Editor",
-    description: "Modelagem e edição geométrica IFC",
+    description: "Propriedades, classificação e estrutura espacial",
     icon: "editor",
     tools: [
       {
         id: "editor",
         label: "Editor",
-        description: "Modelagem e edição geométrica IFC",
+        description: "Propriedades, classificação, árvore espacial e search sets",
         workspace: "editor",
         icon: "editor",
-        placeholder: true,
       },
     ],
   },
@@ -175,6 +179,15 @@ export function workspaceShell(id: WorkspaceId): WorkspaceShell {
   if (id === "schedule-4d") return "schedule";
   if (id === "project-plan") return "plan";
   if (id === "logistics") return "logistics";
+  if (
+    id === "dashboard" ||
+    id === "viewer" ||
+    id === "docs" ||
+    id === "editor" ||
+    id === "coordination"
+  ) {
+    return id;
+  }
   return "placeholder";
 }
 

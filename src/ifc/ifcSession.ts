@@ -73,6 +73,31 @@ import { wouldCreateIfcCycle } from "../schedule/links";
 import { cloneSiteLimit, type SiteLimit } from "../logistics/types";
 import { parseSiteLimitFromStep } from "../logistics/parseSiteLimit";
 import { serializeSiteLimit } from "../logistics/serializeSiteLimit";
+import {
+  cloneSemantic,
+  emitSemantic,
+  emptySemanticState,
+  isSpatialContainer,
+  isSpatialElement,
+  matchProductGuids,
+  readClassifications,
+  readDocuments,
+  readInterferences,
+  readPropertySets,
+  readSpatialNodes,
+  readTables,
+  VISTA4D_SEARCH_PSET,
+  VISTA4D_SEARCH_QUERY,
+  VISTA4D_SEARCH_TYPE,
+  VISTA4D_TABLE_DOC,
+  type ClassificationView,
+  type DocumentView,
+  type InterferenceView,
+  type PropertySetView,
+  type SemanticState,
+  type SpatialNode,
+  type TableView,
+} from "./semanticWrite";
 
 export type { NewTaskInput, OutlineRowInput, SequenceType };
 
@@ -118,6 +143,7 @@ export interface IfcSessionExportSnapshot {
   extra: ModelExtraTransform;
   geoWrite: GeoAnchorWrite | null;
   wasmPath?: string;
+  semantic?: SemanticState;
 }
 
 interface ExportWorkerResult {
@@ -200,6 +226,7 @@ export class IfcSession {
   private geoChanged = false;
   private siteLimitDirty = false;
   private removedSiteLimitCluster: number[] = [];
+  private semantic: SemanticState = emptySemanticState();
   dirty = false;
 
   constructor(source: Uint8Array | string | null, fileName: string, schedule: ScheduleData, opts?: IfcSessionOptions) {
@@ -355,6 +382,7 @@ export class IfcSession {
 
   async hydrateSiteLimit(): Promise<SiteLimit | null> {
     if (this.schedule.siteLimit?.points.length) return this.getSiteLimit();
+    if (!this.stepText && !this.storeHash) return this.getSiteLimit();
     if (!this.index.typeIds.get("IFCANNOTATION")?.length) return null;
     const text = await this.ensureText();
     const parsed = parseSiteLimitFromStep(text, this.index);
@@ -429,6 +457,393 @@ export class IfcSession {
     this.propertyValueEdited.set(propertyId, value);
     this.changeSet.append({ kind: "property:update", propertyId, value });
     this.dirty = true;
+  }
+
+  async listPropertySets(globalId: string): Promise<PropertySetView[]> {
+    const ownerId = this.requireGuid(globalId);
+    const fromFile = await this.readStep((text) => readPropertySets(text, this.index, ownerId));
+    for (const pset of fromFile) {
+      for (const prop of pset.properties) {
+        if (!this.propertyValueEdited.has(prop.id)) continue;
+        const edited = this.propertyValueEdited.get(prop.id);
+        prop.value = edited == null ? "" : String(edited);
+      }
+    }
+    for (const write of this.semantic.properties) {
+      if (write.ownerId !== ownerId) continue;
+      let pset = fromFile.find((item) => item.id === write.psetId);
+      if (!pset) {
+        pset = { id: write.psetId, name: write.psetName, properties: [] };
+        fromFile.push(pset);
+      }
+      const existing = pset.properties.find(
+        (prop) => prop.id === write.propertyId || prop.name.toLowerCase() === write.propertyName.toLowerCase(),
+      );
+      if (existing) existing.value = write.value;
+      else pset.properties.push({ id: write.propertyId, name: write.propertyName, value: write.value });
+    }
+    return fromFile;
+  }
+
+  async upsertProperty(globalId: string, psetName: string, propName: string, value: string): Promise<void> {
+    const ownerId = this.requireGuid(globalId);
+    const psetLabel = psetName.trim();
+    const propLabel = propName.trim();
+    if (!psetLabel || !propLabel) throw new Error("O conjunto de propriedades e a propriedade precisam de nome.");
+    const sets = await this.listPropertySets(globalId);
+    const pset = sets.find((item) => item.name.toLowerCase() === psetLabel.toLowerCase());
+    const prop = pset?.properties.find((item) => item.name.toLowerCase() === propLabel.toLowerCase());
+    if (prop && this.index.offset.has(prop.id)) {
+      this.setPropertySingleValue(prop.id, value);
+      return;
+    }
+    if (prop) {
+      const pending = this.semantic.properties.find((item) => item.propertyId === prop.id);
+      if (pending) {
+        pending.value = value;
+        this.markSemantic("property");
+        return;
+      }
+    }
+    const pendingPset = this.semantic.properties.find(
+      (item) => item.ownerId === ownerId && item.psetName.toLowerCase() === psetLabel.toLowerCase(),
+    );
+    const psetIsNew = pset == null || !this.index.offset.has(pset.id);
+    const psetId = !psetIsNew && pset ? pset.id : (pendingPset?.psetId ?? this.allocId());
+    const relId = psetIsNew ? (pendingPset?.relId ?? this.allocId()) : undefined;
+    this.semantic.properties.push({
+      ownerId,
+      psetId,
+      psetName: pset?.name || psetLabel,
+      psetIsNew,
+      relId,
+      propertyId: this.allocId(),
+      propertyName: propLabel,
+      value,
+    });
+    this.markSemantic("property");
+  }
+
+  async listClassifications(globalId: string): Promise<ClassificationView[]> {
+    const ownerId = this.requireGuid(globalId);
+    const fromFile = await this.readStep((text) => readClassifications(text, this.index, ownerId));
+    for (const write of this.semantic.classifications) {
+      if (write.ownerId !== ownerId) continue;
+      const existing = fromFile.find((item) => item.referenceId === write.referenceId);
+      const view: ClassificationView = {
+        referenceId: write.referenceId,
+        relId: write.relId,
+        identification: write.identification,
+        name: write.name,
+        location: write.location,
+        sourceName: write.sourceName,
+      };
+      if (existing) Object.assign(existing, view);
+      else fromFile.push(view);
+    }
+    return fromFile;
+  }
+
+  async addClassification(
+    globalId: string,
+    input: { identification: string; name: string; location?: string; sourceName?: string },
+  ): Promise<void> {
+    const ownerId = this.requireGuid(globalId);
+    const identification = input.identification.trim();
+    const name = input.name.trim() || identification;
+    if (!identification && !name) throw new Error("A classificação precisa de código ou nome.");
+    const sourceName = input.sourceName?.trim() || "";
+    this.semantic.classifications.push({
+      ownerId,
+      referenceId: this.allocId(),
+      relId: this.allocId(),
+      sourceId: sourceName ? this.allocId() : undefined,
+      isNew: true,
+      identification,
+      name,
+      location: input.location?.trim() || "",
+      sourceName,
+    });
+    this.markSemantic("classification");
+  }
+
+  async listDocuments(): Promise<DocumentView[]> {
+    let fromFile: DocumentView[] = [];
+    if (this.stepText || this.storeHash) {
+      try {
+        fromFile = readDocuments(await this.ensureText(), this.index);
+      } catch {
+        fromFile = [];
+      }
+    }
+    for (const write of this.semantic.documents) {
+      const view: DocumentView = {
+        documentId: write.documentId,
+        relId: write.relId,
+        name: write.name,
+        identification: write.identification,
+        location: write.location,
+        description: write.description,
+      };
+      const existing = fromFile.find((item) => item.documentId === write.documentId);
+      if (existing) Object.assign(existing, view);
+      else if (write.isNew) fromFile.push(view);
+    }
+    for (const table of this.semantic.tables) {
+      if (!table.documentIsNew || table.documentId == null) continue;
+      if (fromFile.some((item) => item.documentId === table.documentId)) continue;
+      fromFile.push({
+        documentId: table.documentId,
+        relId: table.relId,
+        name: table.name,
+        identification: "TABLE",
+        location: "",
+        description: VISTA4D_TABLE_DOC,
+      });
+    }
+    if (this.stepText || this.storeHash || this.semantic.documents.length || this.semantic.tables.length) {
+      const visible = fromFile.filter((item) => item.description !== VISTA4D_TABLE_DOC);
+      this.schedule.documents = visible.map((item) => ({
+        name: item.name,
+        identification: item.identification || undefined,
+        location: item.location || undefined,
+        description: item.description || undefined,
+        expressId: item.documentId,
+      }));
+    }
+    return fromFile;
+  }
+
+  addDocumentReference(input: {
+    name: string;
+    identification?: string;
+    location?: string;
+    description?: string;
+    relatedGlobalIds?: string[];
+  }): DocumentView {
+    const name = input.name.trim();
+    if (!name) throw new Error("O documento precisa de um nome.");
+    const location = input.location?.trim() || "";
+    const identification = input.identification?.trim() || "";
+    const description = input.description?.trim() || "";
+    const key = `${name}|${location}|${identification}`;
+    const known = this.schedule.documents.some(
+      (doc) => `${doc.name}|${doc.location ?? ""}|${doc.identification ?? ""}` === key,
+    );
+    const pending = this.semantic.documents.some(
+      (doc) => `${doc.name}|${doc.location}|${doc.identification}` === key,
+    );
+    if (known || pending) {
+      const existing = this.semantic.documents.find(
+        (doc) => `${doc.name}|${doc.location}|${doc.identification}` === key,
+      );
+      return {
+        documentId: existing?.documentId ?? 0,
+        name,
+        identification,
+        location,
+        description,
+      };
+    }
+    const relatedIds = this.resolveRelatedIds(input.relatedGlobalIds);
+    const documentId = this.allocId();
+    const relId = this.allocId();
+    this.semantic.documents.push({
+      documentId,
+      relId,
+      isNew: true,
+      name,
+      identification,
+      location,
+      description,
+      relatedIds,
+    });
+    this.schedule.documents.push({
+      name,
+      identification: identification || undefined,
+      location: location || undefined,
+      description: description || undefined,
+      expressId: documentId,
+    });
+    this.markSemantic("document");
+    return { documentId, relId, name, identification, location, description };
+  }
+
+  async listTables(): Promise<TableView[]> {
+    const fromFile = await this.readStep((text) => readTables(text, this.index));
+    for (const write of this.semantic.tables) {
+      const view: TableView = {
+        tableId: write.tableId,
+        name: write.name,
+        columns: [...write.columns],
+        rows: write.rows.map((row) => [...row]),
+        clusterIds: [write.tableId, ...write.columnIds, ...write.rowIds],
+      };
+      const existing = fromFile.findIndex(
+        (item) => item.tableId === write.tableId || item.name.toLowerCase() === write.name.toLowerCase(),
+      );
+      if (existing >= 0) fromFile[existing] = view;
+      else fromFile.push(view);
+    }
+    return fromFile;
+  }
+
+  async upsertTable(name: string, columns: string[], rows: string[][]): Promise<void> {
+    const label = name.trim();
+    if (!label) throw new Error("A tabela precisa de um nome.");
+    const head = columns.map((column) => column.trim()).filter(Boolean);
+    if (!head.length) throw new Error("A tabela precisa de pelo menos uma coluna.");
+    const body = rows.map((row) => head.map((_, index) => row[index]?.trim() ?? ""));
+    const existing = (await this.listTables()).find((item) => item.name.toLowerCase() === label.toLowerCase());
+    const pending = this.semantic.tables.find((item) => item.name.toLowerCase() === label.toLowerCase());
+    const projectId = this.schedule.projectId ?? firstIdOfType(this.index, "IFCPROJECT");
+    if (projectId == null) throw new Error("Este IFC não tem IfcProject para associar a tabela.");
+    const columnIds = head.map(() => this.allocId());
+    const rowIds =
+      this.schema === "IFC2X3" ? [this.allocId(), ...body.map(() => this.allocId())] : body.map(() => this.allocId());
+    const replaceIds = [
+      ...(existing && this.index.offset.has(existing.tableId) ? existing.clusterIds : []),
+      ...(pending?.replaceIds ?? []),
+    ];
+    const documentIsNew = !pending?.documentId;
+    const next = {
+      name: label,
+      columns: head,
+      rows: body,
+      tableId: this.allocId(),
+      columnIds,
+      rowIds,
+      documentId: pending?.documentId ?? this.allocId(),
+      relId: pending?.relId ?? this.allocId(),
+      documentIsNew,
+      relatedIds: [projectId],
+      replaceIds: [...new Set(replaceIds)],
+    };
+    this.semantic.tables = this.semantic.tables.filter((item) => item.name.toLowerCase() !== label.toLowerCase());
+    this.semantic.tables.push(next);
+    this.markSemantic("table");
+  }
+
+  async listSpatialNodes(): Promise<SpatialNode[]> {
+    return this.readStep((text) => readSpatialNodes(text, this.index));
+  }
+
+  async moveSpatial(productGuid: string, parentGuid: string): Promise<void> {
+    await this.ensureText();
+    const productId = this.requireGuid(productGuid);
+    const parentId = this.requireGuid(parentGuid);
+    if (productId === parentId) throw new Error("O elemento não pode ser contido nele próprio.");
+    const productType = this.entityType(productId) ?? "";
+    if (productType === "IFCPROJECT") throw new Error("O IfcProject não se move.");
+    const parentType = this.entityType(parentId) ?? "";
+    const mode = isSpatialElement(productType) && productType !== "IFCPROJECT" ? "aggregate" : "contain";
+    const parentOk = mode === "contain" ? isSpatialContainer(parentType) : isSpatialElement(parentType);
+    if (!parentOk) {
+      throw new Error(
+        mode === "contain"
+          ? "O contentor tem de ser IfcSite, IfcBuilding, IfcBuildingStorey ou IfcSpace."
+          : "A agregação pede um elemento espacial (ou o IfcProject).",
+      );
+    }
+    this.semantic.containments = this.semantic.containments.filter((item) => item.productId !== productId);
+    this.semantic.containments.push({ productId, parentId, mode });
+    this.markSemantic("spatial");
+  }
+
+  async listInterferences(): Promise<InterferenceView[]> {
+    const fromFile = await this.readStep((text) => readInterferences(text, this.index));
+    for (const write of this.semantic.interferences) {
+      if (!write.isNew) continue;
+      if (fromFile.some((item) => item.relId === write.relId)) continue;
+      fromFile.push({
+        relId: write.relId,
+        name: write.name,
+        description: write.description,
+        relatingId: write.relatingId,
+        relatedId: write.relatedId,
+        interferenceType: write.interferenceType,
+      });
+    }
+    return fromFile;
+  }
+
+  addInterference(input: {
+    name?: string;
+    description?: string;
+    relatingGuid: string;
+    relatedGuid: string;
+    interferenceType?: string;
+  }): void {
+    if (this.schema === "IFC2X3") {
+      throw new Error("IfcRelInterferesElements existe a partir do IFC4. Este ficheiro é IFC2X3.");
+    }
+    const relatingGuid = input.relatingGuid.trim();
+    const relatedGuid = input.relatedGuid.trim();
+    if (!relatingGuid || !relatedGuid) throw new Error("A interferência precisa de dois GlobalId.");
+    if (relatingGuid === relatedGuid) throw new Error("Os dois elementos da interferência têm de ser distintos.");
+    const relatingId = this.ensureFederatedProductStub(relatingGuid);
+    const relatedId = this.ensureFederatedProductStub(relatedGuid);
+    this.semantic.interferences.push({
+      relId: this.allocId(),
+      name: input.name?.trim() || "Interferência",
+      description: input.description?.trim() || "",
+      relatingId,
+      relatedId,
+      interferenceType: input.interferenceType?.trim() || "CLASH",
+      isNew: true,
+    });
+    this.markSemantic("interference");
+  }
+
+  async createSearchSet(
+    name: string,
+    query: string,
+    selectionGuids: string[] = [],
+  ): Promise<SelectionGroup> {
+    const text = await this.ensureText();
+    const trimmed = query.trim();
+    if (!trimmed) throw new Error("O search set precisa de uma consulta (Tipo=IfcWall ou Pset.Prop=valor).");
+    const matched = matchProductGuids(text, this.index, trimmed, this.semantic.properties);
+    const guids = matched.length ? matched : selectionGuids.filter((guid) => this.index.guidToId.has(guid));
+    if (!guids.length) {
+      throw new Error("A consulta não encontrou elementos neste IFC e não há seleção local.");
+    }
+    const group = this.createGroup(
+      name,
+      guids.map((guid) => ({ guid })),
+      VISTA4D_SEARCH_TYPE,
+    );
+    this.semantic.searchQueries.push({
+      groupId: group.id,
+      psetId: this.allocId(),
+      propertyId: this.allocId(),
+      relId: this.allocId(),
+      query: trimmed,
+    });
+    this.markSemantic("search");
+    return group;
+  }
+
+  async listSearchSets(): Promise<Array<SelectionGroup & { query: string }>> {
+    const out: Array<SelectionGroup & { query: string }> = [];
+    for (const group of this.schedule.groups) {
+      if (this.deletedGroupIds.has(group.id) || group.objectType !== VISTA4D_SEARCH_TYPE) continue;
+      const pending = this.semantic.searchQueries.find((item) => item.groupId === group.id);
+      let query = pending?.query ?? "";
+      if (!query && group.globalId) {
+        try {
+          const sets = await this.listPropertySets(group.globalId);
+          query =
+            sets
+              .find((set) => set.name === VISTA4D_SEARCH_PSET)
+              ?.properties.find((prop) => prop.name === VISTA4D_SEARCH_QUERY)?.value ?? "";
+        } catch {
+          query = "";
+        }
+      }
+      out.push({ ...group, query });
+    }
+    return out;
   }
 
   applyTaskEdit(taskId: number, patch: TaskPatch): { task: Task; changed: boolean; timeChanged: boolean } {
@@ -1267,6 +1682,7 @@ export class IfcSession {
   createGroup(
     name: string,
     members: Array<{ guid: string; expressId?: number }>,
+    objectType = VISTA4D_SET_TYPE,
   ): SelectionGroup {
     const trimmed = name.trim() || "Conjunto";
     const groupId = this.allocId();
@@ -1283,7 +1699,7 @@ export class IfcSession {
       id: groupId,
       globalId: createIfcGuid(),
       name: trimmed,
-      objectType: VISTA4D_SET_TYPE,
+      objectType,
       productIds,
       productGuids,
       taskIds: [],
@@ -1410,6 +1826,37 @@ export class IfcSession {
       added: !already,
       guids: this.schedule.productGuidsByTask.get(taskId) ?? ownAndGroupGuids(this.schedule, task),
     };
+  }
+
+  private requireGuid(globalId: string): number {
+    const id = this.index.guidToId.get(globalId.trim());
+    if (id == null) throw new Error(`GlobalId ${globalId} não está neste IFC.`);
+    return id;
+  }
+
+  private async readStep<T>(read: (text: string) => T): Promise<T> {
+    try {
+      return read(await this.ensureText());
+    } catch {
+      return read("");
+    }
+  }
+
+  private markSemantic(target: string): void {
+    this.changeSet.append({ kind: "semantic:write", target });
+    this.dirty = true;
+  }
+
+  private resolveRelatedIds(globalIds: string[] | undefined): number[] {
+    const ids: number[] = [];
+    for (const guid of globalIds ?? []) {
+      const id = this.index.guidToId.get(guid.trim());
+      if (id != null) ids.push(id);
+    }
+    if (ids.length) return ids;
+    const projectId = this.schedule.projectId ?? firstIdOfType(this.index, "IFCPROJECT");
+    if (projectId == null) throw new Error("Este IFC não tem IfcProject para associar o documento.");
+    return [projectId];
   }
 
   private requireGroup(groupId: number): SelectionGroup {
@@ -1649,6 +2096,7 @@ export class IfcSession {
       extra: { ...this.extra },
       geoWrite: this.geoWrite ? { ...this.geoWrite } : null,
       wasmPath: this.wasmPath,
+      semantic: cloneSemantic(this.semantic),
     };
   }
 
@@ -1723,6 +2171,7 @@ export class IfcSession {
     this.localTimeId = snapshot.ids.localTimeId;
     this.extra = { ...snapshot.extra };
     this.geoWrite = snapshot.geoWrite ? { ...snapshot.geoWrite } : null;
+    this.semantic = cloneSemantic(snapshot.semantic);
     this.dirty = true;
   }
 
@@ -2126,6 +2575,16 @@ export class IfcSession {
       }
     }
 
+    const semantic = emitSemantic(this.semantic, {
+      schema: this.schema,
+      ownerHistory: oh,
+      find: (id) => this.find(id),
+      index: this.index,
+      allocId: () => this.allocId(),
+    });
+    newLines.push(...semantic.lines);
+    replacements.push(...semantic.replacements);
+
     if (this.siteLimitDirty) {
       const toComment = new Set<number>(this.removedSiteLimitCluster);
       const limit = this.schedule.siteLimit;
@@ -2298,6 +2757,7 @@ export class IfcSession {
     this.siteLimitDirty = false;
     this.removedSiteLimitCluster = [];
     this.geoWrite = null;
+    this.semantic = emptySemanticState();
     this.changeSet.clear();
     this.dirty = false;
   }
@@ -2545,7 +3005,7 @@ function serializeNewIfcGroup(group: SelectionGroup): string {
     ifcString(group.globalId),
     "$",
     ifcOptionalString(group.name),
-    ifcString("Selection set 4D"),
+    ifcString(group.objectType === VISTA4D_SEARCH_TYPE ? "Search set" : "Selection set 4D"),
     ifcString(group.objectType || VISTA4D_SET_TYPE),
   ];
   return serializeEntity(group.id, "IFCGROUP", args);

@@ -818,6 +818,140 @@ button.header-project:hover,
   display: flex;
 }
 
+.body-grid[data-shell="dashboard"] .panel-toolbar,
+.body-grid[data-shell="dashboard"] #task-tree,
+.body-grid[data-shell="viewer"] .panel-toolbar,
+.body-grid[data-shell="viewer"] #task-tree,
+.body-grid[data-shell="docs"] .panel-toolbar,
+.body-grid[data-shell="docs"] #task-tree,
+.body-grid[data-shell="editor"] .panel-toolbar,
+.body-grid[data-shell="editor"] #task-tree,
+.body-grid[data-shell="coordination"] .panel-toolbar,
+.body-grid[data-shell="coordination"] #task-tree {
+  display: none;
+}
+
+.body-grid[data-shell="dashboard"] #module-workspace,
+.body-grid[data-shell="viewer"] #module-workspace,
+.body-grid[data-shell="docs"] #module-workspace,
+.body-grid[data-shell="editor"] #module-workspace,
+.body-grid[data-shell="coordination"] #module-workspace {
+  display: flex;
+}
+
+.body-grid[data-shell="dashboard"],
+.body-grid[data-shell="dashboard"].inspector-collapsed,
+.body-grid[data-shell="dashboard"].schedule-collapsed,
+.body-grid[data-shell="viewer"],
+.body-grid[data-shell="viewer"].inspector-collapsed,
+.body-grid[data-shell="viewer"].schedule-collapsed,
+.body-grid[data-shell="docs"],
+.body-grid[data-shell="docs"].inspector-collapsed,
+.body-grid[data-shell="docs"].schedule-collapsed,
+.body-grid[data-shell="editor"],
+.body-grid[data-shell="editor"].inspector-collapsed,
+.body-grid[data-shell="editor"].schedule-collapsed,
+.body-grid[data-shell="coordination"],
+.body-grid[data-shell="coordination"].inspector-collapsed,
+.body-grid[data-shell="coordination"].schedule-collapsed {
+  grid-template-columns: minmax(260px, var(--schedule-w)) minmax(0, 1fr) 0px;
+}
+
+.body-grid[data-shell="viewer"] #timeline-slot,
+.body-grid[data-shell="docs"] #timeline-slot,
+.body-grid[data-shell="editor"] #timeline-slot,
+.body-grid[data-shell="coordination"] #timeline-slot {
+  display: none;
+}
+
+.module-workspace {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  overflow: auto;
+  padding: 12px 14px 20px;
+  gap: 12px;
+}
+
+.module-workspace[hidden] {
+  display: none !important;
+}
+
+.mw-lead,
+.mw-note,
+.mw-msg {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.mw-msg {
+  color: var(--ink, inherit);
+}
+
+.mw-kpis {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.mw-kpi {
+  text-align: left;
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  background: var(--bg-sunken, rgba(0, 0, 0, 0.03));
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.mw-kpi strong {
+  display: block;
+  font-size: 18px;
+}
+
+.mw-kpi span {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.mw-form {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mw-form input,
+.mw-form textarea,
+.mw-form select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.mw-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mw-list li,
+.mw-card {
+  border: 1px solid var(--line, rgba(0, 0, 0, 0.08));
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+.mw-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .logistics-panel {
   display: none;
   flex: 1;

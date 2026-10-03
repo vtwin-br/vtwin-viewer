@@ -7,6 +7,7 @@ export interface ModelLayersOptions {
   onReplace: (id: string) => void;
   onRemove: (id: string) => void;
   onAdd: () => void;
+  onMesh?: () => void;
   onReorder?: (id: string, beforeId: string | null) => void;
 }
 
@@ -61,7 +62,8 @@ export class ModelLayersUI {
         <span class="ml-count">${models.length}</span>
       </header>
       <div class="ml-list">${rows}</div>
-      <button type="button" class="ml-add" data-act="add">${ICON_PLUS} Adicionar IFC</button>`;
+      <button type="button" class="ml-add" data-act="add">${ICON_PLUS} Adicionar IFC</button>
+      <button type="button" class="ml-add" data-act="mesh">Pacote só malha</button>`;
   }
 
   private onClick = (e: MouseEvent) => {
@@ -72,6 +74,10 @@ export class ModelLayersUI {
     const id = row?.dataset.id;
     if (act === "add") {
       this.opts.onAdd();
+      return;
+    }
+    if (act === "mesh") {
+      this.opts.onMesh?.();
       return;
     }
     if (!id) return;

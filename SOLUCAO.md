@@ -57,13 +57,14 @@ O IFC é um **esquema**. A troca oficial mais usada é o **STEP Physical File**
 |---|---|---|
 | Canónico (contrato BIM) | **IFC-SPF (`.ifc`)** | Importar, editar, exportar. Fonte da verdade. Cada disciplina no seu ficheiro. |
 | Pacote de projeto | **`.vtwin`** (ZIP) | Um clique: membros federados + `.frag` + índice + snapshot do cronograma. Não substitui o IFC. |
+| Pacote só malha | **`.vtwin`** com `meshOnly` | O mesmo pacote sem os STEP (`model.ifc`). Serve para entregar a malha ao cliente. Sem o IFC canónico local, não há Exportar IFC. |
 | Arquivo / envio | `.ifcZIP` | Compressão do mesmo STEP. |
 | Visualização 3D | **Fragments** (That Open) | Runtime no viewport; cache IndexedDB e cópia dentro do `.vtwin`. |
 | Índice interno | Manifesto + offset STEP + GUID + snapshot semântico; bytes IFC em **OPFS** | Cache quente, queries e export; **derivado** do IFC, não o substitui. |
 | API (futuro) | ifcJSON | Troca web entre serviços; o ficheiro mestre continua `.ifc`. |
 
 Não adotar ifcXML, HDF5, `.frag` ou “IFC só em SQL” como formato mestre.
-O utilizador continua a receber e a entregar `.ifc`. `Ctrl+S` guarda o **projeto** (`.vtwin`); **Exportar IFC** gera o STEP para Bonsai/Revit (incluindo `COORD.ifc` / `{projeto}-coordenacao.ifc` quando há raiz). Cache Fragments / OPFS / `.vtwin` podem apagar-se — a app volta a converter a partir do STEP.
+O utilizador continua a receber e a entregar `.ifc`. `Ctrl+S` guarda o **projeto** (`.vtwin`); `Ctrl+Shift+S` (ou «Pacote só malha» no menu dos modelos) guarda o mesmo pacote sem os STEP. **Exportar IFC** gera o STEP para Bonsai/Revit (incluindo `COORD.ifc` / `{projeto}-coordenacao.ifc` quando há raiz). Cache Fragments / OPFS / `.vtwin` podem apagar-se — a app volta a converter a partir do STEP.
 
 A federação tem um IFC de coordenação (`COORD.ifc`, IFC4, sem malha de obra): dono do `IfcWorkPlan` / tarefas / custo / canteiro / georref de projeto. As disciplinas ficam com a geometria. A ligação 3D↔tarefa entre ficheiros é o **GlobalId** (não um `#expressId` cruzado). No export da disciplina, a app escreve um `IfcTask` stub com o mesmo GlobalId da raiz e `IfcRelAssignsToProduct` para os produtos locais. O manifesto `.vtwin` grava `rootId` e `role: coordination` nesse membro (pode ir sem `.frag`).
 
@@ -77,12 +78,12 @@ como entrada direta.
 
 | Domínio | Ferramentas | Estado |
 |---|---|---|
-| Dashboard | Dashboard | Placeholder — indicadores + interação 3D |
-| Visualizador | Visualizador | Placeholder — vista 3D dedicada |
-| Documentação | Documentação | Placeholder — documentos, folhas 2D, tabelas (`IfcDocumentReference`, etc.) |
+| Dashboard | Dashboard | Indicadores calculados (tarefas, estados pela data, custo, elementos ligados) e foco no 3D |
+| Visualizador | Visualizador | Vista 3D do viewport já aberto — não há segundo modelo |
+| Documentação | Documentação | `IfcDocumentReference` (documento e folha) e `IfcTable` |
 | Planejamento | 4D · Gantt · Logística | 4D = relatório/simulação; Gantt = editor `IfcTask`; Logística = limite de canteiro |
-| Coordenação | Coordenação | Placeholder — BCF, clash |
-| Editor | Editor | Placeholder — modelagem IFC |
+| Coordenação | Coordenação | `IfcRelInterferesElements` (IFC4). BCF fica fora |
+| Editor | Editor | `IfcPropertySet`, classificação, contenção/agregação, search set |
 
 O ficheiro IFC em memória (`IfcSession`) é o mesmo em todos os módulos. Trocar
 de módulo não descarrega o modelo.
@@ -109,8 +110,15 @@ IfcProject
 IfcSite / IfcMapConversion          georreferência
 IfcAnnotation VISTA4D_SITE_LIMIT    limite de canteiro (polilinha + Pset de recorte)
 IfcRelSequence                      predecessoras (FS/SS/FF/SF + folga)
-IfcDocumentReference                documentos associados (leitura)
-COORD.ifc (federação)               IfcProject + IfcSite; WorkPlan/Task/custo/canteiro
+IfcDocumentReference                documentos e folhas (Identification = número da folha)
+IfcTable / IfcTableColumn / IfcTableRow   tabelas; o IfcDocumentReference homónimo liga o nome ao projeto
+IfcPropertySet / IfcRelDefinesByProperties  propriedades no elemento
+IfcClassificationReference          classificação (IfcRelAssociatesClassification)
+IfcRelContainedInSpatialStructure   produto dentro de IfcSite / Building / Storey / Space
+IfcRelAggregates                    agregação entre elementos espaciais
+IfcGroup VISTA4D_SEARCH             search set; a consulta está em Pset_Vista4dSearch.Query
+IfcRelInterferesElements            interferência gravada (IFC4)
+COORD.ifc (federação)               IfcProject + IfcSite; WorkPlan/Task/custo/canteiro/documentos
 Disciplina no export                IfcTask stub (mesmo GlobalId) + IfcRelAssignsToProduct
 ```
 
@@ -133,6 +141,7 @@ A app cria a COORD na primeira edição de Gantt, 5D, logística ou ao guardar `
 | Ligar/desligar elemento 3D à tarefa | `IfcRelAssignsToProduct` (Bonsai); GUID noutro ficheiro fica só na COORD | Sim (rel na disciplina no export) |
 | IFC de coordenação | `COORD.ifc` IFC4 (`IfcProject` + `IfcSite`), `role: coordination` no `.vtwin` | Sim |
 | Pacote de projeto | `.vtwin` (ZIP: STEP + `.frag` + índice + snapshot); `rootId` no manifesto | — (sessão) |
+| Pacote só malha | o mesmo ZIP sem `model.ifc` (`meshOnly` no manifesto); `Ctrl+Shift+S` ou «Pacote só malha» | — (sessão; não é o mestre) |
 | Substituir revisão IFC | recase pelo GlobalId (`src/project/rematch.ts`); órfãos noutro ficheiro na COORD | — |
 | Conjuntos tipo Navis («Estacas») | `IfcGroup` (`ObjectType = VISTA4D_SET`), `IfcRelAssignsToGroup`, `IfcRelAssignsToProcess` | Sim |
 | Custo 5D na coluna do Gantt | `IfcCostSchedule` (BUDGET), `IfcCostItem`, `IfcCostValue`, `IfcRelAssignsToControl` à `IfcTask` | Sim |
@@ -140,19 +149,25 @@ A app cria a COORD na primeira edição de Gantt, 5D, logística ou ao guardar `
 | Limite de canteiro | `IfcAnnotation` (`ObjectType = VISTA4D_SITE_LIMIT`) + `IfcPolyline` + `Pset_Vista4dSiteLimit`; `IfcRelContainedInSpatialStructure` no `IfcSite` | Sim |
 | Recorte Google / platô | vista (shader + malha) sobre o polígono e a cota gravados | — |
 | Simulação 4D no viewport | calculada a partir de datas + GUIDs | — |
+| Propriedade num elemento | `IfcPropertySingleValue` dentro de `IfcPropertySet`; `IfcRelDefinesByProperties` | Sim |
+| Classificação | `IfcClassification` + `IfcClassificationReference` + `IfcRelAssociatesClassification` | Sim |
+| Documento ou folha 2D | `IfcDocumentReference` + `IfcRelAssociatesDocument` (folha = a mesma entidade, com Identification). PDF/.mpp no Gantt gravam a referência (nome e localização); o binário .mpp não é lido | Sim |
+| Tabela | `IfcTable`, `IfcTableColumn`, `IfcTableRow` (IFC2X3: sem colunas, linha de cabeçalho). O esquema não liga `IfcTable` ao `IfcProject`; a app acrescenta um `IfcDocumentReference` com o mesmo Name e Description `IfcTable` | Sim |
+| Mover na árvore espacial | produto → `IfcRelContainedInSpatialStructure`; elemento espacial → `IfcRelAggregates` | Sim |
+| Search set | `IfcGroup` (`ObjectType = VISTA4D_SEARCH`) + membros `IfcRelAssignsToGroup` + consulta em `Pset_Vista4dSearch` / `Query` (`Tipo=IfcWall` ou `Pset.Prop=valor`) | Sim |
+| Interferência | `IfcRelInterferesElements` (IFC4). Dois GlobalId; se estiverem em ficheiros diferentes, a relação fica na COORD com proxies | Sim |
 
 Código de escrita: `src/ifc/ifcSession.ts` (patches STEP; o resto do ficheiro
 fica intacto). Leitura do cronograma: `src/schedule/parseSchedule.ts`.
 O Gantt (`src/ui/projectWorkspace.ts`) é uma **vista** desse grafo, não um segundo plano.
 
-### Ainda rascunho (UI sim, IFC não)
+### Não entra no STEP
 
 | Capacidade | Onde vive hoje | O que falta no STEP |
 |---|---|---|
 | % de progresso na barra do Gantt | só visual | `IfcTaskTime` não tem %; não inventar propriedade |
-| `.mpp` binário / PDF no Gantt | aviso na sessão | XML/CSV para tarefas; documentos → `IfcDocumentReference` |
-| Árvore espacial | Fragments `getSpatialStructure()` | Edição de `IfcRelContainedInSpatialStructure` / agregação |
-| Search sets por propriedade | — | `IfcGroup` + query; ainda não há |
+| Tópicos BCF, câmara, markup, vista do clash | — | Não há entidade IFC para o tópico BCF nem para a câmara. A câmara é vista calculada. O par de elementos, quando o utilizador o grava, é `IfcRelInterferesElements` — não um `.bcf` nosso |
+| Varredura automática de clash | não está na UI | Não há ficheiro de clash. O par que o utilizador grava é `IfcRelInterferesElements` |
 
 Cada linha do Gantt é uma `IfcTask`. Sem modelo IFC aberto não há cronograma para editar.
 
@@ -245,6 +260,8 @@ artefatos derivados; o IFC continua sendo a fonte e a saída interoperável.
 | `src/schedule/links.ts` | FS/SS/FF/SF, folga e recálculo à frente |
 | `src/schedule/types.ts` | `Task`, `SelectionGroup`, `ScheduleData` |
 | `src/ifc/scheduleWrite.ts` | Serialize de `IfcWorkSchedule` / `IfcTask` / `IfcRelNests` / `IfcRelSequence` |
+| `src/ifc/semanticWrite.ts` | Pset, classificação, documento, tabela, contenção, search set, interferência |
+| `src/ui/moduleWorkspace.ts` | Vistas Dashboard, Visualizador, Documentação, Editor e Coordenação |
 | `src/projectPlan/` | Vista Gantt e mapeamento CSV/XML → outline IFC |
 | `src/logistics/` | Limite de canteiro (parse/serialize `IfcAnnotation`) |
 | `src/viewer/` | Viewport, highlight, caixa de seleção, recorte Google |
@@ -261,10 +278,9 @@ inventado pela app): `IfcWorkPlan` «Engineering and Construction»,
 
 ---
 
-## 10. Próximos passos alinhados com este guia
+## 10. Fora do STEP (de propósito)
 
-Ordem sugerida, sempre com export verificável:
-
-1. Pacote «só malha» para o cliente (sem duplicar os IFCs no `.vtwin`).
-2. Propriedades e classificação nativas (`IfcPropertySet`, `IfcClassificationReference`).
-3. Documentos do Gantt como `IfcDocumentReference` (hoje PDF/.mpp ficam só na sessão).
+- **BCF** (tópico, comentário, câmara, markup) não é gravado. Não existe entidade IFC equivalente e um `.bcf` paralelo seria um segundo mestre. A interferência que o utilizador confirma grava-se como `IfcRelInterferesElements`.
+- **% de progresso** continua só na barra do Gantt. `IfcTaskTime` não tem esse campo.
+- **Pacote só malha** não contém o STEP. Abrir esse `.vtwin` mostra a malha e o snapshot; Exportar IFC só funciona se o IFC canónico ainda estiver no armazenamento local.
+- **`.mpp` binário** não é interpretado. O que se grava é a referência (`IfcDocumentReference`), não as tarefas. Tarefas entram por XML ou CSV.

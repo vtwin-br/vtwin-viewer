@@ -43,10 +43,10 @@ export async function importPlanFile(file: File): Promise<ImportResult> {
         attachment: fileToAttachment(
           file,
           "schedule",
-          "Binário .mpp anexado. Exporte XML ou CSV no Microsoft Project para montar o Gantt aqui.",
+          "O .mpp binário não é lido. O nome fica como IfcDocumentReference; as tarefas pedem XML ou CSV.",
         ),
         message:
-          "O .mpp binário ainda não é lido no browser. O arquivo ficou anexado ao planejamento — no Project use Ficheiro → Guardar como → XML ou CSV.",
+          "O .mpp binário não é lido. Gravou-se um IfcDocumentReference com o nome do ficheiro — para as tarefas, exporte XML ou CSV no Microsoft Project.",
       };
     }
     throw new Error("Não reconheci este .mpp. Tente exportar XML ou CSV a partir do Microsoft Project.");

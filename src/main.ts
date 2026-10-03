@@ -21,6 +21,7 @@ import { buildBimCatalog, compactCatalog, type BimCatalog } from "./projectPlan/
 import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projectPlan/linkAssist";
 import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
+import { ModuleWorkspace } from "./ui/moduleWorkspace";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
@@ -392,10 +393,12 @@ async function main() {
   let onLogisticsWorkspace = () => {};
   let highlightPlanTask: (task: { linkedIfcTaskId?: number } | null) => void = () => {};
   let focusGuidsInView = async (_guids: Iterable<string>, _opts?: { fit?: boolean }) => {};
+  let fitCurrentView = () => {};
   let refreshWorkingUi = () => {};
   let togglePlanModel = () => {};
   let setPlanModelOpen = (_open: boolean) => {};
   let refreshFederatedView = (_opts?: { structure?: boolean }) => {};
+  let refreshModuleWorkspace = (_id: WorkspaceId) => {};
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
 
@@ -405,7 +408,29 @@ async function main() {
     const logisticsPanel = document.getElementById("logistics-panel");
     const panelTitle = document.querySelector("#sidebar .panel-title");
     if (logisticsPanel) logisticsPanel.hidden = shellKind !== "logistics";
-    if (panelTitle) panelTitle.textContent = shellKind === "logistics" ? "Canteiro" : "4D";
+    const toolShell =
+      shellKind === "dashboard" ||
+      shellKind === "viewer" ||
+      shellKind === "docs" ||
+      shellKind === "editor" ||
+      shellKind === "coordination";
+    if (panelTitle) {
+      panelTitle.textContent =
+        shellKind === "logistics"
+          ? "Canteiro"
+          : shellKind === "dashboard"
+            ? "Indicadores"
+            : shellKind === "viewer"
+              ? "Vista"
+              : shellKind === "docs"
+                ? "Documentos"
+                : shellKind === "editor"
+                  ? "Editor"
+                  : shellKind === "coordination"
+                    ? "Interferências"
+                    : "4D";
+    }
+    if (toolShell) setPanelOpen("schedule", true, false);
     if (shellKind !== "schedule" && shellKind !== "logistics") {
       pauseTimeline();
       disablePlanVizTools();
@@ -434,6 +459,16 @@ async function main() {
         dirty = true;
         refitVisibleModels();
       });
+    } else if (shellKind === "dashboard") {
+      setPlanModelOpen(false);
+      dirty = true;
+      if (simKicker) simKicker.textContent = "Dashboard";
+      currentDateEl.textContent = formatDateLabel(lastDate);
+    } else if (shellKind === "viewer") {
+      setPlanModelOpen(false);
+      dirty = true;
+      if (simKicker) simKicker.textContent = "Visualizador";
+      currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
     } else if (shellKind === "logistics") {
       setPlanModelOpen(false);
       dirty = true;
@@ -451,8 +486,9 @@ async function main() {
       currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
     }
     projectWs?.setActive(shellKind === "plan");
-    inspector.setReadOnly(shellKind === "schedule" || shellKind === "logistics");
+    inspector.setReadOnly(shellKind !== "plan");
     renderModulePlaceholder(id);
+    refreshModuleWorkspace(id);
     refreshLayoutRestore();
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   };
@@ -645,7 +681,7 @@ async function main() {
     })();
   };
 
-  const saveProject = () => {
+  const saveProject = (meshOnly = false) => {
     if (!models.size) return;
     void (async () => {
       try {
@@ -715,8 +751,11 @@ async function main() {
           });
         }
         const name = projectName ?? models.label();
-        const bytes = await packVtwin(name, packed);
-        downloadBytes(bytes, vtwinDownloadName(name));
+        const bytes = await packVtwin(name, packed, { meshOnly });
+        const downloadName = meshOnly
+          ? vtwinDownloadName(name).replace(/\.vtwin$/i, "-malha.vtwin")
+          : vtwinDownloadName(name);
+        downloadBytes(bytes, downloadName);
         projectName = name;
         btnExport?.classList.remove("is-dirty");
         btnSaveProject?.classList.remove("is-dirty");
@@ -843,6 +882,43 @@ async function main() {
     refreshCost5d();
   };
 
+  const moduleRoot = document.getElementById("module-workspace");
+  if (moduleRoot) {
+    const moduleWs = new ModuleWorkspace(moduleRoot, {
+      getWorkspace: () => nav.getWorkspace(),
+      hasModel: () => models.size > 0,
+      modelLabel: () => (models.size ? models.label() : "Sem modelo"),
+      getSchedule: () => scheduleRef,
+      getDate: () => lastDate,
+      planning: () =>
+        models.coordination?.session ?? models.active?.session ?? models.disciplines[0]?.session ?? null,
+      editSession: () => {
+        const active = models.active;
+        if (active && active.role !== "coordination") return active.session;
+        return models.disciplines.find((entry) => entry.visible)?.session ?? models.disciplines[0]?.session ?? null;
+      },
+      sessionForGuid: (guid: string) => {
+        const key = guid.trim();
+        if (!key) return null;
+        for (const entry of models.all) {
+          if (entry.session.stepIndex.guidToId.has(key)) return entry.session;
+        }
+        return null;
+      },
+      coordinationSession: () => models.coordination?.session ?? null,
+      selectionGuids: () => highlighter?.getWorkingGuids() ?? [],
+      focusGuids: (guids) => void focusGuidsInView(guids),
+      fitView: () => fitCurrentView(),
+      revealAll: () => void highlighter?.revealAll(),
+      onChanged: () => {
+        markIfcDirty();
+        refreshFederatedView({ structure: true });
+      },
+    });
+    refreshModuleWorkspace = (id) => moduleWs.refresh(id);
+    refreshModuleWorkspace(nav.getWorkspace());
+  }
+
   try {
     setStatus("vtwin");
     const viewer = await createViewer(viewportEl);
@@ -913,7 +989,7 @@ async function main() {
       }
     };
 
-    const fitCurrentView = () => {
+    fitCurrentView = () => {
       if (walk?.enabled) {
         walk.respawn();
         return;
@@ -1490,6 +1566,7 @@ async function main() {
       refreshCost5d();
       if (models.visible.length) tree.update(lastDate);
       refreshSiteVisual();
+      refreshModuleWorkspace(nav.getWorkspace());
     };
 
     const FALLBACK_ANCHOR: AnchorLLA = {
@@ -1900,6 +1977,7 @@ async function main() {
           onRemove: (id) => void removeLoadedModel(id),
           onReplace: (id) => pickReplaceIfc(id),
           onAdd: () => pickIfcFile(),
+          onMesh: () => saveProject(true),
           onReorder: (id, beforeId) => {
             models.move(id, beforeId);
             renderModelLayers();
@@ -2201,8 +2279,9 @@ async function main() {
       schedule: ScheduleData | null;
       index: import("./ifc/stepIndex").StepIndex | null;
     }) => {
-      const hash = member.entry.hash || (await hashIfcBytes(member.ifc));
-      if (!(await hasIfcBytes(hash))) await saveIfcBytes(hash, member.ifc);
+      const ifc = member.ifc.byteLength ? member.ifc : null;
+      const hash = member.entry.hash || (ifc ? await hashIfcBytes(ifc) : "");
+      if (ifc && hash && !(await hasIfcBytes(hash))) await saveIfcBytes(hash, ifc);
       let schedule = member.schedule && member.schedule.roots.length ? member.schedule : null;
       if (!schedule && member.ifc.byteLength) {
         try {
@@ -2212,9 +2291,9 @@ async function main() {
         }
       }
       schedule ??= emptySchedule();
-      const session = new IfcSession(member.ifc, member.entry.fileName, schedule, {
+      const session = new IfcSession(ifc, member.entry.fileName, schedule, {
         index: member.index ?? undefined,
-        storeHash: hash,
+        storeHash: hash && (ifc || (await hasIfcBytes(hash))) ? hash : undefined,
         schema: member.entry.schema,
       });
       if (member.entry.extra) session.hydrateExtraTransform(member.entry.extra);
@@ -2263,6 +2342,41 @@ async function main() {
           await finishCoordinationModel(member);
           const entry = models.get(member.entry.id);
           if (entry && !member.entry.visible) models.setVisible(entry.id, false);
+          index += 1;
+          continue;
+        }
+        if (!member.ifc.byteLength) {
+          if (!member.frag?.byteLength || !member.index) {
+            console.warn(`Pacote só malha sem geometria de «${member.entry.fileName}».`);
+            index += 1;
+            continue;
+          }
+          const schedule = member.schedule ?? emptySchedule();
+          const hash = member.entry.hash;
+          const hasStore = hash ? await hasIfcBytes(hash) : false;
+          const session = new IfcSession(null, member.entry.fileName, schedule, {
+            index: member.index,
+            schema: member.entry.schema,
+            storeHash: hasStore ? hash : undefined,
+          });
+          const loaded = await loadFragments(viewer, member.frag, member.entry.id);
+          await finishLoadedModel(
+            {
+              modelId: member.entry.id,
+              hash,
+              fileName: member.entry.fileName,
+              session,
+              model: loaded.model,
+              first: models.disciplines.length === 0,
+              schedule,
+            },
+            {
+              extra: member.entry.extra,
+              skipFit: index < members.length - 1,
+            },
+          );
+          const meshEntry = models.get(member.entry.id);
+          if (meshEntry && !member.entry.visible) await setModelLayerVisible(meshEntry.id, false);
           index += 1;
           continue;
         }
@@ -2442,7 +2556,7 @@ async function main() {
       }
     });
     btnExport?.addEventListener("click", exportIfc);
-    btnSaveProject?.addEventListener("click", saveProject);
+    btnSaveProject?.addEventListener("click", () => saveProject(false));
     replaceIfcInput?.addEventListener("change", () => {
       const file = replaceIfcInput.files?.[0];
       const id = replaceTargetId;
@@ -2540,7 +2654,7 @@ async function main() {
     window.addEventListener("keydown", (e) => {
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyS") {
         e.preventDefault();
-        saveProject();
+        saveProject(e.shiftKey);
         return;
       }
       if ((e.ctrlKey || e.metaKey) && e.code === "KeyO") {
@@ -2563,7 +2677,15 @@ async function main() {
         }
         return;
       }
-      if (workspaceShell(nav.getWorkspace()) === "placeholder") return;
+      const shellNow = workspaceShell(nav.getWorkspace());
+      if (shellNow === "placeholder") return;
+      if (shellNow === "viewer" || shellNow === "docs" || shellNow === "editor" || shellNow === "coordination") {
+        if (e.code === "KeyF") {
+          e.preventDefault();
+          fitCurrentView();
+        }
+        return;
+      }
       if (nav.getWorkspace() === "logistics") {
         if (e.code === "KeyF") {
           e.preventDefault();
@@ -2663,9 +2785,16 @@ async function main() {
         dirty = false;
         applying = true;
         try {
-          if (shellKind === "plan" || shellKind === "logistics") {
+          if (
+            shellKind === "plan" ||
+            shellKind === "logistics" ||
+            shellKind === "viewer" ||
+            shellKind === "docs" ||
+            shellKind === "editor" ||
+            shellKind === "coordination"
+          ) {
             await highlighter.revealAll();
-          } else if (shellKind === "schedule") {
+          } else if (shellKind === "schedule" || shellKind === "dashboard") {
             const buckets = computeStateBuckets(scheduleRef, lastDate);
             const previewAll = !timeline.playing && timeline.atStart;
             await highlighter.apply(buckets, { previewAll });
