@@ -22,24 +22,41 @@ import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projec
 import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
 import { ModuleWorkspace } from "./ui/moduleWorkspace";
-import { SitePlanner, type PlanAction, type PlanTool } from "./ui/sitePlanner";
+import { SitePlanner, type PlanFieldEvent, type PlanTool } from "./ui/sitePlanner";
 import {
   addPlanningLine,
   bytesIncludeMarker,
+  DEFAULT_COUNTER_JIB,
+  DEFAULT_DRILL_DEPTH,
+  DEFAULT_FENCE_LENGTH,
+  DEFAULT_FENCE_PANELS,
   DEFAULT_JIB_LENGTH,
   DEFAULT_MAST_HEIGHT,
+  DEFAULT_SWING,
   DEFAULT_TERRAIN_DEPTH,
   DEFAULT_TERRAIN_SLOPE,
+  DEFAULT_TRIP_SECONDS,
   emptySitePlan,
   importLegacyAssets,
   newPlanId,
   overlaySitePlan,
+  parseIsoDate,
+  planIsEmpty,
+  poseOf,
   removePlanItem,
+  setLineDates,
   type PlanPoint,
   type SitePlan,
 } from "./planning/sitePlan";
+import { frameFromPairs } from "./planning/pdfFrame";
+import { fractionBetween, motionsAt, type PlaybackClock } from "./planning/playback";
+import { emptySidecar, sidecarHasContent, type MarkupItem, type PdfOverlay, type ViewerSidecar } from "./project/viewerPack";
+import { slidesToPdf, slidesToZip } from "./project/slidesPdf";
+import { formatHexColor } from "./ifc/surfaceStyle";
+import { bytesToBase64 } from "./viewer/pdfSheet";
 import { VISTA4D_SITE_ASSET } from "./site/types";
-import { SitePlanLayer } from "./viewer/sitePlanLayer";
+import { SitePlanLayer, type SiteHit } from "./viewer/sitePlanLayer";
+import * as THREE from "three";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
@@ -428,9 +445,43 @@ async function main() {
   let refreshSitePlanner = () => {};
   let siteLayer: SitePlanLayer | null = null;
   let sitePlan: SitePlan = emptySitePlan();
+  let sidecar: ViewerSidecar = emptySidecar();
   let planDirty = false;
-  let planDraft: { kind: "path" | "terrain"; id: string } | null = null;
+  let pendingPdf: { name: string; pdf: string } | null = null;
+  let pdfAlign: { id: string; pair: 0 | 1; phase: "sheet" | "ground" } | null = null;
+  let siteDrag: { hit: SiteHit; last: number; x: number; y: number } | null = null;
+  let planDraft: { kind: "path" | "terrain" | "hatch" | "polygon"; id: string } | null = null;
   let sitePlanner: SitePlanner | null = null;
+  let tripSeconds = 0;
+  let timelinePlaying = false;
+  let timelineAtStart = true;
+  let sheetPick: { u: number; v: number } | null = null;
+  type OrbitRig = {
+    enabled: boolean;
+    getPosition: (out: THREE.Vector3) => void;
+    getTarget: (out: THREE.Vector3) => void;
+    setLookAt: (x: number, y: number, z: number, tx: number, ty: number, tz: number, smooth?: boolean) => Promise<void>;
+  };
+  let viewerControls = (): OrbitRig | null => null;
+  let captureSlide = () => {};
+  let exportSlides = (_kind: "pdf" | "zip") => {};
+  let openSlide = (_id: string) => {};
+  const playbackClock = (): PlaybackClock => ({
+    playing: timelinePlaying,
+    seconds: tripSeconds,
+    preview: !timelinePlaying && timelineAtStart,
+  });
+  const resetSitePackage = () => {
+    sitePlan = emptySitePlan();
+    sidecar = emptySidecar();
+    planDirty = false;
+    planDraft = null;
+    pendingPdf = null;
+    pdfAlign = null;
+    siteDrag = null;
+    sheetPick = null;
+    tripSeconds = 0;
+  };
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
 
@@ -671,7 +722,7 @@ async function main() {
     setFileLabel(label, dirty);
     if (fileExtEl) fileExtEl.textContent = projectName ? "VTWIN" : "IFC";
     if (btnExport) btnExport.disabled = models.size === 0;
-    if (btnSaveProject) btnSaveProject.disabled = models.size === 0;
+    if (btnSaveProject) btnSaveProject.disabled = models.size === 0 && planIsEmpty(sitePlan) && !sidecarHasContent(sidecar);
     btnExport?.classList.toggle("is-dirty", ifcDirty);
     btnSaveProject?.classList.toggle("is-dirty", dirty);
     if (btnExportLabel) btnExportLabel.textContent = models.size > 1 ? "Exportar IFCs" : "Exportar IFC";
@@ -726,11 +777,22 @@ async function main() {
   };
 
   const saveProject = (meshOnly = false) => {
-    if (!models.size) return;
+    if (!models.size && planIsEmpty(sitePlan) && !sidecarHasContent(sidecar)) return;
     void (async () => {
       try {
         setLoading(true, "A guardar projeto");
         setStatus("Projeto");
+        if (!models.size) {
+          const name = projectName || "Canteiro";
+          const bytes = await packVtwin(name, [], { sitePlan, sidecar });
+          planDirty = false;
+          downloadBytes(bytes, vtwinDownloadName(name));
+          projectName = name;
+          btnSaveProject?.classList.remove("is-dirty");
+          syncFileChrome();
+          setLoading(false);
+          return;
+        }
         ensurePlanning();
         const coord = models.coordination;
         if (coord) {
@@ -796,7 +858,7 @@ async function main() {
           });
         }
         const name = projectName ?? models.label();
-        const bytes = await packVtwin(name, packed, { meshOnly, sitePlan });
+        const bytes = await packVtwin(name, packed, { meshOnly, sitePlan, sidecar });
         planDirty = false;
         const downloadName = meshOnly
           ? vtwinDownloadName(name).replace(/\.vtwin$/i, "-malha.vtwin")
@@ -878,7 +940,6 @@ async function main() {
   });
 
   const headerCenter = document.querySelector(".header-center");
-  let timelinePlaying = false;
   const timeline = new TimelineUI({
     container: timelineEl,
     schedule: placeholder,
@@ -898,6 +959,7 @@ async function main() {
     },
     onPlayingChange: (playing) => {
       timelinePlaying = playing;
+      if (playing) tripSeconds = 0;
       headerCenter?.classList.toggle("is-playing", playing);
       if (playing) void highlighter?.clearIsolation();
       dirty = true;
@@ -983,6 +1045,44 @@ async function main() {
     refreshFederatedView({ structure: true });
   };
 
+  const playbackRange = () => {
+    const schedule = nativeScheduleRef ?? scheduleRef;
+    if (!schedule) return null;
+    return { start: schedule.minDate, end: schedule.maxDate };
+  };
+
+  const pourTimes = (): Record<string, number> => {
+    const times: Record<string, number> = {};
+    for (const pour of sidecar.pours.items) {
+      const ids = scheduleRef ? findTaskIdsForGuids(scheduleRef, [pour.guid]) : [];
+      const task = ids.length && scheduleRef ? scheduleRef.byId.get(ids[0]!) : undefined;
+      times[pour.guid] = task?.start && task.end
+        ? fractionBetween(lastDate, task.start, task.end)
+        : playbackClock().preview
+          ? 0
+          : Math.min(1, tripSeconds / 8);
+    }
+    return times;
+  };
+
+  const pushMotion = () => {
+    siteLayer?.setMotions(motionsAt(sitePlan, sidecar.keyframes, lastDate, playbackRange(), playbackClock()), pourTimes());
+  };
+
+  const markupOf = (id: string) => sidecar.markups.items.find((item) => item.id === id);
+  const pointsOf = (id: string): PlanPoint[] | null => {
+    const path = sitePlan.paths.find((item) => item.id === id);
+    if (path) return path.points;
+    const terrain = sitePlan.terrains.find((item) => item.id === id);
+    if (terrain) return terrain.contour;
+    const markup = markupOf(id);
+    if (markup?.points) return markup.points;
+    return null;
+  };
+
+  const nearFirst = (points: PlanPoint[], point: PlanPoint) =>
+    points.length >= 3 && Math.hypot(points[0]!.x - point.x, points[0]!.y - point.y, points[0]!.z - point.z) < 1.4;
+
   const commitPlanItem = (tool: PlanTool, point: PlanPoint, modelId: string): string => {
     const dates = phaseWindow();
     if (tool === "crane") {
@@ -995,8 +1095,14 @@ async function main() {
         modelId,
         ...point,
         yaw: 0,
+        rx: 0,
+        ry: 0,
+        rz: 0,
         mastHeight: DEFAULT_MAST_HEIGHT,
         jibLength: DEFAULT_JIB_LENGTH,
+        hook: 4,
+        counterJib: DEFAULT_COUNTER_JIB,
+        swing: DEFAULT_SWING,
         lineId: line.id,
       });
       return id;
@@ -1011,6 +1117,67 @@ async function main() {
         modelId,
         ...point,
         yaw: 0,
+        rx: 0,
+        ry: 0,
+        rz: 0,
+        duration: DEFAULT_TRIP_SECONDS,
+        lineId: line.id,
+      });
+      return id;
+    }
+    if (tool === "fence") {
+      planDraft = null;
+      const line = addPlanningLine(sitePlan, "Cerca", dates.start, dates.end);
+      const id = newPlanId();
+      sitePlan.fences.push({
+        id,
+        modelId,
+        ...point,
+        yaw: 0,
+        rz: 0,
+        length: DEFAULT_FENCE_LENGTH,
+        panels: DEFAULT_FENCE_PANELS,
+        color: "#d5dee2",
+        lineId: line.id,
+      });
+      return id;
+    }
+    if (tool === "drill") {
+      planDraft = null;
+      const line = addPlanningLine(sitePlan, "Perfuratriz", dates.start, dates.end);
+      const id = newPlanId();
+      sitePlan.drills.push({
+        id,
+        modelId,
+        ...point,
+        yaw: 0,
+        rx: 0,
+        ry: 0,
+        rz: 0,
+        depth: DEFAULT_DRILL_DEPTH,
+        color: "#f0b429",
+        lineId: line.id,
+      });
+      return id;
+    }
+    if (tool === "mass") {
+      planDraft = null;
+      const line = addPlanningLine(sitePlan, "Volume", dates.start, dates.end);
+      const id = newPlanId();
+      sitePlan.masses.push({
+        id,
+        modelId,
+        ...point,
+        yaw: 0,
+        rx: 0,
+        ry: 0,
+        rz: 0,
+        width: 8,
+        depth: 6,
+        height: 3,
+        color: "#8aa0a6",
+        grow: false,
+        sections: 1,
         lineId: line.id,
       });
       return id;
@@ -1019,7 +1186,7 @@ async function main() {
       if (!planDraft || planDraft.kind !== "path") {
         const line = addPlanningLine(sitePlan, "Caminho", dates.start, dates.end);
         const id = newPlanId();
-        sitePlan.paths.push({ id, modelId, points: [point], lineId: line.id });
+        sitePlan.paths.push({ id, modelId, points: [point], color: "#748891", lineId: line.id });
         planDraft = { kind: "path", id };
         return id;
       }
@@ -1037,43 +1204,301 @@ async function main() {
           operation: "cut",
           depth: DEFAULT_TERRAIN_DEPTH,
           slope: DEFAULT_TERRAIN_SLOPE,
+          closed: false,
+          color: "#9b3a2a",
+          slopeColor: "#c4a882",
+          rz: 0,
           lineId: line.id,
         });
         planDraft = { kind: "terrain", id };
         return id;
       }
-      sitePlan.terrains.find((item) => item.id === planDraft?.id)?.contour.push(point);
+      const terrain = sitePlan.terrains.find((item) => item.id === planDraft?.id);
+      if (terrain && nearFirst(terrain.contour, point)) {
+        terrain.closed = true;
+        planDraft = null;
+        return terrain.id;
+      }
+      terrain?.contour.push(point);
+      return planDraft.id;
+    }
+    if (tool === "pdf" && pendingPdf) {
+      planDraft = null;
+      const id = newPlanId();
+      const overlay: PdfOverlay = {
+        id,
+        modelId,
+        name: pendingPdf.name,
+        sheet: 0,
+        pageCount: 1,
+        opacity: 0.85,
+        removeWhite: false,
+        color: "#ffffff",
+        pdf: pendingPdf.pdf,
+        pairs: [],
+        origin: point,
+        width: 24,
+        aspect: 1.4,
+      };
+      sidecar.markups.pdfs.push(overlay);
+      pendingPdf = null;
+      return id;
+    }
+    if (tool === "pin" || tool === "box" || tool === "balloon" || tool === "hatch" || tool === "polygon") {
+      return commitMarkup(tool, point, modelId);
+    }
+    return "";
+  };
+
+  const commitMarkup = (tool: "pin" | "box" | "balloon" | "hatch" | "polygon", point: PlanPoint, modelId: string): string => {
+    if (tool === "hatch" || tool === "polygon") {
+      if (!planDraft || planDraft.kind !== tool) {
+        const id = newPlanId();
+        sidecar.markups.items.push({
+          id,
+          kind: tool,
+          modelId,
+          text: sitePlanner?.noteText() || "",
+          color: "#8aa4ad",
+          points: [point],
+          pattern: tool === "polygon" ? "solid" : "diagonal",
+          scale: 1,
+          closed: false,
+        });
+        planDraft = { kind: tool, id };
+        return id;
+      }
+      const item = markupOf(planDraft.id);
+      if (item?.points && nearFirst(item.points, point)) {
+        item.closed = true;
+        planDraft = null;
+        return item.id;
+      }
+      item?.points?.push(point);
       return planDraft.id;
     }
     planDraft = null;
-    const text = sitePlanner?.noteText() || "Nota";
-    const line = addPlanningLine(sitePlan, text, dates.start, dates.end);
     const id = newPlanId();
-    sitePlan.notes.push({ id, modelId, ...point, text, lineId: line.id });
+    const item: MarkupItem = {
+      id,
+      kind: tool === "box" ? "textbox" : tool,
+      modelId,
+      text: sitePlanner?.noteText() || "",
+      color: tool === "box" ? "#071820" : "#163540",
+      ...point,
+      width: tool === "balloon" ? 5 : 6,
+      height: tool === "balloon" ? 2.2 : 2.4,
+    };
+    sidecar.markups.items.push(item);
     return id;
   };
 
-  const applyPlanAction = (action: PlanAction) => {
-    const id = siteLayer?.selected() ?? "";
-    if (!id) return;
+  const setAxis = (item: { yaw: number; rx?: number; ry?: number; rz?: number }, axis: "rx" | "ry" | "rz", radians: number) => {
+    const pose = poseOf(item);
+    pose[axis] = radians;
+    item.rx = pose.rx;
+    item.ry = pose.ry;
+    item.rz = pose.rz;
+    item.yaw = pose.rz;
+  };
+
+  const applyField = (event: PlanFieldEvent) => {
+    const { id, field, value } = event;
     const crane = sitePlan.cranes.find((item) => item.id === id);
     const truck = sitePlan.trucks.find((item) => item.id === id);
+    const path = sitePlan.paths.find((item) => item.id === id);
     const terrain = sitePlan.terrains.find((item) => item.id === id);
+    const fence = sitePlan.fences.find((item) => item.id === id);
+    const drill = sitePlan.drills.find((item) => item.id === id);
+    const mass = sitePlan.masses.find((item) => item.id === id);
+    const note = sitePlan.notes.find((item) => item.id === id);
+    const markup = markupOf(id);
+    const pdf = sidecar.markups.pdfs.find((item) => item.id === id);
+    const number = Number(value);
+    const radians = (Number.isFinite(number) ? number : 0) * (Math.PI / 180);
+    const posed = crane || truck || drill || mass;
+    const located = crane || truck || fence || drill || mass || note || (markup?.x != null ? markup : undefined);
+    if ((field === "x" || field === "y" || field === "z") && located && Number.isFinite(number)) {
+      located[field] = number;
+    } else if ((field === "rx" || field === "ry" || field === "rz") && posed && field !== "rz") setAxis(posed, field, radians);
+    else if (field === "rz" && posed) setAxis(posed, "rz", radians);
+    else if (field === "rz" && (terrain || fence)) {
+      if (terrain) terrain.rz = radians;
+      if (fence) {
+        fence.rz = radians;
+        fence.yaw = radians;
+      }
+    } else if ((field === "start" || field === "end") && (crane || truck || terrain || fence || drill || mass)) {
+      const lineId = (crane || truck || terrain || fence || drill || mass)?.lineId;
+      const line = sitePlan.lines.find((item) => item.id === lineId);
+      if (line) setLineDates(sitePlan, lineId, field === "start" ? value : line.start, field === "end" ? value : line.end);
+    } else if ((field === "rx" || field === "ry" || field === "rz") && crane) setAxis(crane, field, radians);
+    else if ((field === "rx" || field === "ry" || field === "rz") && truck) setAxis(truck, field, radians);
+    else if (field === "rz" && terrain) terrain.rz = radians;
+    else if (field === "mastHeight" && crane && Number.isFinite(number)) crane.mastHeight = Math.max(2, number);
+    else if (field === "jibLength" && crane && Number.isFinite(number)) crane.jibLength = Math.max(2, number);
+    else if (field === "hook" && crane && Number.isFinite(number)) crane.hook = Math.max(0.4, number);
+    else if (field === "counterJib" && crane && Number.isFinite(number)) crane.counterJib = Math.max(1, number);
+    else if (field === "swing" && crane && Number.isFinite(number)) crane.swing = Math.min(360, Math.max(10, number));
+    else if (field === "duration" && truck && Number.isFinite(number)) truck.duration = Math.max(1, number);
+    else if (field === "length" && fence && Number.isFinite(number)) fence.length = Math.max(0.8, number);
+    else if (field === "panels" && fence && Number.isFinite(number)) fence.panels = Math.max(1, Math.round(number));
+    else if (field === "color" && fence) fence.color = value;
+    else if (field === "depth" && drill && Number.isFinite(number)) drill.depth = Math.max(0.4, number);
+    else if (field === "color" && drill) drill.color = value;
+    else if (field === "width" && mass && Number.isFinite(number)) mass.width = Math.max(0.4, number);
+    else if (field === "depth" && mass && Number.isFinite(number)) mass.depth = Math.max(0.4, number);
+    else if (field === "height" && mass && Number.isFinite(number)) mass.height = Math.max(0.2, number);
+    else if (field === "sections" && mass && Number.isFinite(number)) mass.sections = Math.max(1, Math.round(number));
+    else if (field === "color" && mass) mass.color = value;
+    else if (field === "color" && crane) crane.color = value;
+    else if (field === "color" && truck) truck.color = value;
+    else if (field === "color" && path) path.color = value;
+    else if (field === "color" && terrain) terrain.color = value;
+    else if (field === "slopeColor" && terrain) terrain.slopeColor = value;
+    else if (field === "depth" && terrain && Number.isFinite(number)) terrain.depth = Math.max(0.2, number);
+    else if (field === "slope" && terrain && Number.isFinite(number)) terrain.slope = Math.min(89, Math.max(5, number));
+    else if (field === "color" && note) note.color = value;
+    else if (field === "text" && note) note.text = value;
+    else if (field === "pathId" && truck) truck.pathId = value || undefined;
+    else if (field === "pathT" && truck && Number.isFinite(number)) upsertKey(truck.id, { pathT: Math.min(1, Math.max(0, number / 100)) });
+    else if (markup && field === "text") markup.text = value;
+    else if (markup && field === "color") markup.color = value;
+    else if (markup && field === "width" && Number.isFinite(number)) markup.width = Math.max(0.6, number);
+    else if (markup && field === "height" && Number.isFinite(number)) markup.height = Math.max(0.4, number);
+    else if (markup && field === "scale" && Number.isFinite(number)) markup.scale = Math.max(0.2, number);
+    else if (pdf && field === "sheet" && Number.isFinite(number)) pdf.sheet = Math.max(0, Math.floor(number) - 1);
+    else if (pdf && field === "opacity" && Number.isFinite(number)) pdf.opacity = Math.min(1, Math.max(0.05, number / 100));
+    else if (pdf && field === "color") pdf.color = value;
+    else if (pdf && field === "width" && Number.isFinite(number)) pdf.width = Math.max(2, number);
+    else if (field === "comment") {
+      const slide = sidecar.slides.slides.find((item) => item.id === id);
+      if (!slide) return;
+      slide.comment = value;
+    } else return;
+    touchPlan([id]);
+  };
+
+  const itemTime = (lineId?: string) => {
+    const dates = phaseWindow();
+    const line = lineId ? sitePlan.lines.find((item) => item.id === lineId) : undefined;
+    if (line) return fractionBetween(lastDate, parseIsoDate(line.start), parseIsoDate(line.end));
+    return fractionBetween(lastDate, dates.start, dates.end);
+  };
+
+  const upsertKey = (id: string, patch: { pathT?: number; hook?: number; mastHeight?: number; jibLength?: number; rx?: number; ry?: number; rz?: number }) => {
+    let track = sidecar.keyframes.tracks.find((item) => item.targetId === id);
+    if (!track) {
+      track = { id: newPlanId(), targetId: id, keys: [] };
+      sidecar.keyframes.tracks.push(track);
+    }
+    const crane = sitePlan.cranes.find((item) => item.id === id);
+    const truck = sitePlan.trucks.find((item) => item.id === id);
+    const t = itemTime(crane?.lineId ?? truck?.lineId);
+    const pose = poseOf(crane ?? truck ?? { yaw: 0 });
+    const existing = track.keys.find((key) => Math.abs(key.t - t) < 0.01);
+    const next = {
+      t,
+      rx: patch.rx ?? pose.rx,
+      ry: patch.ry ?? pose.ry,
+      rz: patch.rz ?? pose.rz,
+      mastHeight: patch.mastHeight ?? crane?.mastHeight,
+      jibLength: patch.jibLength ?? crane?.jibLength,
+      hook: patch.hook ?? crane?.hook,
+      pathT: patch.pathT ?? existing?.pathT,
+    };
+    if (existing) Object.assign(existing, next);
+    else track.keys.push(next);
+    track.keys.sort((a, b) => a.t - b.t);
+  };
+
+  const applyAction = (action: string, detail: { id: string; value?: string }) => {
+    const id = detail.id;
+    const crane = sitePlan.cranes.find((item) => item.id === id);
+    const terrain = sitePlan.terrains.find((item) => item.id === id);
+    const markup = markupOf(id);
+    const pdf = sidecar.markups.pdfs.find((item) => item.id === id);
     if (action === "remove") {
       removePlanItem(sitePlan, id);
+      sidecar.markups.items = sidecar.markups.items.filter((item) => item.id !== id);
+      sidecar.markups.pdfs = sidecar.markups.pdfs.filter((item) => item.id !== id);
+      sidecar.keyframes.tracks = sidecar.keyframes.tracks.filter((item) => item.targetId !== id);
+      sidecar.slides.slides = sidecar.slides.slides.filter((item) => item.id !== id);
+      sidecar.pours.items = sidecar.pours.items.filter((item) => item.id !== id);
       if (planDraft?.id === id) planDraft = null;
+      if (pdfAlign?.id === id) pdfAlign = null;
       siteLayer?.select("");
       sitePlanner?.setSelected("");
-    } else if (action === "rotate" && crane) crane.yaw += Math.PI / 4;
-    else if (action === "rotate" && truck) truck.yaw += Math.PI / 4;
-    else if (action === "mast-up" && crane) crane.mastHeight += 1;
+    } else if (action === "mast-up" && crane) crane.mastHeight += 1;
     else if (action === "mast-down" && crane) crane.mastHeight = Math.max(2, crane.mastHeight - 1);
     else if (action === "jib-up" && crane) crane.jibLength += 1;
     else if (action === "jib-down" && crane) crane.jibLength = Math.max(2, crane.jibLength - 1);
     else if (action === "cut" && terrain) terrain.operation = "cut";
     else if (action === "fill" && terrain) terrain.operation = "fill";
-    else return;
-    touchPlan([id]);
+    else if (action === "close" && terrain) {
+      terrain.closed = true;
+      planDraft = null;
+    } else if (action === "close" && markup) {
+      markup.closed = true;
+      planDraft = null;
+    } else if (action === "vertex-pop") {
+      const points = pointsOf(id);
+      if (points && points.length > 2) points.pop();
+    } else if (action === "pattern" && markup && detail.value) {
+      markup.pattern = detail.value as MarkupItem["pattern"];
+    } else if (action === "pose" && (crane || sitePlan.trucks.some((item) => item.id === id))) {
+      const truck = sitePlan.trucks.find((item) => item.id === id);
+      upsertKey(id, {
+        rx: poseOf(crane ?? truck!).rx,
+        ry: poseOf(crane ?? truck!).ry,
+        rz: poseOf(crane ?? truck!).rz,
+        mastHeight: crane?.mastHeight,
+        jibLength: crane?.jibLength,
+        hook: crane?.hook,
+      });
+    } else if (action === "key-del") {
+      const t = Number(detail.value);
+      const track = sidecar.keyframes.tracks.find((item) => item.targetId === id);
+      if (track) track.keys = track.keys.filter((key) => Math.abs(key.t - t) > 1e-4);
+    } else if (action === "grow") {
+      const mass = sitePlan.masses.find((item) => item.id === id);
+      if (mass) mass.grow = !mass.grow;
+    } else if (action === "pdf-white" && pdf) pdf.removeWhite = !pdf.removeWhite;
+    else if (action === "pdf-align" && pdf) {
+      pdfAlign = { id, pair: 0, phase: "sheet" };
+      sitePlanner?.setPdfStep("sheet");
+      return;
+    } else if (action === "camera-save") {
+      saveCamera();
+    } else return;
+    touchPlan(id ? [id] : []);
+  };
+
+  const saveCamera = () => {
+    const controls = viewerControls();
+    if (!controls) return;
+    const eye = new THREE.Vector3();
+    const target = new THREE.Vector3();
+    controls.getPosition(eye);
+    controls.getTarget(target);
+    sidecar.cameras.cameras.push({
+      id: newPlanId(),
+      name: `Vista ${sidecar.cameras.cameras.length + 1}`,
+      x: eye.x,
+      y: eye.y,
+      z: eye.z,
+      tx: target.x,
+      ty: target.y,
+      tz: target.z,
+    });
+    touchPlan();
+  };
+
+  const openCamera = (id: string) => {
+    const camera = sidecar.cameras.cameras.find((item) => item.id === id);
+    const controls = viewerControls();
+    if (!camera || !controls) return;
+    void controls.setLookAt(camera.x, camera.y, camera.z, camera.tx, camera.ty, camera.tz, true);
   };
 
   const siteRoot = document.getElementById("site-planner");
@@ -1082,6 +1507,7 @@ async function main() {
       getWorkspace: () => nav.getWorkspace(),
       hasModel: () => models.size > 0,
       getPlan: () => sitePlan,
+      getSidecar: () => sidecar,
       getSchedule: () => nativeScheduleRef,
       onMode: (placing) => {
         viewportEl.classList.toggle("is-site-place", placing);
@@ -1089,11 +1515,44 @@ async function main() {
         if (planDraft && tool !== planDraft.kind) planDraft = null;
       },
       onSelect: (id) => siteLayer?.select(id),
-      onAssetAction: (action) => applyPlanAction(action),
+      onField: (event) => applyField(event),
+      onAction: (action, detail) => {
+        if (action === "camera-open") {
+          openCamera(detail.id);
+          return;
+        }
+        if (action === "slide-open") {
+          openSlide(detail.id);
+          return;
+        }
+        if (action === "slide-save") {
+          captureSlide();
+          return;
+        }
+        if (action === "slides-pdf" || action === "slides-zip") {
+          exportSlides(action === "slides-pdf" ? "pdf" : "zip");
+          return;
+        }
+        applyAction(action, detail);
+      },
+      onPdfFile: (file) => {
+        if (file.size > 20_000_000) {
+          window.alert("O PDF passa de 20 MB.");
+          return;
+        }
+        void file.arrayBuffer().then((buffer) => {
+          pendingPdf = { name: file.name.replace(/\.pdf$/i, ""), pdf: bytesToBase64(new Uint8Array(buffer)) };
+        });
+      },
     });
     refreshSitePlanner = () => {
       sitePlanner?.refresh();
-      siteLayer?.sync(sitePlan);
+      siteLayer?.sync(sitePlan, {
+        markups: sidecar.markups,
+        motions: motionsAt(sitePlan, sidecar.keyframes, lastDate, playbackRange(), playbackClock()),
+        pours: sidecar.pours.items,
+        pourTimes: pourTimes(),
+      });
     };
     refreshSitePlanner();
   }
@@ -1107,6 +1566,47 @@ async function main() {
     );
     highlighter = new ScheduleHighlighter(viewer.fragments);
     siteLayer = new SitePlanLayer();
+    siteLayer.bindGround(viewer.world.scene.three);
+    viewerControls = () => viewer.world.camera.controls as unknown as OrbitRig;
+    captureSlide = () => {
+      const controls = viewerControls();
+      const renderer = viewer.world.renderer?.three;
+      if (!controls || !renderer) return;
+      const eye = new THREE.Vector3();
+      const target = new THREE.Vector3();
+      controls.getPosition(eye);
+      controls.getTarget(target);
+      renderer.render(viewer.world.scene.three, viewer.world.camera.three);
+      const url = renderer.domElement.toDataURL("image/jpeg", 0.72);
+      const image = url.includes(",") ? url.slice(url.indexOf(",") + 1) : "";
+      const comment = sitePlanner?.noteText() || "";
+      sidecar.slides.slides.push({
+        id: newPlanId(),
+        name: `Slide ${sidecar.slides.slides.length + 1}`,
+        comment,
+        x: eye.x,
+        y: eye.y,
+        z: eye.z,
+        tx: target.x,
+        ty: target.y,
+        tz: target.z,
+        image,
+      });
+      touchPlan();
+    };
+    exportSlides = (kind) => {
+      const pages = sidecar.slides.slides.map((slide) => ({ name: slide.name, comment: slide.comment, image: slide.image }));
+      if (!pages.length) return;
+      if (kind === "pdf") downloadBytes(slidesToPdf(pages), "slides.pdf");
+      else downloadBytes(slidesToZip(pages), "slides.zip");
+    };
+    openSlide = (id) => {
+      const slide = sidecar.slides.slides.find((item) => item.id === id);
+      const controls = viewerControls();
+      if (!slide || !controls) return;
+      void controls.setLookAt(slide.x, slide.y, slide.z, slide.tx, slide.ty, slide.tz, true);
+    };
+    refreshSitePlanner();
     refitVisibleModels = () => {
       void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
     };
@@ -1208,21 +1708,22 @@ async function main() {
     const placeOnModel = async (e: PointerEvent, canvas: HTMLElement) => {
       if (!siteLayer || !sitePlanner || !highlighter) return;
       const tool = sitePlanner.tool();
-      if (!tool || sitePlanner.phaseTaskId() <= 0) return;
+      if (!tool || (models.size > 0 && sitePlanner.phaseTaskId() <= 0)) return;
       try {
         const surface = await highlighter.pickSurface(viewer.world.camera.three, e, canvas);
         const host =
           (surface && models.disciplines.find((entry) => entry.id === surface.modelId)) ||
           models.disciplines.find((entry) => entry.visible) ||
           models.disciplines[0];
-        if (!host) return;
         const world = surface?.point.clone() ?? null;
         if (world && surface) world.y = surface.groundY;
-        const point = world
-          ? threeWorldToIfc(world, host.session.getExtraTransform())
-          : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform());
+        const point = host
+          ? world
+            ? threeWorldToIfc(world, host.session.getExtraTransform())
+            : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform())
+          : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, "ground", emptyExtraTransform());
         if (!point) return;
-        const id = commitPlanItem(tool, point, host.id);
+        const id = commitPlanItem(tool, point, host?.id ?? "ground");
         siteLayer.select(id);
         sitePlanner.setSelected(id);
         touchPlan([id]);
@@ -1232,22 +1733,155 @@ async function main() {
     };
 
     let pickDown: { x: number; y: number } | null = null;
-    viewportEl.addEventListener("pointerdown", (e) => {
-      if (e.button !== 0) return;
-      pickDown = { x: e.clientX, y: e.clientY };
+    const siteCanvas = () => viewer.world.renderer?.three.domElement ?? viewportEl;
+    const orbit = () => viewer.world.camera.controls as { enabled: boolean } | null;
+    const dragAngle = (id: string, x: number, y: number) => {
+      const center = siteLayer?.screenPoint(id, viewer.world.camera.three, siteCanvas());
+      if (!center) return 0;
+      return Math.atan2(y - center.y, x - center.x);
+    };
+    const wrapAngle = (delta: number) => {
+      let value = delta;
+      while (value > Math.PI) value -= Math.PI * 2;
+      while (value < -Math.PI) value += Math.PI * 2;
+      return value;
+    };
+    const syncDrag = () => {
+      siteLayer?.sync(sitePlan, {
+        markups: sidecar.markups,
+        motions: motionsAt(sitePlan, sidecar.keyframes, lastDate, playbackRange(), playbackClock()),
+        pours: sidecar.pours.items,
+        pourTimes: pourTimes(),
+      });
+    };
+    const beginDrag = (hit: SiteHit, event: PointerEvent) => {
+      if (hit.part === "edge") {
+        const points = pointsOf(hit.id);
+        const index = hit.index ?? -1;
+        const a = points?.[index];
+        const b = points?.[(index + 1) % (points?.length || 1)];
+        if (!points || !a || !b) return;
+        points.splice(index + 1, 0, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
+        hit = { ...hit, part: "vertex", index: index + 1 };
+      }
+      siteDrag = { hit, last: dragAngle(hit.id, event.clientX, event.clientY), x: event.clientX, y: event.clientY };
+      const controls = orbit();
+      if (controls) controls.enabled = false;
+      viewportEl.setPointerCapture(event.pointerId);
+      event.preventDefault();
+      event.stopPropagation();
+    };
+    viewportEl.addEventListener(
+      "pointerdown",
+      (e) => {
+        if (e.button !== 0) return;
+        pickDown = { x: e.clientX, y: e.clientY };
+        if (nav.getWorkspace() !== "site-plan" || !siteLayer || walk?.enabled) return;
+        const canvas = siteCanvas();
+        const hit = siteLayer.hit(viewer.world.camera.three, e, canvas);
+        if (!hit) return;
+        if (hit.part === "x" || hit.part === "y" || hit.part === "z" || hit.part === "vertex" || hit.part === "edge" || hit.part === "resize" || hit.part === "scale") {
+          beginDrag(hit, e);
+        }
+      },
+      true,
+    );
+    window.addEventListener("pointermove", (e) => {
+      if (!siteDrag || !siteLayer) return;
+      const hit = siteDrag.hit;
+      const item =
+        sitePlan.cranes.find((entry) => entry.id === hit.id) ||
+        sitePlan.trucks.find((entry) => entry.id === hit.id) ||
+        sitePlan.drills.find((entry) => entry.id === hit.id) ||
+        sitePlan.masses.find((entry) => entry.id === hit.id);
+      if ((hit.part === "x" || hit.part === "y" || hit.part === "z") && (item || sitePlan.terrains.some((entry) => entry.id === hit.id) || sitePlan.fences.some((entry) => entry.id === hit.id))) {
+        const angle = dragAngle(hit.id, e.clientX, e.clientY);
+        const delta = wrapAngle(angle - siteDrag.last);
+        siteDrag.last = angle;
+        const terrain = sitePlan.terrains.find((entry) => entry.id === hit.id);
+        const fence = sitePlan.fences.find((entry) => entry.id === hit.id);
+        if (item && (hit.part === "x" || hit.part === "y" || hit.part === "z")) setAxis(item, hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz", poseOf(item)[hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz"] + delta);
+        if (terrain && hit.part === "z") terrain.rz = (terrain.rz ?? 0) + delta;
+        if (fence && hit.part === "z") {
+          fence.rz = (fence.rz ?? fence.yaw) + delta;
+          fence.yaw = fence.rz;
+        }
+      } else if (hit.part === "vertex" && hit.index != null) {
+        const host = models.disciplines.find((entry) => entry.visible) ?? models.disciplines[0];
+        const point = host
+          ? siteLayer.groundIfc(viewer.world.camera.three, e, siteCanvas(), host.id, host.session.getExtraTransform())
+          : siteLayer.groundIfc(viewer.world.camera.three, e, siteCanvas(), "ground", emptyExtraTransform());
+        const points = pointsOf(hit.id);
+        if (point && points && points[hit.index]) points[hit.index] = point;
+      } else if (hit.part === "resize" || hit.part === "scale") {
+        const markup = markupOf(hit.id);
+        const dx = e.clientX - siteDrag.x;
+        const dy = e.clientY - siteDrag.y;
+        siteDrag.x = e.clientX;
+        siteDrag.y = e.clientY;
+        if (markup && hit.part === "resize") {
+          markup.width = Math.max(0.6, (markup.width ?? 6) + dx * 0.02);
+          markup.height = Math.max(0.4, (markup.height ?? 2.4) - dy * 0.02);
+        }
+        if (markup && hit.part === "scale") markup.scale = Math.max(0.2, (markup.scale ?? 1) * (1 + dx * 0.005));
+      }
+      syncDrag();
+    });
+    window.addEventListener("pointerup", (e) => {
+      if (!siteDrag) return;
+      const controls = orbit();
+      if (controls) controls.enabled = true;
+      const id = siteDrag.hit.id;
+      siteDrag = null;
+      touchPlan([id]);
+      if (e.button === 0) pickDown = null;
     });
     viewportEl.addEventListener("pointerup", (e) => {
-      if (e.button !== 0 || !pickDown) return;
+      if (e.button !== 0 || !pickDown || siteDrag) return;
       const moved = Math.hypot(e.clientX - pickDown.x, e.clientY - pickDown.y);
       pickDown = null;
       if (moved > 6) return;
       if (boxSelect?.isDragging()) return;
       if (nav.getWorkspace() === "site-plan" && siteLayer && sitePlanner && highlighter) {
-        const canvas = viewer.world.renderer?.three.domElement ?? viewportEl;
-        const picked = siteLayer.pickItem(viewer.world.camera.three, e, canvas);
-        if (picked && sitePlanner.tool() !== "path" && sitePlanner.tool() !== "terrain") {
-          siteLayer.select(picked);
-          sitePlanner.setSelected(picked);
+        const canvas = siteCanvas();
+        const picked = siteLayer.hit(viewer.world.camera.three, e, canvas);
+        const tool = sitePlanner.tool();
+        const drawing = tool === "path" || tool === "terrain" || tool === "hatch" || tool === "polygon";
+        if (pdfAlign && picked?.part === "sheet" && picked.uv && pdfAlign.phase === "sheet") {
+          sheetPick = picked.uv;
+          pdfAlign = { ...pdfAlign, phase: "ground" };
+          sitePlanner.setPdfStep("ground");
+          return;
+        }
+        if (pdfAlign?.phase === "ground") {
+          void (async () => {
+            const host = models.disciplines.find((entry) => entry.visible) ?? models.disciplines[0];
+            const point = host
+              ? siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform())
+              : siteLayer!.groundIfc(viewer.world.camera.three, e, canvas, "ground", emptyExtraTransform());
+            const pdf = sidecar.markups.pdfs.find((item) => item.id === pdfAlign?.id);
+            if (!point || !pdf || !sheetPick || !pdfAlign) return;
+            pdf.pairs.push({ drawing: sheetPick, model: point });
+            sheetPick = null;
+            if (pdf.pairs.length >= 2) {
+              const frame = frameFromPairs(pdf.pairs[0]!, pdf.pairs[1]!, pdf.aspect ?? 1.4);
+              if (frame) {
+                pdf.origin = frame.origin;
+                pdf.width = frame.width;
+              }
+              pdfAlign = null;
+              sitePlanner?.setPdfStep("");
+            } else {
+              pdfAlign = { id: pdf.id, pair: 1, phase: "sheet" };
+              sitePlanner?.setPdfStep("sheet");
+            }
+            touchPlan([pdf.id]);
+          })();
+          return;
+        }
+        if (picked && picked.part === "body" && !drawing) {
+          siteLayer.select(picked.id);
+          sitePlanner.setSelected(picked.id);
           return;
         }
         if (sitePlanner.placing()) {
@@ -1412,6 +2046,17 @@ async function main() {
       ifcTree?.revealGuids(guids);
       setsList?.markHits(guids, scheduleRef?.groups ?? []);
       syncLinkedActivities(guids);
+      const colorSection = document.getElementById("element-color");
+      const colorInput = document.getElementById("prop-element-color") as HTMLInputElement | null;
+      const sectionsInput = document.getElementById("prop-element-sections") as HTMLInputElement | null;
+      colorSection?.classList.toggle("is-hidden", guids.length === 0);
+      if (guids[0] && colorInput) {
+        const owner = models.all.find((entry) => entry.session.stepIndex.guidToId.has(guids[0]!));
+        const rgb = owner?.session.surfaceColor(guids[0]);
+        if (rgb) colorInput.value = formatHexColor(rgb);
+        const pour = sidecar.pours.items.find((item) => item.guid === guids[0]);
+        if (sectionsInput && pour) sectionsInput.value = String(pour.sections);
+      }
       const revealed = ifcTreeEl?.querySelector(".ms-row.is-active, .ms-row.is-hit");
       if (guids.length && !revealed && setsList?.hasHits()) activateModelSetsTab("sets");
     };
@@ -1965,7 +2610,71 @@ async function main() {
           void requestFragmentsUpdate(viewer.fragments);
         },
       });
+      walk?.allowSiteFloor(true);
+      walk?.collider.setSiteGround(siteLayer?.walkObject() ?? null);
     }
+
+    const paintIfcColors = async () => {
+      if (!highlighter) return;
+      const paints: Array<{ modelId: string; localId: number; color: THREE.Color }> = [];
+      for (const entry of models.all) {
+        for (const [guid, rgb] of entry.session.surfaceColorEntries()) {
+          const localId = highlighter.localIdOf(guid, entry.id);
+          if (localId == null) continue;
+          paints.push({ modelId: entry.id, localId, color: new THREE.Color(rgb.r, rgb.g, rgb.b) });
+        }
+      }
+      if (paints.length) await highlighter.paintColors(paints);
+    };
+
+    const rememberPours = async () => {
+      const guids = highlighter?.getWorkingGuids() ?? [];
+      const sections = Math.max(
+        1,
+        Math.round(Number((document.getElementById("prop-element-sections") as HTMLInputElement | null)?.value) || 1),
+      );
+      for (const guid of guids) {
+        const owner = models.all.find((entry) => entry.session.stepIndex.guidToId.has(guid));
+        const model = owner ? viewportModels.get(owner.id) : null;
+        const localId = owner && highlighter ? highlighter.localIdOf(guid, owner.id) : undefined;
+        if (!owner || !model || localId == null) continue;
+        const boxes = await model.getBoxes([localId]);
+        const box = boxes[0];
+        if (!box || box.isEmpty()) continue;
+        sidecar.pours.items = sidecar.pours.items.filter((item) => item.guid !== guid);
+        sidecar.pours.items.push({
+          id: newPlanId(),
+          guid,
+          modelId: owner.id,
+          sections,
+          minX: box.min.x,
+          minY: box.min.y,
+          minZ: box.min.z,
+          maxX: box.max.x,
+          maxY: box.max.y,
+          maxZ: box.max.z,
+        });
+      }
+      if (guids.length) touchPlan(guids);
+    };
+
+    document.getElementById("prop-element-color")?.addEventListener("change", (event) => {
+      const value = (event.target as HTMLInputElement).value;
+      const guids = highlighter?.getWorkingGuids() ?? [];
+      const paints: Array<{ modelId: string; localId: number; color: THREE.Color }> = [];
+      for (const guid of guids) {
+        const owner = models.all.find((entry) => entry.session.stepIndex.guidToId.has(guid));
+        if (!owner) continue;
+        owner.session.setSurfaceColor(guid, value);
+        const localId = highlighter?.localIdOf(guid, owner.id);
+        if (localId != null) paints.push({ modelId: owner.id, localId, color: new THREE.Color(value) });
+      }
+      if (guids.length) markIfcDirty();
+      void highlighter?.paintColors(paints);
+    });
+    document.getElementById("prop-element-pour")?.addEventListener("click", () => {
+      void rememberPours();
+    });
 
     const siteOverlay = new SiteOverlay(viewer.world.scene.three);
     const drawHint = document.getElementById("link-mode-hint");
@@ -2303,9 +3012,7 @@ async function main() {
         ifcTree?.clear();
         setImportVisible(true);
         projectName = null;
-        sitePlan = emptySitePlan();
-        planDirty = false;
-        planDraft = null;
+        resetSitePackage();
       } else {
         attachGizmoToActive(false);
         syncWalkModels();
@@ -2565,8 +3272,11 @@ async function main() {
       }
       projectName = unpacked.manifest.name || fileName.replace(/\.vtwin$/i, "");
       sitePlan = unpacked.sitePlan;
+      sidecar = unpacked.sidecar;
       planDirty = false;
       planDraft = null;
+      pdfAlign = null;
+      pendingPdf = null;
       const members = [...unpacked.models].sort(
         (a, b) =>
           Number(isCoordinationEntry(b.entry, unpacked.manifest.rootId)) -
@@ -2651,9 +3361,16 @@ async function main() {
         index += 1;
       }
       if (!models.size) {
-        projectName = null;
-        setImportVisible(true);
-        throw new Error("O projeto não carregou nenhum modelo.");
+        if (planIsEmpty(sitePlan) && !sidecarHasContent(sidecar)) {
+          projectName = null;
+          setImportVisible(true);
+          throw new Error("O projeto não carregou nenhum modelo.");
+        }
+        setImportVisible(false);
+        refreshSitePlanner();
+        syncFileChrome();
+        setLoading(false);
+        return;
       }
       refreshFederatedView({ structure: true });
       bumpSimulation(collectAllGuids(models.mergedSchedule()));
@@ -2734,10 +3451,8 @@ async function main() {
       refreshCost5d();
       setImportVisible(true);
       projectName = null;
-      sitePlan = emptySitePlan();
-      planDirty = false;
-      planDraft = null;
-      siteLayer?.sync(sitePlan);
+      resetSitePackage();
+      siteLayer?.sync(sitePlan, { markups: sidecar.markups, pours: sidecar.pours.items });
     };
 
     const importFiles = async (files: File[]) => {
@@ -2754,11 +3469,7 @@ async function main() {
           const buffer = new Uint8Array(await vtwin.arrayBuffer());
           await loadFromVtwin(buffer, vtwin.name);
         } else {
-          if (!models.size) {
-            sitePlan = emptySitePlan();
-            planDirty = false;
-            planDraft = null;
-          }
+          if (!models.size) resetSitePackage();
           for (const file of ifcs) {
             const buffer = new Uint8Array(await file.arrayBuffer());
             await loadFromBuffer(buffer, file.name);
@@ -3027,9 +3738,20 @@ async function main() {
       }
     });
 
+    let tripStamp = performance.now();
     const tick = async () => {
       walk?.update();
+      const now = performance.now();
+      const dt = Math.min(0.05, (now - tripStamp) / 1000 || 0.016);
+      tripStamp = now;
+      timelineAtStart = timeline.atStart;
+      if (timeline.playing) tripSeconds += dt;
+      else tripSeconds = 0;
       const shellKind = workspaceShell(nav.getWorkspace());
+      if (siteLayer && (shellKind === "site" || shellKind === "schedule" || shellKind === "dashboard")) {
+        pushMotion();
+        siteLayer.spin(now / 1000);
+      }
       if (shellKind !== "placeholder" && dirty && !applying && highlighter && scheduleRef && models.visible.length) {
         dirty = false;
         applying = true;
@@ -3044,11 +3766,13 @@ async function main() {
           ) {
             await highlighter.revealAll();
             siteLayer?.apply(null, true);
+            await paintIfcColors();
           } else if (shellKind === "schedule" || shellKind === "dashboard" || shellKind === "site") {
             const buckets = computeStateBuckets(scheduleRef, lastDate);
             const previewAll = !timeline.playing && timeline.atStart;
             await highlighter.apply(buckets, { previewAll });
             siteLayer?.apply(buckets, previewAll);
+            await paintIfcColors();
           }
         } catch (err) {
           console.error("Erro ao aplicar estado 4D:", err);

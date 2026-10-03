@@ -1,5 +1,6 @@
 import { strFromU8, strToU8, unzip, zip } from "fflate";
 import { parseSitePlan, sitePlanToJson, SITE_PLAN_PATH, emptySitePlan, type SitePlan } from "../planning/sitePlan";
+import { emptySidecar, readSidecar, sidecarFiles, type ViewerSidecar } from "./viewerPack";
 import type { ScheduleData } from "../schedule/types";
 import { scheduleFromJson, scheduleToJson } from "../schedule/serialize";
 import {
@@ -44,6 +45,7 @@ export interface UnpackedVtwin {
   manifest: VtwinManifest;
   models: UnpackedVtwinModel[];
   sitePlan: SitePlan;
+  sidecar: ViewerSidecar;
 }
 
 export interface VtwinPackOptions {
@@ -51,6 +53,8 @@ export interface VtwinPackOptions {
   meshOnly?: boolean;
   /** Planejamento de obra. Não entra no STEP. */
   sitePlan?: SitePlan;
+  /** Câmara, markup, keyframes e BCF. Não entram no STEP. */
+  sidecar?: ViewerSidecar;
 }
 
 const ZIP_OPTS = { level: 6 as const };
@@ -64,7 +68,6 @@ export async function packVtwin(
   models: VtwinPackModel[],
   opts?: VtwinPackOptions,
 ): Promise<Uint8Array> {
-  if (!models.length) throw new Error("Não há modelos para guardar no projeto.");
   const meshOnly = opts?.meshOnly === true;
   if (meshOnly) {
     for (const model of models) {
@@ -95,6 +98,7 @@ export async function packVtwin(
   const files: Record<string, Uint8Array> = {
     "manifest.json": strToU8(JSON.stringify(manifest, null, 2)),
     [SITE_PLAN_PATH]: strToU8(JSON.stringify(sitePlanToJson(opts?.sitePlan ?? emptySitePlan()), null, 2)),
+    ...sidecarFiles(opts?.sidecar ?? emptySidecar()),
   };
   for (const m of models) {
     const dir = `models/${modelZipDir(m.id)}`;
@@ -146,7 +150,7 @@ export async function unpackVtwin(bytes: Uint8Array): Promise<UnpackedVtwin> {
   }
   const planFile = files[SITE_PLAN_PATH];
   const sitePlan = planFile ? parseSitePlan(JSON.parse(strFromU8(planFile))) : emptySitePlan();
-  return { manifest, models, sitePlan };
+  return { manifest, models, sitePlan, sidecar: readSidecar(files) };
 }
 
 function normalizeZipKeys(files: Record<string, Uint8Array>): Record<string, Uint8Array> {

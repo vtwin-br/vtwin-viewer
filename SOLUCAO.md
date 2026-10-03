@@ -41,8 +41,11 @@ terreno de corte e aterro, anotação de site e linha extra de cronograma que n�
 o JSON e não escreve essas entidades no STEP.
 
 O 3D do planejamento é gerado na vista a partir dos parâmetros. Não se grava
-malha, fotograma, cor de simulação, hover nem câmara. BCF, câmara, markup e a
-percentagem da barra do Gantt continuam fora do mestre.
+malha gerada, cor de simulação, hover nem o fotograma derivado da câmara.
+A cor de apresentação de um elemento do modelo (`IfcSurfaceStyle`) grava no
+IFC. Cor e parâmetros de canteiro, notas, PDF, keyframes, vistas gravadas pelo
+utilizador, slides e o zip BCF (sem editor de tópicos) gravam no `.vtwin`,
+fora do STEP. A percentagem da barra do Gantt continua fora do mestre.
 
 Nem todo elemento IFC tem tarefa. Itens de planejamento podem aparecer no
 cronograma como linhas extras, somadas ao 4D/5D nativo, marcadas como
@@ -60,14 +63,22 @@ entram em `planning/site.json`?** Não se inventa um proxy IFC para os substitui
 | O quê | Onde fica |
 |---|---|
 | Hierarquia, psets, `IfcTask`, custo, documentos, classificação | IFC exportado |
-| Guindaste (posição, rotação, altura do mastro, comprimento da lança, `catalogId: tower-crane`) | `planning/site.json` |
-| Camião basculante (posição, rotação, `catalogId: dump-truck`) | `planning/site.json` |
+| Cor de apresentação do elemento IFC | IFC (`IfcSurfaceStyle` / `IfcColourRgb`), sobrescrita no export |
+| Guindaste (posição, rotação, mastro, lança, contra-lança, zona de giro, cabo, `catalogId: tower-crane`) | `planning/site.json` |
+| Camião (posição, rotação, caminho, duração, `catalogId: dump-truck`) | `planning/site.json` |
+| Cerca (comprimento, painéis) e perfuratriz (rotação, profundidade) | `planning/site.json` |
+| Volume de massing (medidas, cor, crescer, trechos) | `planning/site.json` |
 | Visual do catálogo | `public/models/tower-crane.glb` e `public/models/dump-truck.glb`. Substituir o GLB no mesmo ficheiro troca o modelo sem mexer no IFC |
-| Caminho (polilinha) | `planning/site.json` |
-| Terreno (contorno, corte ou aterro, profundidade, inclinação) | `planning/site.json` |
-| Anotação (ponto e texto) | `planning/site.json` |
+| Caminho (polilinha e cor) | `planning/site.json` |
+| Terreno (polígono, corte ou aterro, talude, cores, volume calculado) | `planning/site.json` |
+| Anotação legada (ponto e texto) | `planning/site.json` |
+| Notas (pin, caixa, balão, hachura, polígono), PDF alinhado e cor | `view/markups.json` |
+| Keyframes da grua e do camião | `animation/keyframes.json` |
+| Concretagem de elementos IFC (caixa e trechos, vista) | `animation/pours.json` |
+| Vistas gravadas e slides com comentário | `view/cameras.json` e `view/slides.json` |
+| Zip BCF vazio ou reaberto, sem editor de tópicos | `bcf/topics.bcfzip` |
 | Linha extra de cronograma, com datas, `origin: "planning"` | `planning/site.json` |
-| Malha da vista, cor de simulação, hover, câmara, BCF, % do Gantt | Não se grava |
+| Malha gerada, cabo, zona de giro, cor de simulação, hover, fotograma derivado, % do Gantt | Não se grava |
 
 O catálogo visual começa nestes dois GLB. Peças e projetos em base de dados
 ficam para mais tarde. Nesta versão a app é local-first: não há back-end.
@@ -189,7 +200,7 @@ A app cria a COORD na primeira edição de Gantt, 5D, logística ou ao guardar `
 | Mover na árvore espacial | produto → `IfcRelContainedInSpatialStructure`; elemento espacial → `IfcRelAggregates` | Sim |
 | Search set | `IfcGroup` (`ObjectType = VISTA4D_SEARCH`) + membros `IfcRelAssignsToGroup` + consulta em `Pset_Vista4dSearch` / `Query` (`Tipo=IfcWall` ou `Pset.Prop=valor`) | Sim |
 | Interferência | `IfcRelInterferesElements` (IFC4). Dois GlobalId; se estiverem em ficheiros diferentes, a relação fica na COORD com proxies | Sim |
-| Planejamento de obra | `planning/site.json` no `.vtwin`: guindaste, caminho, terreno, anotação, linha extra | Não. O export comenta proxies `VISTA4D_SITE_ASSET` que tenham ficado de uma versão anterior |
+| Planejamento de obra | `planning/site.json` e os JSON de vista/animação no `.vtwin` | Não. O export comenta proxies `VISTA4D_SITE_ASSET` que tenham ficado de uma versão anterior. A cor de apresentação do produto IFC sai no STEP |
 
 Código de escrita: `src/ifc/ifcSession.ts` (patches STEP; o resto do ficheiro
 fica intacto). Leitura do cronograma: `src/schedule/parseSchedule.ts`.
@@ -200,7 +211,8 @@ O Gantt (`src/ui/projectWorkspace.ts`) é uma **vista** desse grafo, não um seg
 | Capacidade | Onde vive hoje | O que falta no STEP |
 |---|---|---|
 | % de progresso na barra do Gantt | só visual | `IfcTaskTime` não tem %; não inventar propriedade |
-| Tópicos BCF, câmara, markup, vista do clash | — | Não há entidade IFC para o tópico BCF nem para a câmara. A câmara é vista calculada. O par de elementos, quando o utilizador o grava, é `IfcRelInterferesElements` — não um `.bcf` nosso |
+| Tópicos BCF | `bcf/topics.bcfzip` só faz a viagem de ida e volta dos bytes. Não há editor de tópicos | Não há entidade IFC para o tópico. O par de elementos, quando o utilizador o grava, é `IfcRelInterferesElements` |
+| Câmara gravada, notas, PDF, slides | `view/cameras.json`, `view/markups.json`, `view/slides.json` | Não são STEP. O fotograma derivado da órbita não se grava sozinho |
 | Varredura automática de clash | não está na UI | Não há ficheiro de clash. O par que o utilizador grava é `IfcRelInterferesElements` |
 
 Cada linha editável do Gantt é uma `IfcTask`. Uma linha com `origin: "planning"` aparece na árvore 4D e na linha do tempo, marcada como Plano, e não é escrita no STEP. Sem modelo IFC aberto não há cronograma nativo para editar. Nem todo elemento IFC tem tarefa.
@@ -317,9 +329,9 @@ inventado pela app): `IfcWorkPlan` «Engineering and Construction»,
 
 ## 10. Fora do STEP (de propósito)
 
-- **BCF** (tópico, comentário, câmara, markup) não é gravado. Não existe entidade IFC equivalente e um `.bcf` paralelo seria um segundo mestre. A interferência que o utilizador confirma grava-se como `IfcRelInterferesElements`.
+- **Editor de tópicos BCF** não existe. O zip em `bcf/topics.bcfzip` só viaja dentro do `.vtwin`. A interferência que o utilizador confirma grava-se como `IfcRelInterferesElements`. Comentários de slide ficam em `view/slides.json`, notas em `view/markups.json` e vistas pedidas pelo utilizador em `view/cameras.json`. Nada disto entra no STEP.
 - **% de progresso** continua só na barra do Gantt. `IfcTaskTime` não tem esse campo.
 - **Pacote só malha** não contém o STEP. Abrir esse `.vtwin` mostra a malha e o snapshot; Exportar IFC só funciona se o IFC canónico ainda estiver no armazenamento local.
 - **`.mpp` binário** não é interpretado. O que se grava é a referência (`IfcDocumentReference`), não as tarefas. Tarefas entram por XML ou CSV.
 - **Apresentação ao cliente** (esconder o menu e reproduzir as fases) é uma vista. A câmara não entra no STEP.
-- **Planejamento de obra** (guindaste, camião, caminho, corte/aterro, anotação, linha extra) não entra no STEP. Vive em `planning/site.json`. O GLB do catálogo é o visual e não se grava no pacote. Proxies `VISTA4D_SITE_ASSET` de uma versão anterior são comentados no export.
+- **Planejamento de obra** (guindaste, camião, cerca, perfuratriz, caminho, terreno, volume, notas, PDF, slides, linha extra) não entra no STEP. Vive no `.vtwin`. O GLB do catálogo é o visual e não se grava no pacote. Proxies `VISTA4D_SITE_ASSET` de uma versão anterior são comentados no export. A cor de apresentação de um produto IFC sai no STEP.

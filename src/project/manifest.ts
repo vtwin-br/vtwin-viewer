@@ -62,9 +62,7 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     throw new Error(`Versão de projeto não suportada (${String(j.version)}).`);
   }
   if (typeof j.name !== "string" || !j.name.trim()) throw new Error("O projeto não tem nome.");
-  if (!Array.isArray(j.models) || j.models.length === 0) {
-    throw new Error("O projeto não contém modelos.");
-  }
+  if (!Array.isArray(j.models)) throw new Error("O projeto não contém modelos.");
   const rootId = typeof j.rootId === "string" && j.rootId ? j.rootId : null;
   const meshOnly = j.meshOnly === true;
   const models: VtwinModelEntry[] = j.models.map((m, i) => {

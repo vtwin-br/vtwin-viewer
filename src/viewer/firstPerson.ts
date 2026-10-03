@@ -37,6 +37,7 @@ export class FirstPersonController {
   readonly collider = new WalkCollider();
   private opts: FirstPersonOptions;
   private pendingModels: FRAGS.FragmentsModel[] = [];
+  private floorOnly = false;
   private _enabled = false;
   private keys = new Set<string>();
   private yaw = 0;
@@ -85,13 +86,25 @@ export class FirstPersonController {
       this.collider.detach();
     }
     if (!this.pendingModels.length) {
-      if (this._enabled) this.disable();
-      this.opts.button.disabled = true;
+      if (this._enabled && !this.floorOnly) this.disable();
+      if (this.floorOnly) this.collider.ensureFloor();
+      this.opts.button.disabled = !this.floorOnly;
       this.syncButton();
       return;
     }
     this.opts.button.disabled = false;
     this.syncButton();
+  }
+
+  /** Caminhada ao nível do chão, mesmo sem malha IFC. */
+  allowSiteFloor(on: boolean): void {
+    this.floorOnly = on;
+    if (!on) return;
+    this.collider.ensureFloor();
+    if (!this.pendingModels.length) {
+      this.opts.button.disabled = false;
+      this.syncButton();
+    }
   }
 
   async toggle(): Promise<void> {
@@ -104,18 +117,22 @@ export class FirstPersonController {
     if (this.opts.canEnable && !this.opts.canEnable()) return;
     if (this.building) return;
     if (!this.collider.ready) {
-      if (!this.pendingModels.length) return;
-      this.building = true;
-      this.opts.button.disabled = true;
-      this.syncButton();
-      try {
-        await this.collider.attach(this.pendingModels);
-      } finally {
-        this.building = false;
-        this.opts.button.disabled = !this.pendingModels.length;
+      if (this.floorOnly) this.collider.ensureFloor();
+      if (!this.collider.ready && !this.pendingModels.length) return;
+      if (!this.collider.ready) {
+        this.building = true;
+        this.opts.button.disabled = true;
         this.syncButton();
+        try {
+          await this.collider.attach(this.pendingModels);
+        } finally {
+          this.building = false;
+          this.opts.button.disabled = !this.pendingModels.length && !this.floorOnly;
+          this.syncButton();
+        }
+        if (!this.collider.ready && this.floorOnly) this.collider.ensureFloor();
+        if (!this.collider.ready) return;
       }
-      if (!this.collider.ready) return;
     }
 
     const cam = this.opts.camera;

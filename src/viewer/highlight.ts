@@ -513,6 +513,29 @@ export class ScheduleHighlighter {
     if (stillSelected.length) await layer.model.highlight(stillSelected, selectionMaterial());
   }
 
+  async paintColors(paints: Array<{ modelId: string; localId: number; color: THREE.Color }>): Promise<void> {
+    const byModel = new Map<string, Map<string, { color: THREE.Color; ids: number[] }>>();
+    for (const paint of paints) {
+      const layer = this.layers.get(paint.modelId);
+      if (!layer) continue;
+      let groups = byModel.get(paint.modelId);
+      if (!groups) {
+        groups = new Map();
+        byModel.set(paint.modelId, groups);
+      }
+      const key = paint.color.getHexString();
+      const group = groups.get(key);
+      if (group) group.ids.push(paint.localId);
+      else groups.set(key, { color: paint.color, ids: [paint.localId] });
+    }
+    for (const [modelId, groups] of byModel) {
+      const layer = this.layers.get(modelId);
+      if (!layer) continue;
+      for (const group of groups.values()) await layer.model.setColor(group.ids, group.color);
+    }
+    if (byModel.size) await requestFragmentsUpdate(this.fragments);
+  }
+
   async pickGuid(
     camera: THREE.Camera,
     event: PointerEvent | MouseEvent,

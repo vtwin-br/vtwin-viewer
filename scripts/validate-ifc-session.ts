@@ -8,6 +8,7 @@ import { resolve } from "node:path";
 import { detectIfcSchema } from "../src/ifc/stepText";
 import {
   addPlanningLine,
+  cutVolume,
   DEFAULT_JIB_LENGTH,
   DEFAULT_MAST_HEIGHT,
   DEFAULT_TERRAIN_DEPTH,
@@ -17,6 +18,11 @@ import {
   pathLength,
   sitePlanToJson,
 } from "../src/planning/sitePlan";
+import { excavationVolume, offsetPolygon } from "../src/planning/polygon";
+import { frameFromPairs } from "../src/planning/pdfFrame";
+import { pointAlong, sampleKeys } from "../src/planning/playback";
+import { bcfHasVersion, emptySidecar } from "../src/project/viewerPack";
+import { slidesToPdf } from "../src/project/slidesPdf";
 
 function glbNodeNames(file: string): string[] {
   const buf = readFileSync(file);
@@ -39,13 +45,18 @@ ENDSEC;
 DATA;
 #1=IFCPROJECT('${projectGuid}',$,'Projeto',$,$,$,$,$,$);
 #2=IFCPROPERTYSINGLEVALUE('Codigo',$,IFCLABEL('A'),$);
-#10=IFCWALL('1111111111111111111111',$,'Parede',$,$,$,$,$,$);
+#10=IFCWALL('1111111111111111111111',$,'Parede',$,$,$,#34,$,$);
 #11=IFCBUILDINGSTOREY('2222222222222222222222',$,'Piso',$,$,$,$,$,$,$);
 #12=IFCRELCONTAINEDINSPATIALSTRUCTURE('3333333333333333333333',$,$,$,(#10),#11);
 #13=IFCWALL('4444444444444444444444',$,'Parede 2',$,$,$,$,$,$);
 #14=IFCBUILDING('5555555555555555555555',$,'Edificio',$,$,$,$,$,$,$,$);
 #90=IFCBUILDINGELEMENTPROXY('6666666666666666666666',$,'Grua','Guindaste','VISTA4D_SITE_ASSET',$,$,'grua',$);
 #91=IFCRELASSIGNSTOPRODUCT('7777777777777777777777',$,$,$,(#1),$,#90);
+#30=IFCCARTESIANPOINT((0.,0.,0.));
+#31=IFCCARTESIANPOINT((1.,0.,0.));
+#32=IFCPOLYLINE((#30,#31));
+#33=IFCSHAPEREPRESENTATION($,'Body','Curve',(#32));
+#34=IFCPRODUCTDEFINITIONSHAPE($,$,(#33));
 ENDSEC;
 END-ISO-10303-21;
 `;
@@ -94,6 +105,9 @@ session.setSiteLimit({
   clipBuffer: 4,
   showPlateau: true,
 });
+
+session.setSurfaceColor("1111111111111111111111", { r: 0.2, g: 0.4, b: 0.8 });
+session.setSurfaceColor("1111111111111111111111", { r: 0.1, g: 0.2, b: 0.3 });
 
 const sourceBytes = new Uint8Array(source.length);
 for (let index = 0; index < source.length; index++) sourceBytes[index] = source.charCodeAt(index);
@@ -164,6 +178,10 @@ if (!moved) throw new Error("A parede não passou a estar contida no IfcBuilding
 if (!output.endsWith("END-ISO-10303-21;\n")) {
   throw new Error("A estrutura STEP final ficou inválida.");
 }
+const colourCount = output.match(/IFCCOLOURRGB\(/g)?.length ?? 0;
+if (colourCount !== 1 || !output.includes("IFCCOLOURRGB($,0.1,0.2,0.3)") || !output.includes("IFCSURFACESTYLE") || !output.includes("IFCSTYLEDITEM")) {
+  throw new Error("A cor de apresentação do elemento não ficou única no IFC exportado.");
+}
 
 const plan = emptySitePlan();
 const line = addPlanningLine(plan, "Guindaste", new Date(2022, 11, 5), new Date(2023, 0, 20));
@@ -173,6 +191,7 @@ plan.cranes.push({
   y: 4,
   z: 1,
   yaw: 0.5,
+  rx: 0.25,
   mastHeight: DEFAULT_MAST_HEIGHT,
   jibLength: DEFAULT_JIB_LENGTH,
   lineId: line.id,
@@ -184,6 +203,8 @@ plan.trucks.push({
   y: 0,
   z: 3,
   yaw: 1.2,
+  pathId: "path-1",
+  duration: 12,
   lineId: line.id,
 });
 plan.paths.push({
@@ -206,13 +227,37 @@ plan.terrains.push({
   operation: "cut",
   depth: DEFAULT_TERRAIN_DEPTH,
   slope: DEFAULT_TERRAIN_SLOPE,
+  color: "#ab12cd",
+  slopeColor: "#c4a882",
+  lineId: line.id,
+});
+plan.fences.push({ id: "fence-1", x: 1, y: 2, z: 0, yaw: 0.3, length: 10, panels: 5, lineId: line.id });
+plan.drills.push({ id: "drill-1", x: 4, y: 1, z: 0, yaw: 0.2, depth: 7, lineId: line.id });
+plan.masses.push({
+  id: "mass-1",
+  x: 0,
+  y: 0,
+  z: 0,
+  yaw: 0,
+  width: 4,
+  depth: 3,
+  height: 2,
+  sections: 3,
+  grow: true,
   lineId: line.id,
 });
 plan.notes.push({ id: "note-1", x: 3, y: 2, z: 1, text: "Nota de obra", lineId: line.id });
 const planAgain = parseSitePlan(sitePlanToJson(plan));
-if (planAgain.cranes[0]?.yaw !== 0.5 || planAgain.cranes[0]?.catalogId !== "tower-crane" || planAgain.lines[0]?.origin !== "planning") {
+if (planAgain.cranes[0]?.yaw !== 0.5 || planAgain.cranes[0]?.rx !== 0.25 || planAgain.cranes[0]?.catalogId !== "tower-crane" || planAgain.lines[0]?.origin !== "planning") {
   throw new Error("O JSON de planejamento não preservou os parâmetros.");
 }
+if (planAgain.trucks[0]?.pathId !== "path-1" || planAgain.trucks[0]?.duration !== 12) {
+  throw new Error("O JSON de planejamento não preservou o caminho do camião.");
+}
+if (planAgain.terrains[0]?.color !== "#ab12cd" || planAgain.terrains[0]?.slopeColor !== "#c4a882" || planAgain.fences[0]?.panels !== 5 || planAgain.drills[0]?.depth !== 7 || planAgain.masses[0]?.sections !== 3) {
+  throw new Error("O JSON de planejamento não preservou cerca, perfuratriz, volume ou cores do terreno.");
+}
+if (!(cutVolume(planAgain.terrains[0]!) > 100)) throw new Error("O volume de corte não saiu do polígono.");
 if (planAgain.trucks[0]?.catalogId !== "dump-truck" || planAgain.trucks[0]?.yaw !== 1.2) {
   throw new Error("O JSON de planejamento não preservou o camião.");
 }
@@ -263,6 +308,57 @@ if (saved.lines[0]?.origin !== "planning" || saved.lines[0]?.start !== "2022-12-
   throw new Error("O .vtwin não restaurou a linha de planejamento.");
 }
 
+const sidecar = emptySidecar();
+sidecar.markups.items.push({
+  id: "hatch-1",
+  kind: "hatch",
+  text: "Hachura norte",
+  color: "#8aa4ad",
+  points: [
+    { x: 0, y: 0, z: 0 },
+    { x: 4, y: 0, z: 0 },
+    { x: 4, y: 3, z: 0 },
+  ],
+  pattern: "diagonal",
+  closed: true,
+});
+sidecar.markups.items.push({ id: "pin-1", kind: "pin", text: "Pin norte", color: "#163540", x: 1, y: 2, z: 0 });
+sidecar.markups.pdfs.push({
+  id: "pdf-1",
+  name: "Planta",
+  sheet: 0,
+  pageCount: 1,
+  opacity: 0.6,
+  removeWhite: true,
+  color: "#ffffff",
+  pdf: "JVBERi0xLjEK",
+  pairs: [
+    { drawing: { u: 0, v: 0 }, model: { x: 0, y: 0, z: 0 } },
+    { drawing: { u: 1, v: 0 }, model: { x: 10, y: 0, z: 0 } },
+  ],
+  origin: { x: 0, y: 0, z: 0 },
+  width: 10,
+  aspect: 1,
+});
+sidecar.keyframes.tracks.push({
+  id: "track-1",
+  targetId: "truck-1",
+  keys: [{ t: 0, pathT: 0 }, { t: 1, pathT: 1 }],
+});
+sidecar.cameras.cameras.push({ id: "cam-1", name: "Vista obra", x: 1, y: 8, z: 12, tx: 0, ty: 0, tz: 0 });
+sidecar.slides.slides.push({ id: "slide-1", name: "Slide 1", comment: "Comentario de obra", x: 1, y: 8, z: 12, tx: 0, ty: 0, tz: 0, image: "" });
+sidecar.pours.items.push({
+  id: "pour-1",
+  guid: "1111111111111111111111",
+  sections: 3,
+  minX: 0,
+  minY: 0,
+  minZ: 0,
+  maxX: 6,
+  maxY: 0.3,
+  maxZ: 4,
+});
+
 const full = await packVtwin(
   "Obra",
   [
@@ -280,7 +376,7 @@ const full = await packVtwin(
       role: "discipline",
     },
   ],
-  { sitePlan: plan },
+  { sitePlan: plan, sidecar },
 );
 const fullOpen = await unpackVtwin(full);
 let packedIfc = "";
@@ -291,10 +387,71 @@ if (
   packedIfc.includes("Nota de obra") ||
   packedIfc.includes("'Guindaste'") ||
   packedIfc.includes("dump-truck") ||
-  packedIfc.includes("tower-crane")
+  packedIfc.includes("tower-crane") ||
+  packedIfc.includes("Hachura norte") ||
+  packedIfc.includes("vtwin-keyframes") ||
+  packedIfc.includes("JVBERi0xLjEK") ||
+  packedIfc.includes("Comentario de obra")
 ) {
   throw new Error("O IFC dentro do .vtwin ainda contém planejamento de obra.");
 }
+if (fullOpen.sidecar.markups.items[0]?.text !== "Hachura norte" || fullOpen.sidecar.markups.items[1]?.kind !== "pin") {
+  throw new Error("O .vtwin não restaurou as notas.");
+}
+if (fullOpen.sidecar.markups.pdfs[0]?.opacity !== 0.6 || fullOpen.sidecar.keyframes.tracks[0]?.keys[1]?.pathT !== 1) {
+  throw new Error("O .vtwin não restaurou o PDF ou a animação.");
+}
+if (fullOpen.sidecar.slides.slides[0]?.comment !== "Comentario de obra" || fullOpen.sidecar.pours.items[0]?.sections !== 3) {
+  throw new Error("O .vtwin não restaurou o slide ou a concretagem.");
+}
+if (!bcfHasVersion(fullOpen.sidecar.bcf)) throw new Error("O zip BCF do pacote não tem versão.");
+const grown = offsetPolygon(
+  [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ],
+  1,
+);
+const xs = grown.map((point) => point.x);
+if (Math.min(...xs) >= 0 || Math.max(...xs) <= 10) throw new Error("O talude não afastou o polígono.");
+if (!(excavationVolume(
+  [
+    { x: 0, y: 0 },
+    { x: 10, y: 0 },
+    { x: 10, y: 10 },
+    { x: 0, y: 10 },
+  ],
+  2,
+  45,
+) > 200)) {
+  throw new Error("O volume de corte ficou curto.");
+}
+const frame = frameFromPairs(
+  { drawing: { u: 0, v: 0 }, model: { x: 0, y: 0, z: 0 } },
+  { drawing: { u: 1, v: 0 }, model: { x: 10, y: 0, z: 0 } },
+  1,
+);
+if (!frame || Math.abs(frame.width - 10) > 1e-6 || Math.abs(frame.yaw) > 1e-6) throw new Error("O alinhamento do PDF falhou.");
+const sampled = sampleKeys(
+  [
+    { t: 0, pathT: 0 },
+    { t: 1, pathT: 1 },
+  ],
+  0.5,
+);
+if (!sampled || Math.abs((sampled.pathT ?? 0) - 0.5) > 1e-6) throw new Error("O keyframe não interpolou.");
+const along = pointAlong(
+  [
+    { x: 0, y: 0, z: 0 },
+    { x: 10, y: 0, z: 0 },
+  ],
+  0.5,
+);
+if (Math.abs(along.point.x - 5) > 1e-6) throw new Error("O camião não caiu a meio do caminho.");
+const pdfBytes = slidesToPdf([{ name: "Slide", comment: "Nota", image: "" }]);
+if (pdfBytes[0] !== 0x25 || pdfBytes[1] !== 0x50) throw new Error("O PDF dos slides não abriu.");
 const craneNodes = glbNodeNames(resolve("public/models/tower-crane.glb"));
 for (const name of ["tower-crane", "mast", "crown", "jib", "trolley"]) {
   if (!craneNodes.includes(name)) throw new Error(`public/models/tower-crane.glb perdeu o nó ${name}.`);

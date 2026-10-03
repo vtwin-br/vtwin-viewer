@@ -38,6 +38,7 @@ export class WalkCollider {
   private worldNormal = new THREE.Vector3();
   private earth: GoogleEarthLayer | null = null;
   private siteGround: THREE.Object3D | null = null;
+  private floor: THREE.Mesh | null = null;
   private gen = 0;
   ready = false;
 
@@ -54,6 +55,21 @@ export class WalkCollider {
 
   setSiteGround(mesh: THREE.Object3D | null): void {
     this.siteGround = mesh;
+  }
+
+  /** Plano em y = 0 para caminhar no chão quando não há laje por baixo. */
+  ensureFloor(): void {
+    if (!this.floor) {
+      const geom = new THREE.PlaneGeometry(8000, 8000);
+      geom.rotateX(-Math.PI / 2);
+      geom.boundsTree = new MeshBVH(geom);
+      const mesh = new THREE.Mesh(geom);
+      mesh.name = "walk-floor";
+      mesh.layers.set(WALK_COLLIDER_LAYER);
+      this.floor = mesh;
+    }
+    if (!this.meshes.includes(this.floor)) this.meshes.push(this.floor);
+    this.ready = true;
   }
 
   async attach(model: FRAGS.FragmentsModel | FRAGS.FragmentsModel[]): Promise<void> {
@@ -258,13 +274,14 @@ export class WalkCollider {
   private disposeMeshes(): void {
     const mats = new Set<THREE.Material>();
     for (const mesh of this.meshes) {
+      if (mesh === this.floor) continue;
       const mat = mesh.material;
       if (mat && !Array.isArray(mat)) mats.add(mat);
       mesh.removeFromParent();
       mesh.geometry.dispose();
     }
     for (const mat of mats) mat.dispose();
-    this.meshes = [];
+    this.meshes = this.floor ? [this.floor] : [];
     while (this.group.children.length) this.group.remove(this.group.children[0]);
   }
 }

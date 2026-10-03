@@ -78,6 +78,7 @@ import { wouldCreateIfcCycle } from "../schedule/links";
 import { cloneSiteLimit, type SiteLimit } from "../logistics/types";
 import { parseSiteLimitFromStep } from "../logistics/parseSiteLimit";
 import { serializeSiteLimit } from "../logistics/serializeSiteLimit";
+import { emitSurfaceStyles, parseHexColor, readSurfaceColors, type Rgb } from "./surfaceStyle";
 import {
   cloneSemantic,
   emitSemantic,
@@ -151,6 +152,7 @@ export interface IfcSessionExportSnapshot {
   semantic?: SemanticState;
   siteAssets?: SiteAsset[];
   removedSiteAssetClusters?: number[];
+  surfaceColors?: Array<[string, Rgb]>;
 }
 
 interface ExportWorkerResult {
@@ -237,6 +239,7 @@ export class IfcSession {
   private removedSiteAssetClusters: number[] = [];
   private siteAssetsDirty = false;
   private semantic: SemanticState = emptySemanticState();
+  private readonly surfaceColors = new Map<string, Rgb>();
   dirty = false;
 
   constructor(source: Uint8Array | string | null, fileName: string, schedule: ScheduleData, opts?: IfcSessionOptions) {
@@ -258,6 +261,35 @@ export class IfcSession {
         : undefined);
     this.ownerHistoryRef = oh != null ? `#${oh}` : "$";
     this.nextExpressId = this.index.maxId > 0 ? this.index.maxId + 1 : undefined;
+    if (this.stepText) this.absorbSurfaceColors(this.stepText);
+  }
+
+  setSurfaceColor(globalId: string, color: Rgb | string): void {
+    const guid = globalId.trim();
+    if (!guid) return;
+    const rgb = typeof color === "string" ? parseHexColor(color) : color;
+    if (!rgb || ![rgb.r, rgb.g, rgb.b].every(Number.isFinite)) return;
+    this.surfaceColors.set(guid, {
+      r: Math.min(1, Math.max(0, rgb.r)),
+      g: Math.min(1, Math.max(0, rgb.g)),
+      b: Math.min(1, Math.max(0, rgb.b)),
+    });
+    this.dirty = true;
+  }
+
+  surfaceColorEntries(): Array<[string, Rgb]> {
+    return [...this.surfaceColors];
+  }
+
+  surfaceColor(globalId: string): Rgb | undefined {
+    const rgb = this.surfaceColors.get(globalId.trim());
+    return rgb ? { ...rgb } : undefined;
+  }
+
+  private absorbSurfaceColors(text: string): void {
+    for (const [guid, rgb] of readSurfaceColors(text, this.index)) {
+      if (!this.surfaceColors.has(guid)) this.surfaceColors.set(guid, rgb);
+    }
   }
 
   attachStore(hash: string): void {
@@ -2181,6 +2213,7 @@ export class IfcSession {
       semantic: cloneSemantic(this.semantic),
       siteAssets: this.siteAssets.map(cloneSiteAsset),
       removedSiteAssetClusters: [...this.removedSiteAssetClusters],
+      surfaceColors: [...this.surfaceColors],
     };
   }
 
@@ -2259,6 +2292,8 @@ export class IfcSession {
     this.extra = { ...snapshot.extra };
     this.geoWrite = snapshot.geoWrite ? { ...snapshot.geoWrite } : null;
     this.semantic = cloneSemantic(snapshot.semantic);
+    this.surfaceColors.clear();
+    for (const [guid, rgb] of snapshot.surfaceColors ?? []) this.surfaceColors.set(guid, { ...rgb });
     this.dirty = true;
   }
 
@@ -2710,6 +2745,18 @@ export class IfcSession {
       } else {
         this.schedule.siteLimit = undefined;
       }
+    }
+
+    if (this.surfaceColors.size) {
+      const styles = emitSurfaceStyles(
+        this.step(),
+        this.index,
+        [...this.surfaceColors],
+        this.schema,
+        () => this.allocId(),
+      );
+      newLines.push(...styles.lines);
+      replacements.push(...styles.replacements);
     }
 
     const originalText = this.step();
