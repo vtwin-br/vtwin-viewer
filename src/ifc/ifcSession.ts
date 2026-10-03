@@ -20,6 +20,10 @@ import {
   type StepIndexWire,
 } from "./stepIndex";
 import { loadIfcBytes, saveIfcBytes } from "./stepStore";
+import { libraryItem } from "../site/library";
+import { parseSiteAssets } from "../site/parseAssets";
+import { planSiteAssetIds, serializeSiteAsset, siteAssetHasContainer, siteAssetNeedsContext } from "../site/serializeAsset";
+import { cloneSiteAsset, type SiteAsset } from "../site/types";
 import { IfcChangeSet } from "./changeSet";
 import { hashIfcBytes } from "./fragCache";
 import {
@@ -144,6 +148,8 @@ export interface IfcSessionExportSnapshot {
   geoWrite: GeoAnchorWrite | null;
   wasmPath?: string;
   semantic?: SemanticState;
+  siteAssets?: SiteAsset[];
+  removedSiteAssetClusters?: number[];
 }
 
 interface ExportWorkerResult {
@@ -226,6 +232,9 @@ export class IfcSession {
   private geoChanged = false;
   private siteLimitDirty = false;
   private removedSiteLimitCluster: number[] = [];
+  private siteAssets: SiteAsset[] = [];
+  private removedSiteAssetClusters: number[] = [];
+  private siteAssetsDirty = false;
   private semantic: SemanticState = emptySemanticState();
   dirty = false;
 
@@ -372,6 +381,114 @@ export class IfcSession {
     if (cloned.siteLimit) this.siteLimitDirty = true;
     this.dirty = true;
     return report;
+  }
+
+  listSiteAssets(): SiteAsset[] {
+    return this.siteAssets.map(cloneSiteAsset);
+  }
+
+  async hydrateSiteAssets(): Promise<SiteAsset[]> {
+    if (this.siteAssetsDirty || this.siteAssets.length) return this.listSiteAssets();
+    if (!this.stepText && !this.storeHash) return [];
+    if (!this.index.typeIds.get("IFCBUILDINGELEMENTPROXY")?.length) return [];
+    const text = await this.ensureText();
+    this.siteAssets = parseSiteAssets(text, this.index);
+    return this.listSiteAssets();
+  }
+
+  placeSiteAsset(input: { libraryKey: string; x: number; y: number; z: number; yaw?: number; taskId?: number }): SiteAsset {
+    const item = libraryItem(input.libraryKey);
+    if (!item) throw new Error("Esse equipamento não está na biblioteca do canteiro.");
+    if (input.taskId != null && !this.schedule.byId.has(input.taskId)) {
+      throw new Error("A fase escolhida não está neste IFC.");
+    }
+    const quantities = [item.count, item.length, item.volume].filter((value) => value > 0).length;
+    const planned = planSiteAssetIds(() => this.allocId(), {
+      needsContext: siteAssetNeedsContext(this.index),
+      quantities,
+      hasContainer: siteAssetHasContainer(this.index),
+    });
+    const asset: SiteAsset = {
+      proxyId: planned.proxyId,
+      globalId: createIfcGuid(),
+      libraryKey: item.key,
+      name: item.name,
+      x: input.x,
+      y: input.y,
+      z: input.z,
+      yaw: input.yaw ?? 0,
+      count: item.count,
+      length: item.length,
+      volume: item.volume,
+      clusterIds: planned.clusterIds,
+      isNew: true,
+      dirty: true,
+    };
+    this.rememberSiteProxy(asset.proxyId, asset.globalId);
+    this.siteAssets.push(asset);
+    this.siteAssetsDirty = true;
+    if (input.taskId != null) this.addProductsToTask(input.taskId, [{ guid: asset.globalId, expressIdHint: asset.proxyId }]);
+    this.changeSet.append({ kind: "semantic:write", target: "site-asset" });
+    this.dirty = true;
+    return cloneSiteAsset(asset);
+  }
+
+  moveSiteAsset(globalId: string, patch: { x?: number; y?: number; z?: number; yaw?: number }): SiteAsset {
+    const asset = this.siteAssets.find((item) => item.globalId === globalId);
+    if (!asset) throw new Error("Esse elemento de canteiro não está na sessão.");
+    if (patch.x != null) asset.x = patch.x;
+    if (patch.y != null) asset.y = patch.y;
+    if (patch.z != null) asset.z = patch.z;
+    if (patch.yaw != null) asset.yaw = patch.yaw;
+    if (!asset.isNew) this.retargetSavedSiteAsset(asset);
+    asset.dirty = true;
+    this.siteAssetsDirty = true;
+    this.dirty = true;
+    return cloneSiteAsset(asset);
+  }
+
+  removeSiteAsset(globalId: string): void {
+    const asset = this.siteAssets.find((item) => item.globalId === globalId);
+    if (!asset) return;
+    if (!asset.isNew) this.removedSiteAssetClusters.push(...asset.clusterIds);
+    for (const task of this.schedule.byId.values()) {
+      if (task.productGuids.includes(asset.globalId)) this.removeProductLink(task, asset.globalId, asset.proxyId);
+    }
+    recomputeProductGuidsByTask(this.schedule);
+    this.siteAssets = this.siteAssets.filter((item) => item.globalId !== globalId);
+    this.siteAssetsDirty = true;
+    this.dirty = true;
+  }
+
+  private retargetSavedSiteAsset(asset: SiteAsset): void {
+    const oldId = asset.proxyId;
+    this.removedSiteAssetClusters.push(...asset.clusterIds);
+    const item = libraryItem(asset.libraryKey);
+    const quantities = item ? [item.count, item.length, item.volume].filter((value) => value > 0).length : 1;
+    const planned = planSiteAssetIds(() => this.allocId(), {
+      needsContext: siteAssetNeedsContext(this.index),
+      quantities,
+      hasContainer: siteAssetHasContainer(this.index),
+    });
+    asset.proxyId = planned.proxyId;
+    asset.clusterIds = planned.clusterIds;
+    asset.isNew = true;
+    this.rememberSiteProxy(asset.proxyId, asset.globalId);
+    for (const task of this.schedule.byId.values()) {
+      if (!task.productGuids.includes(asset.globalId)) continue;
+      this.removeProductLink(task, asset.globalId, oldId);
+      this.addProductLink(task, asset.globalId, asset.proxyId);
+    }
+  }
+
+  private rememberSiteProxy(id: number, guid: string): void {
+    this.index.guidToId.set(guid, id);
+    const list = this.index.typeIds.get("IFCBUILDINGELEMENTPROXY") ?? [];
+    if (!list.includes(id)) {
+      list.push(id);
+      this.index.typeIds.set("IFCBUILDINGELEMENTPROXY", list);
+    }
+    this.typeById = null;
   }
 
   getSiteLimit(): SiteLimit | null {
@@ -2086,6 +2203,7 @@ export class IfcSession {
         renamedSchedule: this.renamedSchedule,
         geoChanged: this.geoChanged,
         siteLimitDirty: this.siteLimitDirty,
+        siteAssetsDirty: this.siteAssetsDirty,
       },
       ids: {
         createdDeclaresRelId: this.createdDeclaresRelId,
@@ -2097,6 +2215,8 @@ export class IfcSession {
       geoWrite: this.geoWrite ? { ...this.geoWrite } : null,
       wasmPath: this.wasmPath,
       semantic: cloneSemantic(this.semantic),
+      siteAssets: this.siteAssets.map(cloneSiteAsset),
+      removedSiteAssetClusters: [...this.removedSiteAssetClusters],
     };
   }
 
@@ -2165,6 +2285,9 @@ export class IfcSession {
     this.renamedSchedule = !!snapshot.flags.renamedSchedule;
     this.geoChanged = !!snapshot.flags.geoChanged;
     this.siteLimitDirty = !!snapshot.flags.siteLimitDirty;
+    this.siteAssetsDirty = !!snapshot.flags.siteAssetsDirty;
+    this.siteAssets = (snapshot.siteAssets ?? []).map(cloneSiteAsset);
+    this.removedSiteAssetClusters = [...(snapshot.removedSiteAssetClusters ?? [])];
     this.createdDeclaresRelId = snapshot.ids.createdDeclaresRelId;
     this.createdCostDeclaresRelId = snapshot.ids.createdCostDeclaresRelId;
     this.workControlDateId = snapshot.ids.workControlDateId;
@@ -2585,6 +2708,15 @@ export class IfcSession {
     newLines.push(...semantic.lines);
     replacements.push(...semantic.replacements);
 
+    if (this.siteAssetsDirty) {
+      for (const id of this.removedSiteAssetClusters) comment(id, "site-asset");
+      for (const asset of this.siteAssets) {
+        if (!asset.isNew && !asset.dirty) continue;
+        if (!asset.isNew) for (const id of asset.clusterIds) comment(id, "site-asset");
+        newLines.push(...serializeSiteAsset(asset, this.schema, oh, this.index));
+      }
+    }
+
     if (this.siteLimitDirty) {
       const toComment = new Set<number>(this.removedSiteLimitCluster);
       const limit = this.schedule.siteLimit;
@@ -2756,6 +2888,12 @@ export class IfcSession {
     this.geoChanged = false;
     this.siteLimitDirty = false;
     this.removedSiteLimitCluster = [];
+    this.siteAssetsDirty = false;
+    this.removedSiteAssetClusters = [];
+    for (const asset of this.siteAssets) {
+      asset.isNew = false;
+      asset.dirty = false;
+    }
     this.geoWrite = null;
     this.semantic = emptySemanticState();
     this.changeSet.clear();

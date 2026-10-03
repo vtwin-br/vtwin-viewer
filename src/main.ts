@@ -22,6 +22,8 @@ import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projec
 import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
 import { ModuleWorkspace } from "./ui/moduleWorkspace";
+import { SitePlanner } from "./ui/sitePlanner";
+import { SiteAssetLayer } from "./viewer/siteAssetLayer";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
 import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
@@ -399,6 +401,9 @@ async function main() {
   let setPlanModelOpen = (_open: boolean) => {};
   let refreshFederatedView = (_opts?: { structure?: boolean }) => {};
   let refreshModuleWorkspace = (_id: WorkspaceId) => {};
+  let refreshSitePlanner = () => {};
+  let siteLayer: SiteAssetLayer | null = null;
+  let sitePlanner: SitePlanner | null = null;
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
 
@@ -416,7 +421,7 @@ async function main() {
       shellKind === "coordination";
     if (panelTitle) {
       panelTitle.textContent =
-        shellKind === "logistics"
+        shellKind === "logistics" || shellKind === "site"
           ? "Canteiro"
           : shellKind === "dashboard"
             ? "Indicadores"
@@ -431,7 +436,7 @@ async function main() {
                     : "4D";
     }
     if (toolShell) setPanelOpen("schedule", true, false);
-    if (shellKind !== "schedule" && shellKind !== "logistics") {
+    if (shellKind !== "schedule" && shellKind !== "logistics" && shellKind !== "site") {
       pauseTimeline();
       disablePlanVizTools();
     } else {
@@ -459,6 +464,12 @@ async function main() {
         dirty = true;
         refitVisibleModels();
       });
+    } else if (shellKind === "site") {
+      setPlanModelOpen(false);
+      dirty = true;
+      if (simKicker) simKicker.textContent = "Canteiro";
+      currentDateEl.textContent = formatDateLabel(lastDate);
+      if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);
     } else if (shellKind === "dashboard") {
       setPlanModelOpen(false);
       dirty = true;
@@ -489,6 +500,7 @@ async function main() {
     inspector.setReadOnly(shellKind !== "plan");
     renderModulePlaceholder(id);
     refreshModuleWorkspace(id);
+    refreshSitePlanner();
     refreshLayoutRestore();
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   };
@@ -919,6 +931,45 @@ async function main() {
     refreshModuleWorkspace(nav.getWorkspace());
   }
 
+  const siteRoot = document.getElementById("site-planner");
+  if (siteRoot) {
+    sitePlanner = new SitePlanner(siteRoot, {
+      getWorkspace: () => nav.getWorkspace(),
+      hasModel: () => models.size > 0,
+      sessions: () => models.all.map((entry) => entry.session),
+      getSchedule: () => scheduleRef,
+      onPlay: () => timeline.togglePlay(),
+      onPresent: (on) => {
+        document.documentElement.classList.toggle("is-presenting", on);
+        if (on) setPanelOpen("inspector", false);
+      },
+      onAssetAction: (action) => {
+        const selected = siteLayer?.selected() ?? "";
+        if (!selected) return;
+        for (const entry of models.all) {
+          const asset = entry.session.listSiteAssets().find((item) => item.globalId === selected);
+          if (!asset) continue;
+          if (action === "remove") {
+            entry.session.removeSiteAsset(selected);
+            siteLayer?.select("");
+            sitePlanner?.setSelected("");
+          } else {
+            entry.session.moveSiteAsset(selected, { yaw: asset.yaw + Math.PI / 4 });
+          }
+          markIfcDirty();
+          bumpSimulation([selected]);
+          refreshFederatedView({ structure: true });
+          return;
+        }
+      },
+    });
+    refreshSitePlanner = () => {
+      sitePlanner?.refresh();
+      siteLayer?.sync();
+    };
+    refreshSitePlanner();
+  }
+
   try {
     setStatus("vtwin");
     const viewer = await createViewer(viewportEl);
@@ -927,6 +978,7 @@ async function main() {
       viewportEl.closest<HTMLElement>(".viewport-stage") ?? viewportEl,
     );
     highlighter = new ScheduleHighlighter(viewer.fragments);
+    siteLayer = new SiteAssetLayer();
     refitVisibleModels = () => {
       void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
     };
@@ -1025,6 +1077,39 @@ async function main() {
 
     btnFit?.addEventListener("click", () => fitCurrentView());
 
+    const placeLibraryOnModel = async (e: PointerEvent, canvas: HTMLElement) => {
+      if (!siteLayer || !sitePlanner || !highlighter) return;
+      const taskId = sitePlanner.phaseTaskId();
+      if (taskId <= 0) return;
+      try {
+        const surface = await highlighter.pickSurface(viewer.world.camera.three, e, canvas);
+        const host =
+          (surface && models.disciplines.find((entry) => entry.id === surface.modelId)) ||
+          models.disciplines.find((entry) => entry.visible) ||
+          models.disciplines[0];
+        if (!host) return;
+        const world = surface?.point.clone() ?? null;
+        if (world && surface) world.y = surface.groundY;
+        const point = world
+          ? threeWorldToIfc(world, host.session.getExtraTransform())
+          : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, host.session.getExtraTransform());
+        if (!point) return;
+        const owner = models.all.find((entry) => entry.session.schedule.byId.has(taskId))?.session ?? host.session;
+        const asset =
+          owner === host.session
+            ? host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0, taskId })
+            : host.session.placeSiteAsset({ libraryKey: sitePlanner.library(), ...point, yaw: 0 });
+        if (owner !== host.session) owner.addProductsToTask(taskId, [{ guid: asset.globalId }]);
+        siteLayer.select(asset.globalId);
+        sitePlanner.setSelected(asset.globalId);
+        markIfcDirty();
+        bumpSimulation([asset.globalId]);
+        refreshFederatedView({ structure: true });
+      } catch (err) {
+        setStatus((err as Error).message);
+      }
+    };
+
     let pickDown: { x: number; y: number } | null = null;
     viewportEl.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
@@ -1036,6 +1121,19 @@ async function main() {
       pickDown = null;
       if (moved > 6) return;
       if (boxSelect?.isDragging()) return;
+      if (nav.getWorkspace() === "site-plan" && siteLayer && sitePlanner && highlighter) {
+        const canvas = viewer.world.renderer?.three.domElement ?? viewportEl;
+        const picked = siteLayer.pickAsset(viewer.world.camera.three, e, canvas);
+        if (picked) {
+          siteLayer.select(picked);
+          sitePlanner.setSelected(picked);
+          return;
+        }
+        if (sitePlanner.placing()) {
+          void placeLibraryOnModel(e, canvas);
+          return;
+        }
+      }
       void pickTaskFromModel(e);
     });
 
@@ -1567,6 +1665,7 @@ async function main() {
       if (models.visible.length) tree.update(lastDate);
       refreshSiteVisual();
       refreshModuleWorkspace(nav.getWorkspace());
+      refreshSitePlanner();
     };
 
     const FALLBACK_ANCHOR: AnchorLLA = {
@@ -2063,6 +2162,7 @@ async function main() {
         if (!ok) return;
       }
       await highlighter?.removeModel(id);
+      siteLayer?.unbind(id);
       await unloadIfc(viewer, id);
       viewportModels.detach(id);
       models.remove(id);
@@ -2187,6 +2287,7 @@ async function main() {
         wasmPath: WASM_URL,
       });
       await session.hydrateSiteLimit();
+      await session.hydrateSiteAssets();
       recordMetric("vista:model:loaded", 0, {
         fileName,
         sourceByteLength,
@@ -2228,6 +2329,7 @@ async function main() {
       });
       viewportModels.attach(entry.id, ingested.model);
       applyExtraToObject(ingested.model.object, ingested.session.getExtraTransform());
+      siteLayer?.bind(entry.id, ingested.model.object, entry.session);
       setStatus(entry.displayName);
       if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
       await highlighter.addModel(entry.id, ingested.model, collectAllGuids(models.mergedSchedule()));
@@ -2298,6 +2400,7 @@ async function main() {
       });
       if (member.entry.extra) session.hydrateExtraTransform(member.entry.extra);
       await session.hydrateSiteLimit();
+      await session.hydrateSiteAssets();
       models.add({
         id: member.entry.id,
         fileName: member.entry.fileName,
@@ -2323,6 +2426,7 @@ async function main() {
           const entry = models.get(id);
           if (!entry) continue;
           await highlighter?.removeModel(id);
+          siteLayer?.unbind(id);
           await unloadIfc(viewer, id);
           viewportModels.detach(id);
           models.remove(id);
@@ -2446,6 +2550,7 @@ async function main() {
       const previous = entry.session.schedule;
       const extra = entry.session.getExtraTransform();
       await highlighter?.removeModel(id);
+      siteLayer?.unbind(id);
       await unloadIfc(viewer, id);
       viewportModels.detach(id);
       const ingested = await ingestIfc(buffer, fileName, { modelId: id, skipDuplicateCheck: true });
@@ -2794,10 +2899,12 @@ async function main() {
             shellKind === "coordination"
           ) {
             await highlighter.revealAll();
-          } else if (shellKind === "schedule" || shellKind === "dashboard") {
+            siteLayer?.apply(null, true);
+          } else if (shellKind === "schedule" || shellKind === "dashboard" || shellKind === "site") {
             const buckets = computeStateBuckets(scheduleRef, lastDate);
             const previewAll = !timeline.playing && timeline.atStart;
             await highlighter.apply(buckets, { previewAll });
+            siteLayer?.apply(buckets, previewAll);
           }
         } catch (err) {
           console.error("Erro ao aplicar estado 4D:", err);

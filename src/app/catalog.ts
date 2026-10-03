@@ -15,6 +15,7 @@ export type WorkspaceId =
   | "schedule-4d"
   | "project-plan"
   | "logistics"
+  | "site-plan"
   | "coordination"
   | "editor";
 
@@ -22,6 +23,7 @@ export type WorkspaceShell =
   | "schedule"
   | "plan"
   | "logistics"
+  | "site"
   | "dashboard"
   | "viewer"
   | "docs"
@@ -61,6 +63,21 @@ export interface AppModule {
 }
 
 export const APP_MODULES: AppModule[] = [
+  {
+    id: "site",
+    label: "Canteiro",
+    description: "Plantar equipamentos, correr as fases e ler quantidades",
+    icon: "logistics",
+    tools: [
+      {
+        id: "site-plan",
+        label: "Canteiro",
+        description: "Biblioteca 3D, sequência 4D e quantidades por fase",
+        workspace: "site-plan",
+        icon: "logistics",
+      },
+    ],
+  },
   {
     id: "dashboard",
     label: "Dashboard",
@@ -167,7 +184,7 @@ export const APP_MODULES: AppModule[] = [
   },
 ];
 
-export const DEFAULT_WORKSPACE: WorkspaceId = "schedule-4d";
+export const DEFAULT_WORKSPACE: WorkspaceId = "site-plan";
 
 export const ALL_WORKSPACES: WorkspaceId[] = APP_MODULES.flatMap((m) => m.tools.map((t) => t.workspace));
 
@@ -179,6 +196,7 @@ export function workspaceShell(id: WorkspaceId): WorkspaceShell {
   if (id === "schedule-4d") return "schedule";
   if (id === "project-plan") return "plan";
   if (id === "logistics") return "logistics";
+  if (id === "site-plan") return "site";
   if (
     id === "dashboard" ||
     id === "viewer" ||
@@ -193,7 +211,7 @@ export function workspaceShell(id: WorkspaceId): WorkspaceShell {
 
 export function workspaceHasEarth(id: WorkspaceId): boolean {
   const shell = workspaceShell(id);
-  return shell === "schedule" || shell === "logistics";
+  return shell === "schedule" || shell === "logistics" || shell === "site";
 }
 
 export function findTool(toolId: string): AppTool | undefined {

@@ -818,6 +818,138 @@ button.header-project:hover,
   display: flex;
 }
 
+.body-grid[data-shell="site"] .panel-toolbar,
+.body-grid[data-shell="site"] #task-tree {
+  display: none;
+}
+
+.body-grid[data-shell="site"] #site-planner {
+  display: flex;
+}
+
+.site-planner {
+  display: none;
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 12px 14px 18px;
+}
+
+.site-planner[hidden] {
+  display: none !important;
+}
+
+.site-lead,
+.site-note {
+  margin: 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.site-label {
+  margin: 4px 0 0;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.site-library {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.site-card,
+.site-chip {
+  border: 1px solid var(--line, rgba(15, 23, 42, 0.12));
+  background: #fff;
+  border-radius: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.site-card {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+}
+
+.site-card strong,
+.site-quantities strong {
+  font-size: 13px;
+}
+
+.site-card span,
+.site-quantities span {
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.site-card.is-on,
+.site-chip.is-on {
+  border-color: #0f766e;
+  background: #f0fdfa;
+}
+
+.site-phases,
+.site-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.site-chip {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.site-quantities {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.site-quantities li {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: #fff;
+  border: 1px solid var(--line, rgba(15, 23, 42, 0.08));
+}
+
+html.is-presenting #module-nav {
+  display: none;
+}
+
+html.is-presenting {
+  --nav-w: 0px;
+}
+
+html.is-presenting #inspector,
+html.is-presenting #split-inspector {
+  display: none !important;
+}
+
+html.is-presenting .body-grid {
+  grid-template-columns: minmax(260px, 340px) minmax(0, 1fr) 0px !important;
+}
+
+html.is-presenting .site-library,
+html.is-presenting .site-lead,
+html.is-presenting .site-tools {
+  display: none;
+}
+
 .body-grid[data-shell="dashboard"] .panel-toolbar,
 .body-grid[data-shell="dashboard"] #task-tree,
 .body-grid[data-shell="viewer"] .panel-toolbar,

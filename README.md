@@ -64,6 +64,7 @@ abre esse modelo automaticamente.
     3D Tiles, caminhada em 1.ª pessoa
   - **Gantt** — editor das mesmas `IfcTask` (datas, WBS, predecessoras,
     conjuntos, ligação ao 3D, coluna Custo)
+  - **Canteiro** — biblioteca 3D (grua, camião, contentor…), sequência pelas fases do cronograma e quantidades (un, m, m³). O que fica gravado é `IfcBuildingElementProxy` + `IfcElementQuantity` ligado à `IfcTask`
   - **Logística** — limite de canteiro (`IfcAnnotation`) e recorte do terreno
   - **Dashboard** — indicadores calculados (tarefas, estado pela data,
     custo, elementos ligados) com foco no 3D

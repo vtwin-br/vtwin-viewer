@@ -5,6 +5,7 @@ import { packVtwin, unpackVtwin } from "../src/project/pack";
 import * as WebIFC from "web-ifc";
 import { resolve } from "node:path";
 import { detectIfcSchema } from "../src/ifc/stepText";
+import { phaseQuantities, sitePhases } from "../src/site/phases";
 
 const projectGuid = "0000000000000000000000";
 if (detectIfcSchema("FILE_SCHEMA(('IFC2X3'));") !== "IFC2X3") throw new Error("Adaptador IFC2X3 inválido.");
@@ -73,6 +74,14 @@ session.setSiteLimit({
   showPlateau: true,
 });
 
+const placed = session.placeSiteAsset({ libraryKey: "grua", x: 10, y: 4, z: 1, yaw: 0, taskId: first.id });
+session.placeSiteAsset({ libraryKey: "vedacao", x: 0, y: 0, z: 1, taskId: second.id });
+const phase = sitePhases(session.schedule).find((task) => task.id === first.id);
+const qty = phase ? phaseQuantities(session.schedule, session.listSiteAssets(), phase) : [];
+if (!qty.some((line) => line.key === "grua" && line.count === 1)) {
+  throw new Error("A quantidade da grua não entrou na fase.");
+}
+
 const sourceBytes = new Uint8Array(source.length);
 for (let index = 0; index < source.length; index++) sourceBytes[index] = source.charCodeAt(index);
 const snapshot = structuredClone(session.createExportSnapshot());
@@ -124,6 +133,25 @@ if (!output.includes("IFCRELINTERFERESELEMENTS") || !output.includes("'Paredes s
 }
 if (!output.includes("#10") || !/#\d+=IFCRELCONTAINEDINSPATIALSTRUCTURE\([^)]*#10,#14\)/.test(output) && !output.includes("#14")) {
   throw new Error("A mudança de contenção espacial não foi exportada.");
+}
+if (!output.includes("VISTA4D_SITE_ASSET") || !output.includes("IFCEXTRUDEDAREASOLID") || !output.includes("Qto_Vista4dSiteAsset")) {
+  throw new Error("O elemento de canteiro não foi exportado.");
+}
+if (!output.includes("IFCQUANTITYCOUNT") || !output.includes("IFCQUANTITYLENGTH") || !output.includes("'grua'") || !output.includes("'vedacao'")) {
+  throw new Error("As quantidades do canteiro não foram exportadas.");
+}
+if (!output.includes(`#${placed.proxyId}=IFCBUILDINGELEMENTPROXY`)) {
+  throw new Error("O proxy da grua não ficou com o expressId ligado à tarefa.");
+}
+const again = new IfcSession(output, "out.ifc", emptySchedule());
+const reloaded = await again.hydrateSiteAssets();
+const crane = reloaded.find((asset) => asset.libraryKey === "grua");
+const fence = reloaded.find((asset) => asset.libraryKey === "vedacao");
+if (!crane || Math.abs(crane.x - 10) > 1e-4 || crane.count !== 1) {
+  throw new Error("A grua não voltou a ser lida do STEP.");
+}
+if (!fence || fence.length !== 12) {
+  throw new Error("A vedação não voltou com o comprimento.");
 }
 const moved = /IFCRELCONTAINEDINSPATIALSTRUCTURE\([^;]*#10[^;]*#14\)/.test(output);
 if (!moved) throw new Error("A parede não passou a estar contida no IfcBuilding.");

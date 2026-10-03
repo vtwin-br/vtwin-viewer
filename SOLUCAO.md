@@ -118,6 +118,9 @@ IfcRelContainedInSpatialStructure   produto dentro de IfcSite / Building / Store
 IfcRelAggregates                    agregação entre elementos espaciais
 IfcGroup VISTA4D_SEARCH             search set; a consulta está em Pset_Vista4dSearch.Query
 IfcRelInterferesElements            interferência gravada (IFC4)
+IfcBuildingElementProxy VISTA4D_SITE_ASSET   equipamento de canteiro (caixa) + IfcLocalPlacement
+IfcElementQuantity Qto_Vista4dSiteAsset  contagem, comprimento e volume do equipamento
+IfcRelAssignsToProduct              o equipamento ligado à IfcTask da fase
 COORD.ifc (federação)               IfcProject + IfcSite; WorkPlan/Task/custo/canteiro/documentos
 Disciplina no export                IfcTask stub (mesmo GlobalId) + IfcRelAssignsToProduct
 ```
@@ -156,6 +159,7 @@ A app cria a COORD na primeira edição de Gantt, 5D, logística ou ao guardar `
 | Mover na árvore espacial | produto → `IfcRelContainedInSpatialStructure`; elemento espacial → `IfcRelAggregates` | Sim |
 | Search set | `IfcGroup` (`ObjectType = VISTA4D_SEARCH`) + membros `IfcRelAssignsToGroup` + consulta em `Pset_Vista4dSearch` / `Query` (`Tipo=IfcWall` ou `Pset.Prop=valor`) | Sim |
 | Interferência | `IfcRelInterferesElements` (IFC4). Dois GlobalId; se estiverem em ficheiros diferentes, a relação fica na COORD com proxies | Sim |
+| Equipamento de canteiro | `IfcBuildingElementProxy` (`ObjectType = VISTA4D_SITE_ASSET`) + caixa `IfcExtrudedAreaSolid` + `IfcElementQuantity` (`Count`, `Length`, `Volume`) + `IfcRelAssignsToProduct` à fase | Sim. A malha reconhecível (grua, camião…) é vista do `Tag`; o STEP leva a caixa, a posição e as quantidades |
 
 Código de escrita: `src/ifc/ifcSession.ts` (patches STEP; o resto do ficheiro
 fica intacto). Leitura do cronograma: `src/schedule/parseSchedule.ts`.
@@ -284,3 +288,5 @@ inventado pela app): `IfcWorkPlan` «Engineering and Construction»,
 - **% de progresso** continua só na barra do Gantt. `IfcTaskTime` não tem esse campo.
 - **Pacote só malha** não contém o STEP. Abrir esse `.vtwin` mostra a malha e o snapshot; Exportar IFC só funciona se o IFC canónico ainda estiver no armazenamento local.
 - **`.mpp` binário** não é interpretado. O que se grava é a referência (`IfcDocumentReference`), não as tarefas. Tarefas entram por XML ou CSV.
+- **Apresentação ao cliente** (esconder o menu e reproduzir as fases) é uma vista. A câmara não entra no STEP.
+- **Malha da biblioteca de canteiro** (grua, camião, etc.) é uma vista. O STEP grava a caixa, a posição, o `Tag` e as quantidades.

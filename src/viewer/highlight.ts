@@ -563,6 +563,39 @@ export class ScheduleHighlighter {
     return best?.hit ?? null;
   }
 
+  /**
+   * Ponto de mundo no modelo visível mais próximo do clique.
+   * O Fragments faz o teste; as malhas internas não passam pelo Raycaster do Three.
+   */
+  async pickSurface(
+    camera: THREE.Camera,
+    event: PointerEvent | MouseEvent,
+    dom: HTMLElement,
+  ): Promise<{ modelId: string; point: THREE.Vector3; groundY: number } | null> {
+    await this.ready();
+    const mouse = new THREE.Vector2(event.clientX, event.clientY);
+    let best: { modelId: string; point: THREE.Vector3; groundY: number; dist: number } | null = null;
+    for (const layer of this.visibleLayers()) {
+      const result = await layer.model.raycast({
+        camera: camera as THREE.PerspectiveCamera | THREE.OrthographicCamera,
+        mouse,
+        dom: dom as HTMLCanvasElement,
+      });
+      if (!result?.point) continue;
+      const dist = typeof result.distance === "number" ? result.distance : camera.position.distanceTo(result.point);
+      if (best && dist >= best.dist) continue;
+      let groundY = result.point.y;
+      try {
+        const box = layer.model.box;
+        if (!box.isEmpty() && Number.isFinite(box.min.y)) groundY = box.min.y;
+      } catch {
+        groundY = result.point.y;
+      }
+      best = { modelId: layer.modelId, point: result.point.clone(), groundY, dist };
+    }
+    return best ? { modelId: best.modelId, point: best.point, groundY: best.groundY } : null;
+  }
+
   localIdOf(guid: string, modelId?: string): number | undefined {
     if (modelId) return this.layers.get(modelId)?.guidToLocal.get(guid);
     for (const layer of this.visibleLayers()) {
