@@ -92,7 +92,7 @@ export class SitePlanner {
         <button type="button" class="btn-secondary" data-act="rotate" ${this.selectedGuid ? "" : "disabled"}>Rodar 45°</button>
         <button type="button" class="btn-secondary" data-act="remove" ${this.selectedGuid ? "" : "disabled"}>Apagar</button>
         <button type="button" class="btn-secondary" data-act="play">Reproduzir</button>
-        <button type="button" class="btn-primary" data-act="present">${this.presenting ? "Sair da apresentação" : "Apresentar"}</button>
+        <button type="button" class="btn-primary${this.presenting ? " is-on" : ""}" data-act="present">${this.presenting ? "Sair da apresentação" : "Apresentar"}</button>
       </div>
       <h3 class="site-label">Quantidades${phase ? ` · ${escapeHtml(phase.name)}` : ""}</h3>
       ${
