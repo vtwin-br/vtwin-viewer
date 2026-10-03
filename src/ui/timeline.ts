@@ -103,6 +103,10 @@ export class TimelineUI {
     return this.currentDay <= 0;
   }
 
+  get currentDate(): Date {
+    return new Date(this.startMs + this.currentDay * 86400000);
+  }
+
   togglePlay(): void {
     if (this.opts.container.classList.contains("is-idle")) {
       this.armPlay = !this.armPlay;
@@ -257,6 +261,7 @@ export class TimelineUI {
     if (this.currentDay >= this.totalDays) this.currentDay = 0;
     this.isPlaying = true;
     this.opts.onPlayingChange?.(true);
+    this.emit(true);
     this.playBtn.innerHTML = ICON_PAUSE;
     this.playBtn.title = "Pausar";
     this.playBtn.setAttribute("aria-label", "Pausar");

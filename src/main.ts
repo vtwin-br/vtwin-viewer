@@ -984,7 +984,10 @@ async function main() {
     },
     onPlayingChange: (playing) => {
       timelinePlaying = playing;
-      if (playing) tripSeconds = 0;
+      if (playing) {
+        tripSeconds = 0;
+        lastDate = timeline.currentDate;
+      }
       headerCenter?.classList.toggle("is-playing", playing);
       if (playing) void highlighter?.clearIsolation();
       dirty = true;
@@ -3273,7 +3276,8 @@ async function main() {
       if (ingested.first) {
         earth.setClipCenter(0, 0, 0);
         applyActiveGeoref({ snap: true, resetGizmo: false });
-        lastDate = scheduleRef?.minDate ?? ingested.schedule.minDate;
+        const span = nativeScheduleRef ? modelScheduleRange(nativeScheduleRef) : null;
+        lastDate = span?.min ?? scheduleRef?.minDate ?? ingested.schedule.minDate;
       } else {
         attachGizmoToActive(true);
       }
@@ -3284,7 +3288,8 @@ async function main() {
       if (scheduleRef && lastDate > scheduleRef.maxDate) lastDate = scheduleRef.maxDate;
       dirty = true;
       tree.update(lastDate);
-      if (workspaceShell(nav.getWorkspace()) === "schedule") {
+      const loadedShell = workspaceShell(nav.getWorkspace());
+      if (loadedShell === "schedule" || loadedShell === "site" || loadedShell === "dashboard") {
         currentDateEl.textContent = formatDateLabel(lastDate);
       } else {
         currentDateEl.textContent = projectName ?? models.label();

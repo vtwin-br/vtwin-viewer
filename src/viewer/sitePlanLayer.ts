@@ -221,9 +221,60 @@ export class SitePlanLayer {
         handle = { distance: item.distance, found };
       }
     }
+    const grabbed = this.grabHandle(camera, event, rect);
+    if (grabbed) return grabbed;
     if (!best) return null;
     if (handle && handle.distance <= best.distance + 1.2) return handle.found;
     return best.found;
+  }
+
+  /** A alça ganha se o cursor está em cima dela, mesmo com a malha do terreno à frente. */
+  private grabHandle(camera: THREE.Camera, event: PointerEvent | MouseEvent, rect: DOMRect): SiteHit | null {
+    const best: { dist: number; found: SiteHit | null } = { dist: 36, found: null };
+    const world = new THREE.Vector3();
+    for (const mesh of this.meshes.values()) {
+      mesh.traverse((obj) => {
+        if (!obj.visible || !handleName(obj.name)) return;
+        obj.getWorldPosition(world);
+        const clip = world.clone().project(camera);
+        if (clip.z < -1 || clip.z > 1) return;
+        const x = rect.left + (clip.x * 0.5 + 0.5) * rect.width;
+        const y = rect.top + (-clip.y * 0.5 + 0.5) * rect.height;
+        const dist = Math.hypot(event.clientX - x, event.clientY - y);
+        if (dist > best.dist) return;
+        const found = this.hitFromObject(obj);
+        if (!found) return;
+        best.dist = dist;
+        best.found = found;
+      });
+    }
+    return best.found;
+  }
+
+  private hitFromObject(object: THREE.Object3D): SiteHit | null {
+    let part: SiteHit["part"] = "body";
+    let index: number | undefined;
+    let node: THREE.Object3D | null = object;
+    while (node) {
+      if (node.name === "axis-x") part = "x";
+      else if (node.name === "axis-y") part = "y";
+      else if (node.name === "axis-z") part = "z";
+      else if (node.name === "resize") part = "resize";
+      else if (node.name === "scale") part = "scale";
+      else if (node.name.startsWith("vertex-")) {
+        part = "vertex";
+        index = Number(node.name.slice(7));
+      } else if (node.name.startsWith("edge-")) {
+        part = "edge";
+        index = Number(node.name.slice(5));
+      }
+      if (this.meshes.has(node.name)) {
+        if (node.name.startsWith("pour:")) return null;
+        return { id: node.name, part, index };
+      }
+      node = node.parent;
+    }
+    return null;
   }
 
   private describeHit(hit: THREE.Intersection): SiteHit | null {
@@ -776,9 +827,9 @@ function blankSheet(width: number, height: number, opacity: number, color: strin
   const mesh = new THREE.Mesh(
     geom,
     new THREE.MeshBasicMaterial({
-      color: color || "#ffffff",
+      color: 0xd7ece8,
       transparent: true,
-      opacity: Math.max(0.45, opacity),
+      opacity: Math.max(0.72, opacity),
       side: THREE.DoubleSide,
       depthWrite: false,
     }),
@@ -787,7 +838,25 @@ function blankSheet(width: number, height: number, opacity: number, color: strin
   mesh.userData.ui = true;
   mesh.userData.width = width;
   mesh.userData.height = height;
+  const frame = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geom),
+    new THREE.LineBasicMaterial({ color: color || "#163540" }),
+  );
+  frame.userData.ui = true;
+  mesh.add(frame);
   return mesh;
+}
+
+function handleName(name: string): boolean {
+  return (
+    name === "resize" ||
+    name === "scale" ||
+    name === "axis-x" ||
+    name === "axis-y" ||
+    name === "axis-z" ||
+    name.startsWith("vertex-") ||
+    name.startsWith("edge-")
+  );
 }
 
 function isHandle(part: SiteHit["part"]): boolean {
