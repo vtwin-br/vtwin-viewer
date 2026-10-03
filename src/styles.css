@@ -841,7 +841,6 @@ button.header-project:hover,
 
 .body-grid[data-shell="site"] .panel-sub,
 .body-grid[data-shell="site"] .panel-badge,
-.body-grid[data-shell="site"] .sim-hud,
 .body-grid[data-shell="site"] .perf-stats,
 .body-grid[data-shell="site"] #btn-hud-cost,
 .body-grid[data-shell="site"] .plan-link-tools {
@@ -2663,6 +2662,10 @@ html.is-presenting .perf-stats {
   display: none;
   align-items: center;
   gap: 4px;
+}
+
+.link-mode-hint:not([hidden]) {
+  display: block;
 }
 
 .body-grid[data-workspace="project-plan"].model-open .plan-link-tools {
@@ -4654,6 +4657,40 @@ html.is-presenting .perf-stats {
 
 .sim-hud.is-idle {
   display: none;
+}
+
+.body-grid[data-shell="schedule"] .viewport-stage:has(#sim-hud:not(.is-idle)) .viewport-canvas,
+.body-grid[data-shell="site"] .viewport-stage:has(#sim-hud:not(.is-idle)) .viewport-canvas {
+  margin-right: min(260px, 34%);
+}
+
+.body-grid[data-shell="schedule"] #sim-hud:not(.is-idle),
+.body-grid[data-shell="site"] #sim-hud:not(.is-idle) {
+  inset: 48px 0 0 auto;
+  width: min(260px, 34%);
+  padding: 8px;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.body-grid[data-shell="schedule"] #sim-hud .hud-phases,
+.body-grid[data-shell="site"] #sim-hud .hud-phases {
+  flex-direction: row;
+  flex-wrap: wrap;
+  width: 100%;
+  max-height: 72px;
+  gap: 6px;
+}
+
+.body-grid[data-shell="schedule"] #sim-hud .hud-cost,
+.body-grid[data-shell="site"] #sim-hud .hud-cost {
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  max-height: min(280px, 46%);
+  resize: none;
 }
 
 .hud-phases,

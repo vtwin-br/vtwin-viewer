@@ -210,8 +210,23 @@ export class SitePlanLayer {
     );
     const ray = new THREE.Raycaster();
     ray.setFromCamera(mouse, camera);
-    const hit = ray.intersectObjects(groups, true).find((item) => item.object.visible);
-    if (!hit) return null;
+    const hits = ray.intersectObjects(groups, true).filter((item) => item.object.visible);
+    let best: { distance: number; found: SiteHit } | null = null;
+    let handle: { distance: number; found: SiteHit } | null = null;
+    for (const item of hits) {
+      const found = this.describeHit(item);
+      if (!found) continue;
+      if (!best || item.distance < best.distance) best = { distance: item.distance, found };
+      if (isHandle(found.part) && (!handle || item.distance < handle.distance)) {
+        handle = { distance: item.distance, found };
+      }
+    }
+    if (!best) return null;
+    if (handle && handle.distance <= best.distance + 1.2) return handle.found;
+    return best.found;
+  }
+
+  private describeHit(hit: THREE.Intersection): SiteHit | null {
     let part: SiteHit["part"] = "body";
     let index: number | undefined;
     let node: THREE.Object3D | null = hit.object;
@@ -368,11 +383,14 @@ export class SitePlanLayer {
       root.userData.texKey = texKey;
       bound.group.add(root);
       this.meshes.set(pdf.id, root);
+      root.add(blankSheet(frame.width, frame.height, pdf.opacity, pdf.color));
       const generation = (root.userData.generation = Number(root.userData.generation ?? 0) + 1);
       const host = root;
       void renderPdfSheet(pdf.pdf, pdf.sheet, pdf.removeWhite)
         .then((page) => {
           if (host.userData.generation !== generation || !host.parent) return;
+          pdf.aspect = page.aspect;
+          pdf.pageCount = page.pageCount;
           host.userData.aspect = page.aspect;
           const placed = pdfFrame({ ...pdf, aspect: page.aspect });
           const size = placed ?? frame;
@@ -540,12 +558,13 @@ export class SitePlanLayer {
       const local = new THREE.Vector3(at.x - base.x, at.y - base.y + 0.4, at.z - base.z);
       ring.push(local);
       const sphere = new THREE.Mesh(
-        new THREE.SphereGeometry(0.42, 16, 12),
-        new THREE.MeshLambertMaterial({ color: edges ? 0x2fd6bf : 0xf8fbfa }),
+        new THREE.SphereGeometry(0.72, 16, 12),
+        new THREE.MeshLambertMaterial({ color: edges ? 0x2fd6bf : 0xf8fbfa, depthTest: false }),
       );
       sphere.name = `vertex-${index}`;
       sphere.userData.ui = true;
       sphere.position.copy(local);
+      sphere.renderOrder = 6;
       if (edges) sphere.add(vertexLetter(index < 26 ? String.fromCharCode(65 + index) : String(index + 1)));
       group.add(sphere);
       if (!edges) return;
@@ -553,12 +572,13 @@ export class SitePlanLayer {
       if (!next || (index === points.length - 1 && points.length < 3)) return;
       const b = ifcToThreePoint(next);
       const mid = new THREE.Mesh(
-        new THREE.SphereGeometry(0.24, 10, 8),
-        new THREE.MeshLambertMaterial({ color: 0x748891 }),
+        new THREE.SphereGeometry(0.4, 10, 8),
+        new THREE.MeshLambertMaterial({ color: 0x748891, depthTest: false }),
       );
       mid.name = `edge-${index}`;
       mid.userData.ui = true;
       mid.position.set((at.x + b.x) / 2 - base.x, (at.y + b.y) / 2 - base.y + 0.35, (at.z + b.z) / 2 - base.z);
+      mid.renderOrder = 6;
       group.add(mid);
     });
     if (edges && ring.length > 1) {
@@ -576,10 +596,14 @@ export class SitePlanLayer {
   private resizeHandle(id: string, width: number, height: number): void {
     const root = this.meshes.get(id);
     if (!root) return;
-    const handle = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.35, 0.35), new THREE.MeshLambertMaterial({ color: 0xf8fbfa }));
+    const handle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.72, 0.72, 0.72),
+      new THREE.MeshLambertMaterial({ color: 0xf8fbfa, depthTest: false }),
+    );
     handle.name = "resize";
     handle.userData.ui = true;
-    handle.position.set(width / 2, height / 2, 0);
+    handle.renderOrder = 6;
+    handle.position.set(width / 2 + 0.2, height + 0.45, 0.15);
     root.add(handle);
   }
 
@@ -587,9 +611,13 @@ export class SitePlanLayer {
     const root = this.meshes.get(id);
     if (!root) return;
     const box = new THREE.Box3().setFromObject(root);
-    const handle = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.4, 0.4), new THREE.MeshLambertMaterial({ color: 0xf8fbfa }));
+    const handle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.72, 0.72, 0.72),
+      new THREE.MeshLambertMaterial({ color: 0xf8fbfa, depthTest: false }),
+    );
     handle.name = "scale";
     handle.userData.ui = true;
+    handle.renderOrder = 6;
     const corner = new THREE.Vector3(box.max.x, box.max.y, box.max.z);
     root.worldToLocal(corner);
     handle.position.copy(corner);
@@ -740,6 +768,30 @@ function pdfFrame(pdf: PdfOverlay): { origin: PlanPoint; yaw: number; width: num
   if (!pdf.origin) return null;
   const width = pdf.width && pdf.width > 1 ? pdf.width : 24;
   return { origin: pdf.origin, yaw: 0, width, height: width / aspect };
+}
+
+function blankSheet(width: number, height: number, opacity: number, color: string): THREE.Mesh {
+  const geom = new THREE.PlaneGeometry(width, height);
+  geom.translate(width / 2, height / 2, 0);
+  const mesh = new THREE.Mesh(
+    geom,
+    new THREE.MeshBasicMaterial({
+      color: color || "#ffffff",
+      transparent: true,
+      opacity: Math.max(0.45, opacity),
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  mesh.name = "sheet";
+  mesh.userData.ui = true;
+  mesh.userData.width = width;
+  mesh.userData.height = height;
+  return mesh;
+}
+
+function isHandle(part: SiteHit["part"]): boolean {
+  return part === "vertex" || part === "edge" || part === "resize" || part === "scale" || part === "x" || part === "y" || part === "z";
 }
 
 function sheetMesh(width: number, height: number, canvas: HTMLCanvasElement, opacity: number, color: string): THREE.Mesh {

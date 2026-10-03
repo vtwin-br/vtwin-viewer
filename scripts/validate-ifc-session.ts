@@ -1,5 +1,6 @@
 import { IfcSession } from "../src/ifc/ifcSession";
-import { emptySchedule } from "../src/schedule/range";
+import { emptySchedule, modelScheduleRange } from "../src/schedule/range";
+import type { Task } from "../src/schedule/types";
 import { buildStepIndex } from "../src/ifc/stepIndex";
 import { packVtwin, unpackVtwin } from "../src/project/pack";
 import * as WebIFC from "web-ifc";
@@ -416,6 +417,36 @@ const grown = offsetPolygon(
 );
 const xs = grown.map((point) => point.x);
 if (Math.min(...xs) >= 0 || Math.max(...xs) <= 10) throw new Error("O talude não afastou o polígono.");
+const modelSpan = emptySchedule();
+const designOnly: Task = {
+  id: 1,
+  globalId: "design",
+  name: "Desenho",
+  start: new Date("2022-12-05T00:00:00Z"),
+  end: new Date("2022-12-20T00:00:00Z"),
+  children: [],
+  productIds: [],
+  productGuids: [],
+  groupIds: [],
+  predecessors: [],
+};
+const houseTask: Task = {
+  id: 2,
+  globalId: "house",
+  name: "Casa",
+  start: new Date("2023-03-01T00:00:00Z"),
+  end: new Date("2023-06-01T00:00:00Z"),
+  children: [],
+  productIds: [9],
+  productGuids: ["house-guid"],
+  groupIds: [],
+  predecessors: [],
+};
+modelSpan.roots = [designOnly, houseTask];
+const span = modelScheduleRange(modelSpan);
+if (!span || span.min.getUTCFullYear() !== 2023 || span.max.getUTCMonth() !== 5) {
+  throw new Error("A linha do tempo do modelo inclui tarefas sem geometria.");
+}
 if (!(excavationVolume(
   [
     { x: 0, y: 0 },

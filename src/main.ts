@@ -4,7 +4,7 @@ import { ScheduleHighlighter } from "./viewer/highlight";
 import { parseSchedule } from "./schedule/parseSchedule";
 import { parseScheduleFromFragments } from "./schedule/parseFragmentsSchedule";
 import { computeStateBuckets } from "./schedule/simulation";
-import { emptySchedule, getTaskIdsByGuid } from "./schedule/range";
+import { emptySchedule, getTaskIdsByGuid, modelScheduleRange } from "./schedule/range";
 import { TaskTreeUI } from "./ui/taskTree";
 import { TimelineUI } from "./ui/timeline";
 import { InspectorUI } from "./ui/inspector";
@@ -450,7 +450,7 @@ async function main() {
   let pendingPdf: { name: string; pdf: string } | null = null;
   let pdfAlign: { id: string; pair: 0 | 1; phase: "sheet" | "ground" } | null = null;
   let siteDrag: { hit: SiteHit; last: number; x: number; y: number } | null = null;
-  let planDraft: { kind: "path" | "terrain" | "hatch" | "polygon"; id: string } | null = null;
+  let planDraft: { kind: "path" | "terrain" | "hatch" | "polygon"; id: string; ownerId?: string } | null = null;
   let sitePlanner: SitePlanner | null = null;
   let tripSeconds = 0;
   let timelinePlaying = false;
@@ -484,6 +484,28 @@ async function main() {
   };
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
+  let showPlaceHint: (text: string | null) => void = () => {};
+  let ensureSiteMap = () => {};
+  const pdfStepName = (): "" | "d1" | "g1" | "d2" | "g2" => {
+    if (!pdfAlign) return "";
+    if (pdfAlign.pair === 0) return pdfAlign.phase === "sheet" ? "d1" : "g1";
+    return pdfAlign.phase === "sheet" ? "d2" : "g2";
+  };
+  const publishPdfStep = () => {
+    const step = pdfStepName();
+    sitePlanner?.setPdfStep(step);
+    showPlaceHint(
+      step === "d1"
+        ? "1. Clique um ponto no desenho."
+        : step === "g1"
+          ? "2. Clique o mesmo ponto no terreno."
+          : step === "d2"
+            ? "3. Clique o segundo ponto no desenho."
+            : step === "g2"
+              ? "4. Clique o segundo ponto no terreno."
+              : null,
+    );
+  };
 
   const syncWorkspaceChrome = (id: WorkspaceId) => {
     const shellKind = workspaceShell(id);
@@ -538,6 +560,7 @@ async function main() {
       dirty = true;
       if (simKicker) simKicker.textContent = "Simulação 4D";
       currentDateEl.textContent = formatDateLabel(lastDate);
+      ensureSiteMap();
       if (toggleSchedule) {
         toggleSchedule.title = "Ocultar";
         toggleSchedule.setAttribute("aria-label", "Ocultar");
@@ -551,6 +574,7 @@ async function main() {
       dirty = true;
       if (simKicker) simKicker.textContent = "Logística";
       currentDateEl.textContent = formatDateLabel(lastDate);
+      ensureSiteMap();
       if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);
     } else if (shellKind === "dashboard") {
       setPlanModelOpen(false);
@@ -946,7 +970,8 @@ async function main() {
     onDateChange: (date) => {
       lastDate = date;
       dirty = true;
-      if (workspaceShell(nav.getWorkspace()) === "schedule") {
+      const shellNow = workspaceShell(nav.getWorkspace());
+      if (shellNow === "schedule" || shellNow === "site" || shellNow === "dashboard") {
         currentDateEl.textContent = formatDateLabel(date);
       }
       const now = performance.now();
@@ -1108,9 +1133,16 @@ async function main() {
       return id;
     }
     if (tool === "truck") {
-      planDraft = null;
+      if (planDraft?.kind === "path" && planDraft.ownerId) {
+        const path = sitePlan.paths.find((item) => item.id === planDraft?.id);
+        const last = path?.points[path.points.length - 1];
+        if (path && last && Math.hypot(last.x - point.x, last.y - point.y, last.z - point.z) >= 0.4) path.points.push(point);
+        return planDraft.ownerId;
+      }
       const line = addPlanningLine(sitePlan, "Camião", dates.start, dates.end);
       const id = newPlanId();
+      const pathId = newPlanId();
+      sitePlan.paths.push({ id: pathId, modelId, points: [point], color: "#748891", lineId: line.id });
       sitePlan.trucks.push({
         id,
         catalogId: "dump-truck",
@@ -1120,9 +1152,11 @@ async function main() {
         rx: 0,
         ry: 0,
         rz: 0,
+        pathId,
         duration: DEFAULT_TRIP_SECONDS,
         lineId: line.id,
       });
+      planDraft = { kind: "path", id: pathId, ownerId: id };
       return id;
     }
     if (tool === "fence") {
@@ -1425,7 +1459,7 @@ async function main() {
       sidecar.keyframes.tracks = sidecar.keyframes.tracks.filter((item) => item.targetId !== id);
       sidecar.slides.slides = sidecar.slides.slides.filter((item) => item.id !== id);
       sidecar.pours.items = sidecar.pours.items.filter((item) => item.id !== id);
-      if (planDraft?.id === id) planDraft = null;
+      if (planDraft?.id === id || planDraft?.ownerId === id) planDraft = null;
       if (pdfAlign?.id === id) pdfAlign = null;
       siteLayer?.select("");
       sitePlanner?.setSelected("");
@@ -1466,7 +1500,7 @@ async function main() {
     } else if (action === "pdf-white" && pdf) pdf.removeWhite = !pdf.removeWhite;
     else if (action === "pdf-align" && pdf) {
       pdfAlign = { id, pair: 0, phase: "sheet" };
-      sitePlanner?.setPdfStep("sheet");
+      publishPdfStep();
       return;
     } else if (action === "camera-save") {
       saveCamera();
@@ -1512,7 +1546,15 @@ async function main() {
       onMode: (placing) => {
         viewportEl.classList.toggle("is-site-place", placing);
         const tool = sitePlanner?.tool();
-        if (planDraft && tool !== planDraft.kind) planDraft = null;
+        const keepTruckPath = tool === "truck" && planDraft?.kind === "path" && !!planDraft.ownerId;
+        if (planDraft && tool !== planDraft.kind && !keepTruckPath) planDraft = null;
+        if (pdfAlign) return;
+        if (tool === "truck") showPlaceHint("Clique no chão para pousar o camião e desenhar o caminho.");
+        else if (tool === "terrain") showPlaceHint("Clique no chão para desenhar o polígono.");
+        else if (tool === "box" || tool === "balloon") showPlaceHint("Clique no chão. Arraste a alça para redimensionar.");
+        else if (tool === "hatch" || tool === "polygon") showPlaceHint("Clique no chão. Arraste os vértices ou a alça.");
+        else if (pendingPdf) showPlaceHint("Clique no terreno para pousar o PDF.");
+        else showPlaceHint(null);
       },
       onSelect: (id) => siteLayer?.select(id),
       onField: (event) => applyField(event),
@@ -1542,6 +1584,7 @@ async function main() {
         }
         void file.arrayBuffer().then((buffer) => {
           pendingPdf = { name: file.name.replace(/\.pdf$/i, ""), pdf: bytesToBase64(new Uint8Array(buffer)) };
+          showPlaceHint("Clique no terreno para pousar o PDF.");
         });
       },
     });
@@ -1724,6 +1767,10 @@ async function main() {
           : siteLayer.groundIfc(viewer.world.camera.three, e, canvas, "ground", emptyExtraTransform());
         if (!point) return;
         const id = commitPlanItem(tool, point, host?.id ?? "ground");
+        if (tool === "pdf" && id) {
+          pdfAlign = { id, pair: 0, phase: "sheet" };
+          publishPdfStep();
+        }
         siteLayer.select(id);
         sitePlanner.setSelected(id);
         touchPlan([id]);
@@ -1733,6 +1780,7 @@ async function main() {
     };
 
     let pickDown: { x: number; y: number } | null = null;
+    let orbitHeld = false;
     const siteCanvas = () => viewer.world.renderer?.three.domElement ?? viewportEl;
     const orbit = () => viewer.world.camera.controls as { enabled: boolean } | null;
     const dragAngle = (id: string, x: number, y: number) => {
@@ -1779,9 +1827,25 @@ async function main() {
         if (nav.getWorkspace() !== "site-plan" || !siteLayer || walk?.enabled) return;
         const canvas = siteCanvas();
         const hit = siteLayer.hit(viewer.world.camera.three, e, canvas);
-        if (!hit) return;
-        if (hit.part === "x" || hit.part === "y" || hit.part === "z" || hit.part === "vertex" || hit.part === "edge" || hit.part === "resize" || hit.part === "scale") {
+        const handle =
+          hit &&
+          (hit.part === "x" ||
+            hit.part === "y" ||
+            hit.part === "z" ||
+            hit.part === "vertex" ||
+            hit.part === "edge" ||
+            hit.part === "resize" ||
+            hit.part === "scale");
+        if (handle && hit) {
           beginDrag(hit, e);
+          return;
+        }
+        if (sitePlanner?.placing()) {
+          const controls = orbit();
+          if (controls?.enabled) {
+            controls.enabled = false;
+            orbitHeld = true;
+          }
         }
       },
       true,
@@ -1828,6 +1892,11 @@ async function main() {
       syncDrag();
     });
     window.addEventListener("pointerup", (e) => {
+      if (orbitHeld) {
+        const controls = orbit();
+        if (controls) controls.enabled = true;
+        orbitHeld = false;
+      }
       if (!siteDrag) return;
       const controls = orbit();
       if (controls) controls.enabled = true;
@@ -1840,17 +1909,21 @@ async function main() {
       if (e.button !== 0 || !pickDown || siteDrag) return;
       const moved = Math.hypot(e.clientX - pickDown.x, e.clientY - pickDown.y);
       pickDown = null;
-      if (moved > 6) return;
+      if (moved > 14) return;
       if (boxSelect?.isDragging()) return;
       if (nav.getWorkspace() === "site-plan" && siteLayer && sitePlanner && highlighter) {
         const canvas = siteCanvas();
         const picked = siteLayer.hit(viewer.world.camera.three, e, canvas);
         const tool = sitePlanner.tool();
         const drawing = tool === "path" || tool === "terrain" || tool === "hatch" || tool === "polygon";
-        if (pdfAlign && picked?.part === "sheet" && picked.uv && pdfAlign.phase === "sheet") {
-          sheetPick = picked.uv;
-          pdfAlign = { ...pdfAlign, phase: "ground" };
-          sitePlanner.setPdfStep("ground");
+        if (pdfAlign?.phase === "sheet") {
+          if (picked?.part === "sheet" && picked.uv) {
+            sheetPick = picked.uv;
+            pdfAlign = { ...pdfAlign, phase: "ground" };
+            publishPdfStep();
+          } else {
+            publishPdfStep();
+          }
           return;
         }
         if (pdfAlign?.phase === "ground") {
@@ -1870,22 +1943,22 @@ async function main() {
                 pdf.width = frame.width;
               }
               pdfAlign = null;
-              sitePlanner?.setPdfStep("");
+              publishPdfStep();
             } else {
               pdfAlign = { id: pdf.id, pair: 1, phase: "sheet" };
-              sitePlanner?.setPdfStep("sheet");
+              publishPdfStep();
             }
             touchPlan([pdf.id]);
           })();
           return;
         }
+        if (sitePlanner.placing()) {
+          void placeOnModel(e, canvas);
+          return;
+        }
         if (picked && picked.part === "body" && !drawing) {
           siteLayer.select(picked.id);
           sitePlanner.setSelected(picked.id);
-          return;
-        }
-        if (sitePlanner.placing()) {
-          void placeOnModel(e, canvas);
           return;
         }
       }
@@ -2401,14 +2474,16 @@ async function main() {
           selectedTask = null;
         }
         simHud?.bind(schedule);
+        const span = modelScheduleRange(nativeSchedule) ?? { min: schedule.minDate, max: schedule.maxDate };
         timeline.bindSchedule(schedule);
+        timeline.setRange(span.min, span.max);
         timeline.setIdle(false);
-        timeline.setRange(schedule.minDate, schedule.maxDate);
       } else {
         tree.refreshLayout();
         if (keepId != null) selectedTask = schedule.byId.get(keepId) ?? selectedTask;
         simHud?.bind(schedule);
-        timeline.setRange(schedule.minDate, schedule.maxDate);
+        const span = modelScheduleRange(nativeSchedule) ?? { min: schedule.minDate, max: schedule.maxDate };
+        timeline.setRange(span.min, span.max);
       }
       const coord = models.coordination;
       scheduleNameEl.textContent = models.size ? scheduleTitle(schedule) : "Importe um arquivo IFC";
@@ -2434,6 +2509,7 @@ async function main() {
       refreshSiteVisual();
       refreshModuleWorkspace(nav.getWorkspace());
       refreshSitePlanner();
+      requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
     };
 
     const FALLBACK_ANCHOR: AnchorLLA = {
@@ -2575,17 +2651,36 @@ async function main() {
       earthPanel?.setMode(next);
     };
 
-    const setEarthEnabledUi = (enabled: boolean) => {
+    const setEarthEnabledUi = (enabled: boolean, openPanel = true) => {
       btnEarth?.classList.toggle("is-active", enabled);
       btnEarth?.setAttribute("aria-pressed", enabled ? "true" : "false");
       if (btnEarth) btnEarth.title = enabled ? "Ocultar contexto Google Earth" : "Mostrar contexto Google Earth";
       earthPanelRoot?.classList.toggle("is-earth-on", enabled);
       syncGizmo();
-      if (enabled && !walk?.enabled) setEarthPanelOpen(true);
+      if (enabled && openPanel && !walk?.enabled) setEarthPanelOpen(true);
       const q = deviceGraphicsQuality();
       setAllModelsQuality(viewer.fragments, enabled ? Math.min(q, 0.45) : q);
       setWorldGridVisible(viewer.world, !enabled);
       refreshSiteVisual();
+    };
+    ensureSiteMap = () => {
+      const shell = workspaceShell(nav.getWorkspace());
+      if (shell !== "site" && shell !== "schedule") return;
+      if (!apiKey) return;
+      if (earth.enabled) {
+        setEarthEnabledUi(true, false);
+        return;
+      }
+      earthWanted = true;
+      void earth.setEnabled(true)
+        .then(() => {
+          const now = workspaceShell(nav.getWorkspace());
+          if (now !== "site" && now !== "schedule") return;
+          setEarthEnabledUi(earth.enabled, false);
+        })
+        .catch(() => {
+          setWorldGridVisible(viewer.world, true);
+        });
     };
     syncGizmo();
 
@@ -2690,6 +2785,7 @@ async function main() {
       drawHint.hidden = false;
       drawHint.textContent = text;
     };
+    showPlaceHint = setDrawHint;
 
     const refreshSiteVisualNow = (draft?: import("three").Vector3[], skipUi = false) => {
       const planning = models.coordination?.session ?? models.active?.session;

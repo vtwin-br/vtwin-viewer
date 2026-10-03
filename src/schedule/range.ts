@@ -74,6 +74,26 @@ export function recomputeProductGuidsByTask(schedule: ScheduleData): void {
   for (const r of schedule.roots) walk(r);
 }
 
+/**
+ * Intervalo das tarefas-folha que têm geometria.
+ * Tarefas sem produto (desenho, compras) não puxam o dia 0 para trás do modelo.
+ */
+export function modelScheduleRange(schedule: ScheduleData): { min: Date; max: Date } | null {
+  let minTime = Number.POSITIVE_INFINITY;
+  let maxTime = Number.NEGATIVE_INFINITY;
+  const visit = (task: Task) => {
+    const linked = task.productGuids.length > 0 || (task.groupIds?.length ?? 0) > 0;
+    if (task.children.length === 0 && !task.isPlanning && linked && task.start && task.end) {
+      minTime = Math.min(minTime, task.start.getTime());
+      maxTime = Math.max(maxTime, task.end.getTime());
+    }
+    for (const child of task.children) visit(child);
+  };
+  for (const root of schedule.roots) visit(root);
+  if (!Number.isFinite(minTime) || !Number.isFinite(maxTime) || minTime > maxTime) return null;
+  return { min: new Date(minTime), max: new Date(maxTime) };
+}
+
 export function getTaskIdsByGuid(schedule: ScheduleData): Map<string, number[]> {
   const rec = schedule as unknown as Record<string, unknown>;
   const cached = rec[TASK_IDS_BY_GUID] as Map<string, number[]> | undefined;

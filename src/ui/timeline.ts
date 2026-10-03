@@ -40,6 +40,8 @@ export class TimelineUI {
   private lastTs = 0;
   /** Dia civil já emitido — no play só dispara onDateChange quando muda. */
   private lastEmittedDay = Number.NaN;
+  /** Play carregado enquanto o cronograma ainda não chegou. */
+  private armPlay = false;
 
   private slider!: HTMLInputElement;
   private playBtn!: HTMLButtonElement;
@@ -60,9 +62,10 @@ export class TimelineUI {
     this.emit(true);
   }
 
-  /** Liga um cronograma novo (IFC importado) e volta ao primeiro dia. */
+  /** Liga um cronograma novo. Se já está a reproduzir, mantém o dia. */
   bindSchedule(schedule: ScheduleData): void {
-    this.pause();
+    const playing = this.isPlaying;
+    const current = new Date(this.startMs + this.currentDay * 86400000);
     this.opts.schedule = schedule;
     this.startMs = schedule.minDate.getTime();
     this.endMs = schedule.maxDate.getTime();
@@ -70,6 +73,13 @@ export class TimelineUI {
     this.slider.max = String(this.totalDays);
     this.rangeStartLabel.textContent = fmtDate(schedule.minDate);
     this.rangeEndLabel.textContent = fmtDate(schedule.maxDate);
+    if (playing) {
+      const day = (current.getTime() - this.startMs) / 86400000;
+      this.currentDay = Math.max(0, Math.min(this.totalDays, day));
+      this.slider.value = String(this.currentDay);
+      this.emit(true);
+      return;
+    }
     this.seek(0);
   }
 
@@ -78,6 +88,10 @@ export class TimelineUI {
     this.opts.container.classList.toggle("is-idle", idle);
     this.opts.container.setAttribute("aria-disabled", idle ? "true" : "false");
     this.slider.disabled = idle;
+    if (!idle && this.armPlay) {
+      this.armPlay = false;
+      this.play();
+    }
   }
 
   get playing(): boolean {
@@ -90,7 +104,15 @@ export class TimelineUI {
   }
 
   togglePlay(): void {
-    if (this.opts.container.classList.contains("is-idle")) return;
+    if (this.opts.container.classList.contains("is-idle")) {
+      this.armPlay = !this.armPlay;
+      this.playBtn.innerHTML = this.armPlay ? ICON_PAUSE : ICON_PLAY;
+      this.playBtn.title = this.armPlay ? "Pausar" : "Reproduzir";
+      this.playBtn.setAttribute("aria-label", this.playBtn.title);
+      this.playBtn.setAttribute("aria-pressed", this.armPlay ? "true" : "false");
+      return;
+    }
+    this.armPlay = false;
     this.isPlaying ? this.pause() : this.play();
   }
 
