@@ -26,6 +26,7 @@ const RESERVED_DOC_IDS = new Set(["TABLE", "SOURCE", "SCHEDULE", "DOCUMENT"]);
 
 export class ModuleWorkspace {
   private rev = 0;
+  private editedGuid = "";
 
   constructor(
     private readonly root: HTMLElement,
@@ -210,7 +211,7 @@ export class ModuleWorkspace {
 
   private async editor(): Promise<string> {
     const selected = this.opts.selectionGuids();
-    const guid = selected[0] ?? "";
+    const guid = selected[0] ?? this.editedGuid;
     const session = guid ? this.opts.sessionForGuid(guid) : this.opts.editSession();
     if (!session) return `<p class="mw-lead">Selecione um elemento no viewport ou abra uma disciplina.</p>`;
     let props = "";
@@ -369,6 +370,7 @@ export class ModuleWorkspace {
         const session = this.opts.sessionForGuid(text("guid"));
         if (!session) throw new Error("Esse GlobalId não está num IFC aberto.");
         await session.upsertProperty(text("guid"), text("pset"), text("prop"), text("value"));
+        this.editedGuid = text("guid");
       } else if (kind === "class") {
         const session = this.opts.sessionForGuid(text("guid"));
         if (!session) throw new Error("Esse GlobalId não está num IFC aberto.");
@@ -377,10 +379,15 @@ export class ModuleWorkspace {
           name: text("name"),
           sourceName: text("source"),
         });
+        this.editedGuid = text("guid");
       } else if (kind === "spatial") {
-        const session = this.opts.sessionForGuid(text("product")) ?? this.opts.sessionForGuid(text("parent"));
-        if (!session) throw new Error("Elemento e contentor têm de estar no mesmo IFC.");
-        await session.moveSpatial(text("product"), text("parent"));
+        const productSession = this.opts.sessionForGuid(text("product"));
+        const parentSession = this.opts.sessionForGuid(text("parent"));
+        if (!productSession || productSession !== parentSession) {
+          throw new Error("Elemento e contentor têm de estar no mesmo IFC.");
+        }
+        await productSession.moveSpatial(text("product"), text("parent"));
+        this.editedGuid = text("product");
       } else if (kind === "search") {
         const session = this.opts.editSession();
         if (!session) throw new Error("Abra uma disciplina para pesquisar.");
