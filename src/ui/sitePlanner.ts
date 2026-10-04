@@ -91,12 +91,18 @@ export class SitePlanner {
 
   placing(): boolean {
     if (this.opts.getWorkspace() !== "site-plan" || !this.toolKey || this.toolKey === "view" || this.toolKey === "slide") return false;
-    if (!this.opts.hasModel()) return true;
+    if (this.toolKey === "terrain" || !this.opts.hasModel()) return true;
     return this.phaseId > 0;
   }
 
   tool(): PlanTool | "" {
     return this.toolKey;
+  }
+
+  /** Liga o corte (ou outra ferramenta) direto na grade, sem mapa. */
+  arm(tool: PlanTool | ""): void {
+    this.toolKey = tool;
+    this.refresh();
   }
 
   phaseTaskId(): number {
@@ -196,7 +202,11 @@ export class SitePlanner {
       }`,
     );
     const placing =
-      active && !!this.toolKey && this.toolKey !== "view" && this.toolKey !== "slide" && (this.phaseId > 0 || !this.opts.hasModel());
+      active &&
+      !!this.toolKey &&
+      this.toolKey !== "view" &&
+      this.toolKey !== "slide" &&
+      (this.toolKey === "terrain" || this.phaseId > 0 || !this.opts.hasModel());
     this.opts.onMode?.(placing);
   }
 

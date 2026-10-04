@@ -539,6 +539,7 @@ async function main() {
   let showPlaceHint: (text: string | null) => void = () => {};
   let syncSiteAssist: () => void = () => {};
   let ensureSiteMap = () => {};
+  let hasMapTilesKey = false;
   const pdfStepName = (): "" | "d1" | "g1" | "d2" | "g2" => {
     if (!pdfAlign) return "";
     if (pdfAlign.pair === 0) return pdfAlign.phase === "sheet" ? "d1" : "g1";
@@ -1648,6 +1649,12 @@ async function main() {
         const tool = sitePlanner?.tool();
         const keepTruckPath = tool === "truck" && planDraft?.kind === "path" && !!planDraft.ownerId;
         if (planDraft && tool !== planDraft.kind && !keepTruckPath) planDraft = null;
+        if (!hasMapTilesKey && btnEarth) {
+          const cut = placing && tool === "terrain";
+          btnEarth.classList.toggle("is-active", cut);
+          btnEarth.setAttribute("aria-pressed", cut ? "true" : "false");
+          btnEarth.title = "Terreno";
+        }
         if (pdfAlign) {
           syncSiteAssist();
           return;
@@ -1878,8 +1885,27 @@ async function main() {
     const placeOnModel = async (e: PointerEvent, canvas: HTMLElement) => {
       if (!siteLayer || !sitePlanner || !highlighter) return;
       const tool = sitePlanner.tool();
-      if (!tool || (models.size > 0 && sitePlanner.phaseTaskId() <= 0)) return;
+      if (!tool || (tool !== "terrain" && models.size > 0 && sitePlanner.phaseTaskId() <= 0)) return;
       try {
+        if (tool === "terrain") {
+          const host =
+            models.disciplines.find((entry) => entry.visible) ?? models.disciplines[0];
+          const extra = host?.session.getExtraTransform() ?? emptyExtraTransform();
+          const point =
+            (host
+              ? siteLayer.groundIfc(viewer.world.camera.three, e, canvas, host.id, extra)
+              : null) ??
+            siteLayer.groundIfc(viewer.world.camera.three, e, canvas, "ground", emptyExtraTransform());
+          if (!point) {
+            showPlaceHint("Clique no chão da grade para marcar o corte.");
+            return;
+          }
+          const id = commitPlanItem(tool, point, host?.id ?? "ground");
+          siteLayer.select(id);
+          sitePlanner.setSelected(id);
+          touchPlan([id]);
+          return;
+        }
         const surface = await highlighter.pickSurface(viewer.world.camera.three, e, canvas);
         const host =
           (surface && models.disciplines.find((entry) => entry.id === surface.modelId)) ||
@@ -2669,7 +2695,8 @@ async function main() {
       altitude: 0,
       heading: 0,
     };
-    const apiKey = (import.meta.env?.VITE_GOOGLE_MAP_TILES_API_KEY as string | undefined) ?? "";
+    const apiKey = ((import.meta.env?.VITE_GOOGLE_MAP_TILES_API_KEY as string | undefined) ?? "").trim();
+    hasMapTilesKey = apiKey.length > 0;
     let earthWanted = false;
     let applyTerrainSnap: (alt: number) => void = () => {};
     let refreshSiteVisual = () => {};
@@ -3156,14 +3183,12 @@ async function main() {
     });
 
     btnEarth?.addEventListener("click", async () => {
-      if (!workspaceHasEarth(nav.getWorkspace())) return;
-      if (!apiKey) {
-        window.alert(
-          "Para ativar a camada Google Earth define a variavel VITE_GOOGLE_MAP_TILES_API_KEY " +
-            "(num arquivo .env na raiz) com a tua chave da Google Map Tiles API e reinicia o dev server.",
-        );
+      if (!hasMapTilesKey) {
+        if (nav.getWorkspace() !== "site-plan") nav.setWorkspace("site-plan");
+        sitePlanner?.arm(sitePlanner.tool() === "terrain" ? "" : "terrain");
         return;
       }
+      if (!workspaceHasEarth(nav.getWorkspace())) return;
       const next = !earth.enabled;
       earthWanted = next;
       try {

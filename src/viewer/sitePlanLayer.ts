@@ -193,7 +193,7 @@ export class SitePlanLayer {
         terrainMesh.userData.fullDepth = Math.max(0.2, terrain.depth);
       }
       if (terrain.id === this.selectedId) this.handles(terrain.id, terrain.contour, origin, true);
-      this.gizmo(terrain.id, "z");
+      this.gizmo(terrain.id, "z", contourCenter(terrain.contour, origin));
       live.add(terrain.id);
     }
     for (const fence of plan.fences) {
@@ -284,9 +284,12 @@ export class SitePlanLayer {
     return best.found;
   }
 
-  /** A alça ganha se o cursor está em cima dela, mesmo com a malha do terreno à frente. */
+  /** O vértice ganha do anel de rotação quando os dois estão sob o cursor. */
   private grabHandle(camera: THREE.Camera, event: PointerEvent | MouseEvent, rect: DOMRect): SiteHit | null {
-    const best: { dist: number; found: SiteHit | null } = { dist: Number.POSITIVE_INFINITY, found: null };
+    const best: { point: { dist: number; found: SiteHit } | null; spin: { dist: number; found: SiteHit } | null } = {
+      point: null,
+      spin: null,
+    };
     const world = new THREE.Vector3();
     for (const mesh of this.meshes.values()) {
       mesh.traverse((obj) => {
@@ -298,14 +301,18 @@ export class SitePlanLayer {
         const y = rect.top + (-clip.y * 0.5 + 0.5) * rect.height;
         const dist = Math.hypot(event.clientX - x, event.clientY - y);
         const reach = obj.name === "resize" ? 72 : 52;
-        if (dist > reach || dist >= best.dist) return;
+        if (dist > reach) return;
         const found = this.hitFromObject(obj);
         if (!found) return;
-        best.dist = dist;
-        best.found = found;
+        const corner = obj.name.startsWith("vertex-") || obj.name.startsWith("edge-") || obj.name === "resize" || obj.name === "scale";
+        if (corner) {
+          if (!best.point || dist < best.point.dist) best.point = { dist, found };
+        } else if (!best.spin || dist < best.spin.dist) {
+          best.spin = { dist, found };
+        }
       });
     }
-    return best.found;
+    return best.point?.found ?? best.spin?.found ?? null;
   }
 
   private hitFromObject(object: THREE.Object3D): SiteHit | null {
@@ -640,7 +647,7 @@ export class SitePlanLayer {
     cable.scale.y = Math.max(0.4, hook);
   }
 
-  private gizmo(id: string, axes: "xyz" | "z"): void {
+  private gizmo(id: string, axes: "xyz" | "z", local?: THREE.Vector3): void {
     const root = this.meshes.get(id);
     if (!root || id !== this.selectedId) {
       root?.getObjectByName("gizmo")?.removeFromParent();
@@ -651,6 +658,7 @@ export class SitePlanLayer {
     gizmo = new THREE.Group();
     gizmo.name = "gizmo";
     gizmo.userData.ui = true;
+    if (local) gizmo.position.copy(local);
     const radius = 3.2;
     if (axes === "xyz") {
       gizmo.add(disc("axis-x", 0xc23b3b, radius, "x"));
@@ -930,6 +938,18 @@ function blankSheet(width: number, height: number, opacity: number, color: strin
   frame.userData.ui = true;
   mesh.add(frame);
   return mesh;
+}
+
+function contourCenter(points: PlanPoint[], origin: PlanPoint): THREE.Vector3 {
+  const base = ifcToThreePoint(origin);
+  const acc = new THREE.Vector3();
+  for (const point of points) {
+    const at = ifcToThreePoint(point);
+    acc.x += at.x - base.x;
+    acc.z += at.z - base.z;
+  }
+  const count = Math.max(1, points.length);
+  return new THREE.Vector3(acc.x / count, 1.6, acc.z / count);
 }
 
 function handleName(name: string): boolean {
