@@ -295,6 +295,99 @@ export function planIsEmpty(plan: SitePlan): boolean {
   );
 }
 
+export interface PlanFootprint {
+  minX: number;
+  minY: number;
+  minZ: number;
+  maxX: number;
+  maxY: number;
+  maxZ: number;
+}
+
+/**
+ * Canteiro visível quando o plano ainda está vazio.
+ * Fica no pacote, não no IFC: guindaste com cabo, caminho e camião ao lado do modelo.
+ */
+export function seedStarterLogistics(
+  plan: SitePlan,
+  footprint: PlanFootprint,
+  modelId: string,
+  range: { start: Date; end: Date },
+): boolean {
+  if (!planIsEmpty(plan)) return false;
+  const spanX = Math.max(footprint.maxX - footprint.minX, 1);
+  const ground = footprint.minZ;
+  const start = range.start instanceof Date && !Number.isNaN(range.start.getTime()) ? range.start : new Date();
+  const end =
+    range.end instanceof Date && range.end.getTime() > start.getTime()
+      ? range.end
+      : new Date(start.getTime() + 86_400_000);
+  const line = addPlanningLine(plan, "Logística", start, end);
+  plan.cranes.push({
+    id: newPlanId(),
+    catalogId: "tower-crane",
+    modelId,
+    x: footprint.minX - 2,
+    y: footprint.minY + Math.min((footprint.maxY - footprint.minY) * 0.35, 8),
+    z: ground,
+    yaw: 0,
+    rx: 0,
+    ry: 0,
+    rz: 0,
+    mastHeight: DEFAULT_MAST_HEIGHT,
+    jibLength: DEFAULT_JIB_LENGTH,
+    hook: 8,
+    counterJib: DEFAULT_COUNTER_JIB,
+    swing: DEFAULT_SWING,
+    color: "#f0b429",
+    lineId: line.id,
+  });
+  const pathId = newPlanId();
+  plan.paths.push({
+    id: pathId,
+    modelId,
+    color: "#243038",
+    lineId: line.id,
+    points: [
+      { x: footprint.minX, y: footprint.minY - 4, z: ground },
+      { x: footprint.maxX + Math.max(0, 14 - spanX), y: footprint.minY - 4, z: ground },
+    ],
+  });
+  plan.trucks.push({
+    id: newPlanId(),
+    catalogId: "dump-truck",
+    modelId,
+    x: footprint.minX,
+    y: footprint.minY - 4,
+    z: ground,
+    yaw: 0,
+    rx: 0,
+    ry: 0,
+    rz: 0,
+    pathId,
+    duration: DEFAULT_TRIP_SECONDS,
+    color: "#f0b429",
+    lineId: line.id,
+  });
+  return true;
+}
+
+/** Texto do corte. O volume e o talude entram assim que há polígono, e ficam depois de fechar. */
+export function cutStatus(terrain: PlanTerrain): string {
+  const count = terrain.contour.length;
+  const op = terrain.operation === "cut" ? "Corte" : "Aterro";
+  if (count >= 3) {
+    const text = `${op} ${ptMeasure(cutVolume(terrain))} m³ · talude ${ptMeasure(terrain.slope)}°`;
+    return terrain.closed === false ? `${text}. Enter fecha.` : text;
+  }
+  const points = count === 1 ? "ponto" : "pontos";
+  return `Corte aberto · ${count} ${points}. Enter fecha.`;
+}
+
+function ptMeasure(value: number): string {
+  return trimMeasure(value).replace(".", ",");
+}
+
 export function isoDate(date: Date): string {
   const y = date.getFullYear();
   const m = String(date.getMonth() + 1).padStart(2, "0");
@@ -362,7 +455,7 @@ export function measuresForPhase(
     rows.push({
       id: terrain.id,
       name: "Terreno",
-      measure: `${op} ${trimMeasure(cutVolume(terrain))} m³`,
+      measure: `${op} ${ptMeasure(cutVolume(terrain))} m³`,
     });
   }
   for (const fence of plan.fences) {

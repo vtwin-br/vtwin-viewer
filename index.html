@@ -277,6 +277,14 @@
 
               <div id="viewport" class="viewport-canvas"></div>
               <p id="link-mode-hint" class="link-mode-hint" hidden></p>
+              <div id="site-assist" class="site-assist" hidden>
+                <p data-assist-step>Escolha a folha. Depois marque dois pontos no desenho e os mesmos dois no modelo.</p>
+                <label class="site-assist-opacity">Opacidade
+                  <input type="range" min="5" max="100" step="1" value="55" data-assist-opacity />
+                  <em data-opacity-read>55%</em>
+                </label>
+                <button type="button" data-assist-pick>Escolher folha</button>
+              </div>
               <div id="walk-overlay" class="walk-overlay" hidden>
                 <div class="walk-crosshair" aria-hidden="true"></div>
                 <p class="walk-hint" id="walk-hint">WASD · Esc · V</p>

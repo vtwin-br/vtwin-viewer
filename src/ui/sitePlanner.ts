@@ -1,5 +1,5 @@
 import type { WorkspaceId } from "../app/catalog";
-import { cutVolume, measuresForPhase, pathLength, poseOf, type SitePlan } from "../planning/sitePlan";
+import { cutStatus, measuresForPhase, pathLength, poseOf, type SitePlan } from "../planning/sitePlan";
 import type { MarkupDoc, MarkupItem, PdfOverlay, SlideShot, ViewerSidecar } from "../project/viewerPack";
 import { sitePhases } from "../site/phases";
 import type { ScheduleData } from "../schedule/types";
@@ -117,6 +117,16 @@ export class SitePlanner {
     this.refresh();
   }
 
+  selected(): string {
+    return this.selectedId;
+  }
+
+  pickPdf(): void {
+    this.toolKey = "pdf";
+    this.pdfInput.click();
+    this.refresh();
+  }
+
   refresh(): void {
     const active = this.opts.getWorkspace() === "site-plan";
     this.root.hidden = !active;
@@ -135,9 +145,30 @@ export class SitePlanner {
     const kind = kindOf(plan, side, selected);
     this.root.innerHTML = "";
     this.root.append(this.pdfInput);
+    const placed = [...rows, ...slideRows(side)];
+    const editing = kind
+      ? contextBlock(kind, selected, plan, side, this.pdfStep)
+      : this.toolKey === "view"
+        ? cameraBlock(side)
+        : this.toolKey === "slide"
+          ? slideBlock(side)
+          : this.toolKey === "pdf"
+            ? pdfGuide()
+            : "";
     this.root.insertAdjacentHTML(
       "beforeend",
-      `<div class="site-library" role="listbox" aria-label="Planejamento">
+      `${editing}
+      ${
+        placed.length
+          ? `<p class="site-kicker">No canteiro</p><ul class="site-quantities">${placed
+              .map(
+                (line) =>
+                  `<li><button type="button" class="site-line${line.id === selected ? " is-on" : ""}" data-act="item" data-id="${escapeHtml(line.id)}"><span>${escapeHtml(line.name)}</span>${line.measure ? `<span class="site-qty">${escapeHtml(line.measure)}</span>` : ""}</button></li>`,
+              )
+              .join("")}</ul>`
+          : ""
+      }
+      <div class="site-library" role="listbox" aria-label="Planejamento">
         ${TOOLS.map((item) => piece(item.key, item.name, this.toolKey === item.key || (item.key === "pin" && this.notesOpen))).join("")}
       </div>
       ${
@@ -162,25 +193,6 @@ export class SitePlanner {
               )
               .join("")}</div>`
           : ""
-      }
-      ${
-        kind
-          ? contextBlock(kind, selected, plan, side, this.pdfStep)
-          : this.toolKey === "view"
-            ? cameraBlock(side)
-            : this.toolKey === "slide"
-              ? slideBlock(side)
-              : ""
-      }
-      ${
-        [...rows, ...slideRows(side)].length
-          ? `<ul class="site-quantities">${[...rows, ...slideRows(side)]
-              .map(
-                (line) =>
-                  `<li><button type="button" class="site-line${line.id === selected ? " is-on" : ""}" data-act="item" data-id="${escapeHtml(line.id)}"><span>${escapeHtml(line.name)}</span>${line.measure ? `<span class="site-qty">${escapeHtml(line.measure)}</span>` : ""}</button></li>`,
-              )
-              .join("")}</ul>`
-          : ""
       }`,
     );
     const placing =
@@ -194,6 +206,10 @@ export class SitePlanner {
       if (this.notesOpen && !NOTE_TOOLS.includes(this.toolKey as PlanTool)) this.toolKey = "pin";
       if (!this.notesOpen && NOTE_TOOLS.includes(this.toolKey as PlanTool)) this.toolKey = "";
       this.refresh();
+      return;
+    }
+    if (act === "pdf-pick") {
+      this.pickPdf();
       return;
     }
     if (act === "tool") {
@@ -406,11 +422,7 @@ function terrainContext(plan: SitePlan, id: string): string {
   const terrain = plan.terrains.find((item) => item.id === id);
   if (!terrain) return "";
   const cut = terrain.operation === "cut";
-  const volume =
-    terrain.contour.length < 3
-      ? `Polilinha · ${terrain.contour.length} ${terrain.contour.length === 1 ? "vértice" : "vértices"} · Enter fecha com 3`
-      : `${terrain.operation === "cut" ? "Corte" : "Aterro"} ${trim(cutVolume(terrain))} m³ · talude ${trim(terrain.slope)}°`;
-  return `<p class="site-read site-volume" data-volume="cut">${volume}</p>
+  return `<p class="site-read site-volume" data-volume="cut">${escapeHtml(cutStatus(terrain))}</p>
     <div class="site-inline">
       <button type="button" class="site-chip${cut ? " is-on" : ""}" data-act="cut">Corte</button>
       <button type="button" class="site-chip${cut ? "" : " is-on"}" data-act="fill">Aterro</button>
@@ -421,7 +433,7 @@ function terrainContext(plan: SitePlan, id: string): string {
     ${colorField(terrain.slopeColor || "#c4a882", "slopeColor", "Talude")}
     ${rotFields(0, 0, terrain.rz ?? 0, "z")}
     ${lineFields(plan, terrain.lineId)}
-    ${terrain.closed === false ? `<button type="button" class="site-chip is-on" data-act="close">Fechar polilinha</button>` : ""}
+    ${terrain.closed === false ? `<button type="button" class="site-chip is-on" data-act="close">Fechar corte</button>` : ""}
     <button type="button" class="site-chip" data-act="vertex-pop">Vértice</button>
     ${removeButton()}`;
 }
@@ -507,14 +519,26 @@ function markupContext(item: MarkupItem | undefined): string {
 
 const PDF_STEP: Record<string, string> = {
   d1: "1. Clique um ponto no desenho.",
-  g1: "2. Clique o mesmo ponto no terreno.",
+  g1: "2. Clique o mesmo ponto no modelo.",
   d2: "3. Clique o segundo ponto no desenho.",
-  g2: "4. Clique o segundo ponto no terreno.",
+  g2: "4. Clique o segundo ponto no modelo.",
 };
+
+function pdfGuide(): string {
+  return `<section class="site-context" data-context="pdf"><h3>PDF</h3>
+    <ol class="site-steps">
+      <li>Escolher a folha</li>
+      <li>Dois pontos no desenho</li>
+      <li>Os mesmos dois no modelo</li>
+    </ol>
+    <button type="button" class="site-chip is-on" data-act="pdf-pick">Escolher folha</button>
+    <p class="site-read">A opacidade fica no cartão sobre a vista.</p>
+  </section>`;
+}
 
 function pdfContext(pdf: PdfOverlay | undefined, step: string): string {
   if (!pdf) return "";
-  const line = PDF_STEP[step] ?? "Alinhe com dois pontos no desenho e os mesmos dois no terreno.";
+  const line = PDF_STEP[step] ?? "Dois pontos no desenho e os mesmos dois no modelo.";
   const opacity = Math.round(pdf.opacity * 100);
   return `${numField("sheet", "Folha", pdf.sheet + 1, "")}
     <label class="site-field"><span>Opacidade</span><input type="range" min="5" max="100" step="1" data-field="opacity" value="${opacity}" /><em data-opacity-read>${opacity}%</em></label>

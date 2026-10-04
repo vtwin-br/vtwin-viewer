@@ -12,7 +12,7 @@ import { SimHud } from "./ui/simHud";
 import { GoogleEarthLayer, type AnchorLLA } from "./viewer/earthTiles";
 import { EarthPanel } from "./ui/earthPanel";
 import { ModelGizmo, type GizmoMode } from "./viewer/modelGizmo";
-import { emptyExtraTransform, extraIsIdentity, extraFromObject, applyExtraToObject, georefSourceLabel, hasGeographicAnchor, hasStoredSiteElevation, threeWorldToIfc } from "./ifc/georef";
+import { emptyExtraTransform, extraIsIdentity, extraFromObject, applyExtraToObject, georefSourceLabel, hasGeographicAnchor, hasStoredSiteElevation, threeWorldToIfc, type ModelExtraTransform } from "./ifc/georef";
 import { initPanelSplitters, constrainPanelWidths } from "./ui/splitters";
 import { initModuleNav } from "./ui/moduleNav";
 import { initAppShell } from "./ui/appShell";
@@ -36,16 +36,18 @@ import {
   DEFAULT_TERRAIN_DEPTH,
   DEFAULT_TERRAIN_SLOPE,
   DEFAULT_TRIP_SECONDS,
+  cutStatus,
   emptySitePlan,
   importLegacyAssets,
   newPlanId,
-  cutVolume,
   overlaySitePlan,
   parseIsoDate,
   planIsEmpty,
   poseOf,
   removePlanItem,
+  seedStarterLogistics,
   setLineDates,
+  type PlanFootprint,
   type PlanPoint,
   type SitePlan,
 } from "./planning/sitePlan";
@@ -97,6 +99,54 @@ import { requestFragmentsUpdate } from "./viewer/fragmentsUpdate";
 import { ViewportModelRegistry } from "./viewer/modelRegistry";
 
 const WASM_URL = "/wasm/";
+
+/** Caixa do modelo em coordenadas IFC, sem o canteiro já desenhado por cima. */
+function modelFootprint(object: THREE.Object3D, extra: ModelExtraTransform): PlanFootprint | null {
+  object.updateWorldMatrix(true, true);
+  const box = new THREE.Box3();
+  const tmp = new THREE.Box3();
+  object.traverse((child) => {
+    let node: THREE.Object3D | null = child;
+    while (node) {
+      if (node.name === "site-plan") return;
+      node = node.parent;
+    }
+    const mesh = child as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox();
+    const local = mesh.geometry.boundingBox;
+    if (!local || local.isEmpty()) return;
+    tmp.copy(local).applyMatrix4(mesh.matrixWorld);
+    if (!tmp.isEmpty()) box.union(tmp);
+  });
+  if (box.isEmpty()) {
+    const whole = new THREE.Box3().setFromObject(object);
+    if (!whole.isEmpty()) box.copy(whole);
+  }
+  if (box.isEmpty()) return null;
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const x of [box.min.x, box.max.x]) {
+    for (const y of [box.min.y, box.max.y]) {
+      for (const z of [box.min.z, box.max.z]) {
+        const ifc = threeWorldToIfc({ x, y, z }, extra);
+        minX = Math.min(minX, ifc.x);
+        minY = Math.min(minY, ifc.y);
+        minZ = Math.min(minZ, ifc.z);
+        maxX = Math.max(maxX, ifc.x);
+        maxY = Math.max(maxY, ifc.y);
+        maxZ = Math.max(maxZ, ifc.z);
+      }
+    }
+  }
+  if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return null;
+  if (maxX - minX < 0.2 && maxY - minY < 0.2) return null;
+  return { minX, minY, minZ, maxX, maxY, maxZ };
+}
 
 function showEarthStatus(message: string | null): void {
   let el = document.getElementById("earth-status");
@@ -446,6 +496,7 @@ async function main() {
   let refreshSitePlanner = () => {};
   let siteLayer: SitePlanLayer | null = null;
   let sitePlan: SitePlan = emptySitePlan();
+  let siteFootprint: PlanFootprint | null = null;
   let sidecar: ViewerSidecar = emptySidecar();
   let planDirty = false;
   let pendingPdf: { name: string; pdf: string } | null = null;
@@ -486,6 +537,7 @@ async function main() {
   let renderModelLayers = () => {};
   let refitVisibleModels = () => {};
   let showPlaceHint: (text: string | null) => void = () => {};
+  let syncSiteAssist: () => void = () => {};
   let ensureSiteMap = () => {};
   const pdfStepName = (): "" | "d1" | "g1" | "d2" | "g2" => {
     if (!pdfAlign) return "";
@@ -496,24 +548,21 @@ async function main() {
     const rounded = Math.round(value * 10) / 10;
     return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
   };
-  const publishTerrainHint = () => {
-    const terrain =
+  const activeTerrain = () => {
+    const drafted =
       planDraft?.kind === "terrain" ? sitePlan.terrains.find((item) => item.id === planDraft?.id) : undefined;
+    if (drafted) return drafted;
+    const selected = sitePlan.terrains.find((item) => item.id === sitePlanner?.selected());
+    if (selected) return selected;
+    return sitePlan.terrains.find((item) => item.contour.length >= 3);
+  };
+  const publishTerrainHint = () => {
+    const terrain = activeTerrain();
     if (!terrain || terrain.contour.length === 0) {
-      const finished = sitePlan.terrains.some((item) => item.contour.length >= 3 && item.closed !== false);
-      showPlaceHint(finished ? null : "Clique no chão para a polilinha de corte.");
+      showPlaceHint(sitePlanner?.tool() === "terrain" ? "Clique no chão para marcar o corte." : null);
       return;
     }
-    if (terrain.closed !== false && terrain.contour.length >= 3) {
-      showPlaceHint(null);
-      return;
-    }
-    if (terrain.contour.length < 3) {
-      showPlaceHint(`${terrain.contour.length} vértices. O volume aparece ao terceiro.`);
-      return;
-    }
-    const op = terrain.operation === "cut" ? "Corte" : "Aterro";
-    showPlaceHint(`${op} ${measureText(cutVolume(terrain))} m³. Enter fecha a polilinha.`);
+    showPlaceHint(cutStatus(terrain));
   };
   const publishPdfStep = () => {
     const step = pdfStepName();
@@ -522,13 +571,14 @@ async function main() {
       step === "d1"
         ? "1. Clique um ponto no desenho."
         : step === "g1"
-          ? "2. Clique o mesmo ponto no terreno."
+          ? "2. Clique o mesmo ponto no modelo."
           : step === "d2"
             ? "3. Clique o segundo ponto no desenho."
             : step === "g2"
-              ? "4. Clique o segundo ponto no terreno."
+              ? "4. Clique o segundo ponto no modelo."
               : null,
     );
+    syncSiteAssist();
   };
 
   const syncWorkspaceChrome = (id: WorkspaceId) => {
@@ -632,6 +682,7 @@ async function main() {
     refreshModuleWorkspace(id);
     refreshSitePlanner();
     refreshLayoutRestore();
+    syncSiteAssist();
     requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   };
 
@@ -1439,8 +1490,13 @@ async function main() {
         pours: sidecar.pours.items,
         pourTimes: pourTimes(),
       });
-      const read = document.querySelector<HTMLElement>("[data-opacity-read]");
-      if (read) read.textContent = `${Math.round(pdf.opacity * 100)}%`;
+      const shown = String(Math.round(pdf.opacity * 100));
+      document.querySelectorAll<HTMLElement>("[data-opacity-read]").forEach((node) => {
+        node.textContent = `${shown}%`;
+      });
+      document.querySelectorAll<HTMLInputElement>("[data-field='opacity'], [data-assist-opacity]").forEach((input) => {
+        if (document.activeElement !== input) input.value = shown;
+      });
       return;
     }
     else if (pdf && field === "color") pdf.color = value;
@@ -1451,6 +1507,8 @@ async function main() {
       slide.comment = value;
     } else return;
     touchPlan([id]);
+    const touchedCut = sitePlan.terrains.find((item) => item.id === id);
+    if (touchedCut && (field === "slope" || field === "depth")) showPlaceHint(cutStatus(touchedCut));
   };
 
   const itemTime = (lineId?: string) => {
@@ -1544,8 +1602,10 @@ async function main() {
       return;
     } else if (action === "camera-save") {
       saveCamera();
-    } else return;
+    }     else return;
     touchPlan(id ? [id] : []);
+    const closedCut = sitePlan.terrains.find((item) => item.id === id);
+    if (closedCut && (action === "close" || action === "cut" || action === "fill")) showPlaceHint(cutStatus(closedCut));
   };
 
   const saveCamera = () => {
@@ -1588,13 +1648,17 @@ async function main() {
         const tool = sitePlanner?.tool();
         const keepTruckPath = tool === "truck" && planDraft?.kind === "path" && !!planDraft.ownerId;
         if (planDraft && tool !== planDraft.kind && !keepTruckPath) planDraft = null;
-        if (pdfAlign) return;
+        if (pdfAlign) {
+          syncSiteAssist();
+          return;
+        }
         if (tool === "truck") showPlaceHint("Clique no chão para pousar o camião e desenhar o caminho.");
         else if (tool === "terrain") publishTerrainHint();
         else if (tool === "box" || tool === "balloon") showPlaceHint("Clique no chão. Arraste a alça para redimensionar.");
         else if (tool === "hatch" || tool === "polygon") showPlaceHint("Clique no chão. Arraste os vértices ou a alça.");
-        else if (pendingPdf) showPlaceHint("Clique no terreno para pousar o PDF.");
+        else if (tool === "pdf") showPlaceHint("Escolha a folha. Depois marque dois pontos no desenho e os mesmos dois no modelo.");
         else showPlaceHint(null);
+        syncSiteAssist();
       },
       onSelect: (id) => siteLayer?.select(id),
       onField: (event) => applyField(event),
@@ -1624,7 +1688,29 @@ async function main() {
         }
         void file.arrayBuffer().then((buffer) => {
           pendingPdf = { name: file.name.replace(/\.pdf$/i, ""), pdf: bytesToBase64(new Uint8Array(buffer)) };
-          showPlaceHint("Clique no terreno para pousar o PDF.");
+          const host = models.disciplines.find((entry) => entry.visible) ?? models.disciplines[0];
+          const object = host ? viewportModels.get(host.id)?.object : undefined;
+          const foot = object ? modelFootprint(object, host!.session.getExtraTransform()) : siteFootprint;
+          if (foot) siteFootprint = foot;
+          const span = foot ? Math.max(foot.maxX - foot.minX, foot.maxY - foot.minY, 8) : 18;
+          const width = Math.max(8, Math.min(36, span * 0.85));
+          const origin = foot ? { x: foot.maxX + 2, y: foot.minY, z: foot.minZ } : { x: 0, y: 0, z: 0 };
+          const id = commitPlanItem("pdf", origin, host?.id ?? "ground");
+          const pdf = sidecar.markups.pdfs.find((item) => item.id === id);
+          if (pdf) {
+            pdf.width = width;
+            pdf.opacity = 0.55;
+          }
+          if (id) {
+            pdfAlign = { id, pair: 0, phase: "sheet" };
+            siteLayer?.select(id);
+            sitePlanner?.setSelected(id);
+            touchPlan([id]);
+            publishPdfStep();
+          } else {
+            showPlaceHint("Escolha a folha. Depois marque dois pontos no desenho e os mesmos dois no modelo.");
+            syncSiteAssist();
+          }
         });
       },
     });
@@ -1841,17 +1927,14 @@ async function main() {
     };
     const paintCut = (id: string) => {
       const terrain = sitePlan.terrains.find((item) => item.id === id);
-      if (!terrain || terrain.contour.length < 3) return;
-      const op = terrain.operation === "cut" ? "Corte" : "Aterro";
-      const text = `${op} ${formatMeasure(cutVolume(terrain))} m³ · talude ${formatMeasure(terrain.slope)}°`;
+      if (!terrain) return;
+      const text = cutStatus(terrain);
       document.querySelectorAll("[data-volume='cut']").forEach((node) => {
         node.textContent = text;
       });
       const qty = document.querySelector(`.site-line[data-id="${CSS.escape(id)}"] .site-qty`);
       if (qty) qty.textContent = text;
-      if (planDraft?.id === id && terrain.closed === false) {
-        showPlaceHint(`${op} ${formatMeasure(cutVolume(terrain))} m³. Enter fecha a polilinha.`);
-      }
+      showPlaceHint(text);
     };
     const syncDrag = () => {
       siteLayer?.sync(sitePlan, {
@@ -1968,6 +2051,8 @@ async function main() {
       const id = siteDrag.hit.id;
       siteDrag = null;
       touchPlan([id]);
+      const draggedCut = sitePlan.terrains.find((item) => item.id === id);
+      if (draggedCut) showPlaceHint(cutStatus(draggedCut));
       if (e.button === 0) pickDown = null;
     });
     viewportEl.addEventListener("pointerup", (e) => {
@@ -2852,6 +2937,48 @@ async function main() {
       drawHint.textContent = text;
     };
     showPlaceHint = setDrawHint;
+    const assistEl = document.getElementById("site-assist");
+    const assistStep = assistEl?.querySelector<HTMLElement>("[data-assist-step]");
+    const assistOpacity = assistEl?.querySelector<HTMLInputElement>("[data-assist-opacity]");
+    const assistPick = assistEl?.querySelector<HTMLButtonElement>("[data-assist-pick]");
+    const assistPdf = () => {
+      const id = pdfAlign?.id || sitePlanner?.selected() || "";
+      return sidecar.markups.pdfs.find((item) => item.id === id) ?? null;
+    };
+    syncSiteAssist = () => {
+      if (!assistEl) return;
+      const onSite = nav.getWorkspace() === "site-plan";
+      const tool = sitePlanner?.tool();
+      const pdf = assistPdf();
+      const show = onSite && (tool === "pdf" || !!pdfAlign || !!pdf);
+      assistEl.hidden = !show;
+      if (!show || !assistStep) return;
+      const step = pdfStepName();
+      assistStep.textContent = step
+        ? step === "d1"
+          ? "1. Clique um ponto no desenho."
+          : step === "g1"
+            ? "2. Clique o mesmo ponto no modelo."
+            : step === "d2"
+              ? "3. Clique o segundo ponto no desenho."
+              : "4. Clique o segundo ponto no modelo."
+        : pdf
+          ? "A folha está no modelo. A opacidade deixa ver o que está por baixo."
+          : "Escolha a folha. Depois marque dois pontos no desenho e os mesmos dois no modelo.";
+      if (assistOpacity && document.activeElement !== assistOpacity) {
+        assistOpacity.disabled = !pdf;
+        assistOpacity.value = String(Math.round((pdf?.opacity ?? 0.55) * 100));
+      }
+      const read = assistEl.querySelector<HTMLElement>("[data-opacity-read]");
+      if (read) read.textContent = `${assistOpacity?.value ?? "55"}%`;
+      if (assistPick) assistPick.hidden = !!pdfAlign;
+    };
+    assistPick?.addEventListener("click", () => sitePlanner?.pickPdf());
+    assistOpacity?.addEventListener("input", () => {
+      const pdf = assistPdf();
+      if (!pdf || !assistOpacity) return;
+      applyField({ id: pdf.id, field: "opacity", value: assistOpacity.value });
+    });
 
     const refreshSiteVisualNow = (draft?: import("three").Vector3[], skipUi = false) => {
       const planning = models.coordination?.session ?? models.active?.session;
@@ -3328,6 +3455,21 @@ async function main() {
       viewportModels.attach(entry.id, ingested.model);
       applyExtraToObject(ingested.model.object, ingested.session.getExtraTransform());
       siteLayer?.bind(entry.id, ingested.model.object);
+      if (ingested.first && planIsEmpty(sitePlan)) {
+        try {
+          const foot = modelFootprint(ingested.model.object, ingested.session.getExtraTransform());
+          if (foot) {
+            siteFootprint = foot;
+            const span = modelScheduleRange(ingested.schedule);
+            seedStarterLogistics(sitePlan, foot, entry.id, {
+              start: span?.min ?? ingested.schedule.minDate,
+              end: span?.max ?? ingested.schedule.maxDate,
+            });
+          }
+        } catch (err) {
+          console.warn("Logística inicial:", err);
+        }
+      }
       setStatus(entry.displayName);
       if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
       await highlighter.addModel(entry.id, ingested.model, collectAllGuids(models.mergedSchedule()));
@@ -3803,6 +3945,8 @@ async function main() {
           const id = planDraft.id;
           planDraft = null;
           touchPlan([id]);
+          const closedCut = sitePlan.terrains.find((item) => item.id === id);
+          if (closedCut) showPlaceHint(cutStatus(closedCut));
         }
         return;
       }

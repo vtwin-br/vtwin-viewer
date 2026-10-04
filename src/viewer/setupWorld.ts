@@ -243,6 +243,11 @@ export async function fitCameraToVisibleModels(
     if (skip.has(id) || model.object.visible === false) continue;
     const box = await geometryWorldBox(model);
     if (box) boxes.push(box);
+    const site = model.object.getObjectByName("site-plan");
+    if (site && site.children.length) {
+      const siteBox = new THREE.Box3().setFromObject(site);
+      if (boxIsUseful(siteBox)) boxes.push(siteBox);
+    }
   }
   const merged = mergeNearbyBoxes(boxes);
   if (!merged) return;

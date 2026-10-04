@@ -14,10 +14,12 @@ import {
   DEFAULT_MAST_HEIGHT,
   DEFAULT_TERRAIN_DEPTH,
   DEFAULT_TERRAIN_SLOPE,
+  cutStatus,
   emptySitePlan,
   parseIsoDate,
   parseSitePlan,
   pathLength,
+  seedStarterLogistics,
   sitePlanToJson,
 } from "../src/planning/sitePlan";
 import { excavationVolume, offsetPolygon } from "../src/planning/polygon";
@@ -530,6 +532,61 @@ const frame = frameFromPairs(
   1,
 );
 if (!frame || Math.abs(frame.width - 10) > 1e-6 || Math.abs(frame.yaw) > 1e-6) throw new Error("O alinhamento do PDF falhou.");
+const starter = emptySitePlan();
+const footprint = { minX: 0, minY: 0, minZ: 0, maxX: 20, maxY: 12, maxZ: 8 };
+if (!seedStarterLogistics(starter, footprint, "modelo", { start: new Date(2023, 0, 2), end: new Date(2023, 5, 30) })) {
+  throw new Error("A logística inicial não entrou no plano.");
+}
+if (seedStarterLogistics(starter, footprint, "modelo", { start: new Date(2023, 0, 2), end: new Date(2023, 5, 30) })) {
+  throw new Error("A logística inicial duplicou.");
+}
+const starterAgain = parseSitePlan(sitePlanToJson(starter));
+if (starterAgain.cranes.length !== 1 || starterAgain.trucks.length !== 1 || starterAgain.paths[0]?.points.length !== 2) {
+  throw new Error("A logística inicial não voltou do pacote.");
+}
+if ((starterAgain.cranes[0]?.hook ?? 0) < 4) throw new Error("O cabo do guindaste não ficou visível.");
+if ((starterAgain.cranes[0]?.x ?? 0) >= footprint.minX) throw new Error("O guindaste não ficou ao lado do modelo.");
+const starterMotion = motionsAt(starterAgain, emptySidecar().keyframes, parseIsoDate("2023-04-01"), null, {
+  playing: true,
+  seconds: 1,
+  preview: false,
+});
+const starterCrane = starterMotion.find((pose) => pose.id === starterAgain.cranes[0]?.id);
+const starterTruck = starterMotion.find((pose) => pose.id === starterAgain.trucks[0]?.id);
+if (starterCrane?.hook == null || starterCrane.slew == null) throw new Error("O guindaste inicial não segue o dia.");
+if (!starterTruck?.at) throw new Error("O camião inicial não segue o caminho.");
+const openCut = {
+  id: "corte",
+  contour: [
+    { x: 0, y: 0, z: 0 },
+    { x: 8, y: 0, z: 0 },
+  ],
+  operation: "cut" as const,
+  depth: 1.5,
+  slope: 45,
+  closed: false,
+};
+const openLabel = cutStatus(openCut);
+if (/poli/i.test(openLabel) || /terceiro/i.test(openLabel)) throw new Error("O texto do corte continua errado.");
+if (!openLabel.includes("Enter fecha")) throw new Error("O corte aberto não diz como fechar.");
+const closedCut = {
+  ...openCut,
+  contour: [
+    { x: 0, y: 0, z: 0 },
+    { x: 10, y: 0, z: 0 },
+    { x: 10, y: 10, z: 0 },
+    { x: 0, y: 10, z: 0 },
+  ],
+  closed: true,
+};
+const closedLabel = cutStatus(closedCut);
+if (!closedLabel.includes("m³") || !closedLabel.includes("talude")) throw new Error("O corte fechado não mostra volume e talude.");
+const dragged = {
+  ...closedCut,
+  contour: closedCut.contour.map((point) => ({ ...point })),
+};
+dragged.contour[2] = { x: 10, y: 16, z: 0 };
+if (cutStatus(dragged) === closedLabel) throw new Error("O volume não mudou ao arrastar o vértice.");
 const sampled = sampleKeys(
   [
     { t: 0, pathT: 0 },
