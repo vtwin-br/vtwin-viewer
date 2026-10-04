@@ -112,17 +112,16 @@ export function motionsAt(
     const keys = trackOf(crane.id)?.keys ?? [];
     const sample = sampleKeys(keys, atTime(crane.lineId));
     const keyed = (field: "rz" | "hook") => keys.some((key) => key[field] != null);
+    const fraction = clock?.preview ? 0 : atTime(crane.lineId);
     let hook = sample?.hook ?? crane.hook ?? 4;
     let slew = 0;
-    if (clock?.playing) {
-      if (!keyed("rz")) {
-        const sweep = ((crane.swing ?? DEFAULT_SWING) * Math.PI) / 180;
-        slew = Math.sin(clock.seconds * 0.45) * Math.min(Math.PI, sweep * 0.5);
-      }
-      if (!keyed("hook")) {
-        const restHook = crane.hook ?? 4;
-        hook = Math.max(0.8, restHook * (0.42 + 0.58 * Math.abs(Math.sin(clock.seconds * 0.9))));
-      }
+    if (!keyed("rz")) {
+      const sweep = ((crane.swing ?? DEFAULT_SWING) * Math.PI) / 180;
+      slew = Math.sin(fraction * Math.PI) * Math.min(Math.PI, sweep * 0.5);
+    }
+    if (!keyed("hook")) {
+      const restHook = crane.hook ?? 4;
+      hook = clock?.preview ? restHook : Math.max(0.8, restHook * (0.45 + 0.55 * fraction));
     }
     poses.push({
       id: crane.id,
@@ -148,9 +147,7 @@ export function motionsAt(
     const path = truck.pathId ? plan.paths.find((item) => item.id === truck.pathId) : undefined;
     if (path && path.points.length > 1) {
       let pathT = sample?.pathT;
-      if (pathT == null && clock?.playing && (truck.duration ?? 0) > 0) pathT = Math.min(1, clock.seconds / truck.duration!);
-      else if (pathT == null && clock?.preview) pathT = 0;
-      else if (pathT == null) pathT = atTime(truck.lineId);
+      if (pathT == null) pathT = clock?.preview ? 0 : atTime(truck.lineId);
       const along = pointAlong(path.points, pathT);
       pose.at = along.point;
       pose.rz = along.yaw;

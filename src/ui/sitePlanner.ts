@@ -72,8 +72,7 @@ export class SitePlanner {
       if (!button || button instanceof HTMLInputElement || button instanceof HTMLSelectElement) return;
       this.onClick(button.dataset.act || "", button);
     });
-    this.root.addEventListener("change", (event) => {
-      const target = event.target;
+    const emitField = (target: EventTarget | null) => {
       if (target instanceof HTMLInputElement && target.dataset.role === "note") {
         this.noteDraft = target.value;
         return;
@@ -82,6 +81,11 @@ export class SitePlanner {
       const field = target.dataset.field;
       if (!field || !this.selectedId) return;
       this.opts.onField({ id: this.selectedId, field, value: target.value });
+    };
+    this.root.addEventListener("change", (event) => emitField(event.target));
+    this.root.addEventListener("input", (event) => {
+      const target = event.target;
+      if (target instanceof HTMLInputElement && target.type === "range") emitField(target);
     });
   }
 
@@ -349,6 +353,7 @@ function craneContext(plan: SitePlan, side: ViewerSidecar, id: string): string {
     ${numField("counterJib", "Contra-lança", crane.counterJib ?? 6, "m")}
     ${numField("swing", "Zona de giro", crane.swing ?? 270, "°")}
     ${numField("hook", "Cabo", crane.hook ?? 4, "m")}
+    <p class="site-read">A lança e o cabo seguem o dia da tarefa.</p>
     ${posFields(crane.x, crane.y, crane.z)}
     ${lineFields(plan, crane.lineId)}
     <button type="button" class="site-chip" data-act="pose">Pose</button>
@@ -371,7 +376,10 @@ function truckContext(plan: SitePlan, side: ViewerSidecar, id: string): string {
     .join("");
   const progress = keys.length ? Math.round((keys[keys.length - 1]?.pathT ?? 0) * 100) : 0;
   const path = plan.paths.find((item) => item.id === truck.pathId);
-  const pathLine = path && path.points.length > 1 ? `${trim(pathLength(path))} m` : "Clique no chão para o caminho.";
+  const pathLine =
+    path && path.points.length > 1
+      ? `${trim(pathLength(path))} m · a posição segue o dia da tarefa`
+      : "Clique no chão para o caminho.";
   return `${numField("duration", "Duração", truck.duration ?? 20, "s")}
     <p class="site-read">${pathLine}</p>
     ${colorField(truck.color || "#f0b429")}
@@ -400,8 +408,8 @@ function terrainContext(plan: SitePlan, id: string): string {
   const cut = terrain.operation === "cut";
   const volume =
     terrain.contour.length < 3
-      ? `Clique no chão para o polígono · ${terrain.contour.length} ${terrain.contour.length === 1 ? "vértice" : "vértices"}`
-      : `${trim(cutVolume(terrain))} m³`;
+      ? `Polilinha · ${terrain.contour.length} ${terrain.contour.length === 1 ? "vértice" : "vértices"} · Enter fecha com 3`
+      : `${terrain.operation === "cut" ? "Corte" : "Aterro"} ${trim(cutVolume(terrain))} m³ · talude ${trim(terrain.slope)}°`;
   return `<p class="site-read site-volume" data-volume="cut">${volume}</p>
     <div class="site-inline">
       <button type="button" class="site-chip${cut ? " is-on" : ""}" data-act="cut">Corte</button>
@@ -413,7 +421,7 @@ function terrainContext(plan: SitePlan, id: string): string {
     ${colorField(terrain.slopeColor || "#c4a882", "slopeColor", "Talude")}
     ${rotFields(0, 0, terrain.rz ?? 0, "z")}
     ${lineFields(plan, terrain.lineId)}
-    ${terrain.closed === false ? `<button type="button" class="site-chip" data-act="close">Fechar</button>` : ""}
+    ${terrain.closed === false ? `<button type="button" class="site-chip is-on" data-act="close">Fechar polilinha</button>` : ""}
     <button type="button" class="site-chip" data-act="vertex-pop">Vértice</button>
     ${removeButton()}`;
 }
@@ -506,14 +514,16 @@ const PDF_STEP: Record<string, string> = {
 
 function pdfContext(pdf: PdfOverlay | undefined, step: string): string {
   if (!pdf) return "";
-  const line = PDF_STEP[step] ?? "Estenda o desenho no terreno com dois pares de pontos.";
+  const line = PDF_STEP[step] ?? "Alinhe com dois pontos no desenho e os mesmos dois no terreno.";
+  const opacity = Math.round(pdf.opacity * 100);
   return `${numField("sheet", "Folha", pdf.sheet + 1, "")}
-    ${numField("opacity", "Opacidade", Math.round(pdf.opacity * 100), "%")}
+    <label class="site-field"><span>Opacidade</span><input type="range" min="5" max="100" step="1" data-field="opacity" value="${opacity}" /><em data-opacity-read>${opacity}%</em></label>
     <button type="button" class="site-chip${pdf.removeWhite ? " is-on" : ""}" data-act="pdf-white">Branco</button>
     ${colorField(pdf.color || "#ffffff")}
     ${numField("width", "Largura", pdf.width ?? 24, "m")}
-    <button type="button" class="site-chip${step ? " is-on" : ""}" data-act="pdf-align">Estender</button>
+    <button type="button" class="site-chip${step ? " is-on" : ""}" data-act="pdf-align">Alinhar</button>
     <p class="site-read">${line}</p>
+    <p class="site-read">A folha assenta no terreno. A opacidade deixa ver o modelo.</p>
     <p class="site-read">${pdf.pageCount} folhas</p>
     ${removeButton()}`;
 }

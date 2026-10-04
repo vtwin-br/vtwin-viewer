@@ -197,7 +197,7 @@ export class TimelineUI {
     speedWrap.className = "t-speed";
     const speedLabel = document.createElement("span");
     speedLabel.className = "t-speed-label";
-    speedLabel.textContent = "";
+    speedLabel.textContent = "dias/s";
     const seg = document.createElement("div");
     seg.className = "t-speed-seg";
     seg.setAttribute("role", "group");

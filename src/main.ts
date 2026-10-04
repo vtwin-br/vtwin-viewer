@@ -492,6 +492,29 @@ async function main() {
     if (pdfAlign.pair === 0) return pdfAlign.phase === "sheet" ? "d1" : "g1";
     return pdfAlign.phase === "sheet" ? "d2" : "g2";
   };
+  const measureText = (value: number) => {
+    const rounded = Math.round(value * 10) / 10;
+    return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+  };
+  const publishTerrainHint = () => {
+    const terrain =
+      planDraft?.kind === "terrain" ? sitePlan.terrains.find((item) => item.id === planDraft?.id) : undefined;
+    if (!terrain || terrain.contour.length === 0) {
+      const finished = sitePlan.terrains.some((item) => item.contour.length >= 3 && item.closed !== false);
+      showPlaceHint(finished ? null : "Clique no chão para a polilinha de corte.");
+      return;
+    }
+    if (terrain.closed !== false && terrain.contour.length >= 3) {
+      showPlaceHint(null);
+      return;
+    }
+    if (terrain.contour.length < 3) {
+      showPlaceHint(`${terrain.contour.length} vértices. O volume aparece ao terceiro.`);
+      return;
+    }
+    const op = terrain.operation === "cut" ? "Corte" : "Aterro";
+    showPlaceHint(`${op} ${measureText(cutVolume(terrain))} m³. Enter fecha a polilinha.`);
+  };
   const publishPdfStep = () => {
     const step = pdfStepName();
     sitePlanner?.setPdfStep(step);
@@ -1406,7 +1429,20 @@ async function main() {
     else if (markup && field === "height" && Number.isFinite(number)) markup.height = Math.max(0.4, number);
     else if (markup && field === "scale" && Number.isFinite(number)) markup.scale = Math.max(0.2, number);
     else if (pdf && field === "sheet" && Number.isFinite(number)) pdf.sheet = Math.max(0, Math.floor(number) - 1);
-    else if (pdf && field === "opacity" && Number.isFinite(number)) pdf.opacity = Math.min(1, Math.max(0.05, number / 100));
+    else if (pdf && field === "opacity" && Number.isFinite(number)) {
+      pdf.opacity = Math.min(1, Math.max(0.05, number / 100));
+      planDirty = true;
+      syncFileChrome();
+      siteLayer?.sync(sitePlan, {
+        markups: sidecar.markups,
+        motions: motionsAt(sitePlan, sidecar.keyframes, lastDate, playbackRange(), playbackClock()),
+        pours: sidecar.pours.items,
+        pourTimes: pourTimes(),
+      });
+      const read = document.querySelector<HTMLElement>("[data-opacity-read]");
+      if (read) read.textContent = `${Math.round(pdf.opacity * 100)}%`;
+      return;
+    }
     else if (pdf && field === "color") pdf.color = value;
     else if (pdf && field === "width" && Number.isFinite(number)) pdf.width = Math.max(2, number);
     else if (field === "comment") {
@@ -1554,7 +1590,7 @@ async function main() {
         if (planDraft && tool !== planDraft.kind && !keepTruckPath) planDraft = null;
         if (pdfAlign) return;
         if (tool === "truck") showPlaceHint("Clique no chão para pousar o camião e desenhar o caminho.");
-        else if (tool === "terrain") showPlaceHint("Clique no chão para desenhar o polígono.");
+        else if (tool === "terrain") publishTerrainHint();
         else if (tool === "box" || tool === "balloon") showPlaceHint("Clique no chão. Arraste a alça para redimensionar.");
         else if (tool === "hatch" || tool === "polygon") showPlaceHint("Clique no chão. Arraste os vértices ou a alça.");
         else if (pendingPdf) showPlaceHint("Clique no terreno para pousar o PDF.");
@@ -1806,12 +1842,16 @@ async function main() {
     const paintCut = (id: string) => {
       const terrain = sitePlan.terrains.find((item) => item.id === id);
       if (!terrain || terrain.contour.length < 3) return;
-      const text = `${formatMeasure(cutVolume(terrain))} m³`;
+      const op = terrain.operation === "cut" ? "Corte" : "Aterro";
+      const text = `${op} ${formatMeasure(cutVolume(terrain))} m³ · talude ${formatMeasure(terrain.slope)}°`;
       document.querySelectorAll("[data-volume='cut']").forEach((node) => {
         node.textContent = text;
       });
       const qty = document.querySelector(`.site-line[data-id="${CSS.escape(id)}"] .site-qty`);
-      if (qty) qty.textContent = `${terrain.operation === "cut" ? "corte" : "aterro"} ${text}`;
+      if (qty) qty.textContent = text;
+      if (planDraft?.id === id && terrain.closed === false) {
+        showPlaceHint(`${op} ${formatMeasure(cutVolume(terrain))} m³. Enter fecha a polilinha.`);
+      }
     };
     const syncDrag = () => {
       siteLayer?.sync(sitePlan, {
@@ -3749,6 +3789,23 @@ async function main() {
       const el = e.target as HTMLElement | null;
       const tag = el?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el?.isContentEditable) return;
+      if (e.code === "Enter" && planDraft && (planDraft.kind === "terrain" || planDraft.kind === "hatch" || planDraft.kind === "polygon")) {
+        const points = pointsOf(planDraft.id);
+        if (points && points.length >= 3) {
+          e.preventDefault();
+          if (planDraft.kind === "terrain") {
+            const terrain = sitePlan.terrains.find((item) => item.id === planDraft?.id);
+            if (terrain) terrain.closed = true;
+          } else {
+            const markup = markupOf(planDraft.id);
+            if (markup) markup.closed = true;
+          }
+          const id = planDraft.id;
+          planDraft = null;
+          touchPlan([id]);
+        }
+        return;
+      }
       if (e.code === "KeyV" && workspaceHasEarth(nav.getWorkspace())) {
         e.preventDefault();
         void walk?.toggle();

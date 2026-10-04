@@ -513,13 +513,16 @@ export class SitePlanLayer {
         })
         .catch(() => {});
     }
-    const sheet = root.getObjectByName("sheet");
+    const sheet = root.getObjectByName("sheet") as THREE.Mesh | undefined;
     if (sheet) {
-      const material = (sheet as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      const material = sheet.material as THREE.MeshBasicMaterial;
       material.opacity = pdf.opacity;
       material.color.set(pdf.color || "#ffffff");
-      sheet.userData.width = frame.width;
-      sheet.userData.height = frame.height;
+      const baseW = Number(sheet.userData.baseWidth) || Number(sheet.userData.width) || frame.width;
+      const baseH = Number(sheet.userData.baseHeight) || Number(sheet.userData.height) || frame.height;
+      sheet.userData.baseWidth = baseW;
+      sheet.userData.baseHeight = baseH;
+      if (baseW > 0.05 && baseH > 0.05) sheet.scale.set(frame.width / baseW, frame.height / baseH, 1);
     }
     const point = ifcToThreePoint(frame.origin);
     root.position.set(point.x, point.y + 0.05, point.z);
@@ -909,7 +912,7 @@ function blankSheet(width: number, height: number, opacity: number, color: strin
     new THREE.MeshBasicMaterial({
       color: 0xd7ece8,
       transparent: true,
-      opacity: Math.max(0.72, opacity),
+      opacity: Math.min(1, Math.max(0.05, opacity)),
       side: THREE.DoubleSide,
       depthWrite: false,
     }),
@@ -918,6 +921,8 @@ function blankSheet(width: number, height: number, opacity: number, color: strin
   mesh.userData.ui = true;
   mesh.userData.width = width;
   mesh.userData.height = height;
+  mesh.userData.baseWidth = width;
+  mesh.userData.baseHeight = height;
   const frame = new THREE.LineSegments(
     new THREE.EdgesGeometry(geom),
     new THREE.LineBasicMaterial({ color: color || "#163540" }),
@@ -961,6 +966,8 @@ function sheetMesh(width: number, height: number, canvas: HTMLCanvasElement, opa
   mesh.userData.ui = true;
   mesh.userData.width = width;
   mesh.userData.height = height;
+  mesh.userData.baseWidth = width;
+  mesh.userData.baseHeight = height;
   return mesh;
 }
 

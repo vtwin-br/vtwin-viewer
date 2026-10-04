@@ -1062,6 +1062,13 @@ button.header-project:hover,
   font-size: 12px;
 }
 
+.site-field input[type="range"] {
+  height: 18px;
+  padding: 0;
+  background: transparent;
+  accent-color: var(--vtwin-signal);
+}
+
 .site-field input,
 .site-field select {
   width: 100%;

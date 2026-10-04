@@ -15,13 +15,14 @@ import {
   DEFAULT_TERRAIN_DEPTH,
   DEFAULT_TERRAIN_SLOPE,
   emptySitePlan,
+  parseIsoDate,
   parseSitePlan,
   pathLength,
   sitePlanToJson,
 } from "../src/planning/sitePlan";
 import { excavationVolume, offsetPolygon } from "../src/planning/polygon";
 import { frameFromPairs } from "../src/planning/pdfFrame";
-import { pointAlong, sampleKeys } from "../src/planning/playback";
+import { motionsAt, pointAlong, sampleKeys } from "../src/planning/playback";
 import { bcfHasVersion, emptySidecar } from "../src/project/viewerPack";
 import { slidesToPdf } from "../src/project/slidesPdf";
 
@@ -467,6 +468,50 @@ const pulledCut = excavationVolume(
 );
 if (!(flatCut > 0)) throw new Error("O volume de corte ficou em zero.");
 if (!(pulledCut > flatCut)) throw new Error("O volume de corte não mudou com o vértice.");
+const dayPlan = emptySitePlan();
+dayPlan.lines.push({ id: "linha", name: "Obra", start: "2023-01-02", end: "2023-01-22", origin: "planning" });
+dayPlan.paths.push({
+  id: "caminho",
+  points: [
+    { x: 0, y: 0, z: 0 },
+    { x: 10, y: 0, z: 0 },
+  ],
+});
+dayPlan.trucks.push({
+  id: "camiao",
+  x: 0,
+  y: 0,
+  z: 0,
+  yaw: 0,
+  pathId: "caminho",
+  duration: 20,
+  lineId: "linha",
+});
+dayPlan.cranes.push({
+  id: "grua",
+  x: 0,
+  y: 0,
+  z: 0,
+  yaw: 0,
+  mastHeight: 18,
+  jibLength: 12,
+  hook: 4,
+  swing: 180,
+  lineId: "linha",
+});
+const dayKeys = emptySidecar().keyframes;
+const atDay = (iso: string) =>
+  motionsAt(dayPlan, dayKeys, parseIsoDate(iso), null, { playing: false, seconds: 0, preview: false });
+const poseStart = atDay("2023-01-02");
+const poseMid = atDay("2023-01-12");
+const truckStart = poseStart.find((pose) => pose.id === "camiao");
+const truckMid = poseMid.find((pose) => pose.id === "camiao");
+const craneStart = poseStart.find((pose) => pose.id === "grua");
+const craneMid = poseMid.find((pose) => pose.id === "grua");
+if (!truckStart?.at || truckStart.at.x > 0.2) throw new Error("O camião não ficou no início do caminho no primeiro dia.");
+if (!truckMid?.at || truckMid.at.x < 4) throw new Error("O camião não acompanhou o dia no caminho.");
+if ((craneMid?.slew ?? 0) <= (craneStart?.slew ?? 0)) throw new Error("A lança não acompanhou o dia.");
+if ((craneMid?.hook ?? 0) <= (craneStart?.hook ?? 4) - 0.01) throw new Error("O cabo não acompanhou o dia.");
 if (!(excavationVolume(
   [
     { x: 0, y: 0 },
