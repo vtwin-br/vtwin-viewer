@@ -1093,6 +1093,12 @@ button.header-project:hover,
   font-style: normal;
 }
 
+.site-volume {
+  font-size: 18px;
+  font-weight: 650;
+  color: var(--ink);
+}
+
 .site-inline {
   display: flex;
   flex-wrap: wrap;
@@ -4491,6 +4497,15 @@ html.is-presenting .perf-stats {
   container-name: viewport;
 }
 
+.view-row {
+  flex: 1;
+  min-height: 120px;
+  min-width: 0;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
+}
+
 .viewport-stage {
   flex: 1;
   min-height: 120px;
@@ -4498,6 +4513,7 @@ html.is-presenting .perf-stats {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  overflow: hidden;
 }
 
 .viewport-hud {
@@ -4659,37 +4675,42 @@ html.is-presenting .perf-stats {
   display: none;
 }
 
-.body-grid[data-shell="schedule"] .viewport-stage:has(#sim-hud:not(.is-idle)) .viewport-canvas,
-.body-grid[data-shell="site"] .viewport-stage:has(#sim-hud:not(.is-idle)) .viewport-canvas {
-  margin-right: min(260px, 34%);
-}
-
-.body-grid[data-shell="schedule"] #sim-hud:not(.is-idle),
-.body-grid[data-shell="site"] #sim-hud:not(.is-idle) {
-  inset: 48px 0 0 auto;
-  width: min(260px, 34%);
-  padding: 8px;
+.view-row > #sim-hud.sim-hud {
+  position: relative;
+  inset: auto;
+  flex: 0 0 280px;
+  width: 280px;
+  height: auto;
+  z-index: 2;
+  margin: 0;
+  padding: 8px 8px 8px 0;
+  display: flex;
   flex-direction: column;
   align-items: stretch;
   justify-content: flex-end;
   gap: 8px;
+  pointer-events: none;
+  background: var(--bg-app);
+  border-left: 1px solid var(--line);
 }
 
-.body-grid[data-shell="schedule"] #sim-hud .hud-phases,
-.body-grid[data-shell="site"] #sim-hud .hud-phases {
+.view-row > #sim-hud.sim-hud.is-idle {
+  display: none;
+}
+
+.view-row > #sim-hud .hud-phases {
   flex-direction: row;
   flex-wrap: wrap;
   width: 100%;
-  max-height: 72px;
+  max-height: 88px;
   gap: 6px;
 }
 
-.body-grid[data-shell="schedule"] #sim-hud .hud-cost,
-.body-grid[data-shell="site"] #sim-hud .hud-cost {
+.view-row > #sim-hud .hud-cost {
   width: 100%;
   min-width: 0;
   min-height: 0;
-  max-height: min(280px, 46%);
+  max-height: min(520px, 78%);
   resize: none;
 }
 
@@ -5289,7 +5310,7 @@ html.is-presenting .perf-stats {
 .timeline-dock.is-idle .t-btn,
 .timeline-dock.is-idle .t-slider,
 .timeline-dock.is-idle .t-speed-btn {
-  pointer-events: none;
+  cursor: pointer;
 }
 
 .t-top,

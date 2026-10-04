@@ -61,6 +61,7 @@ export class SitePlanLayer {
   private applied = false;
   private lastBuckets: SimulationStateBuckets | null = null;
   private lastPreview = true;
+  private viewCamera: THREE.Camera | null = null;
 
   bind(modelId: string, object: THREE.Object3D): void {
     const previous = this.models.get(modelId);
@@ -93,12 +94,61 @@ export class SitePlanLayer {
     return this.models.get("ground")?.group ?? this.models.values().next().value?.group ?? null;
   }
 
+  setViewCamera(camera: THREE.Camera): void {
+    this.viewCamera = camera;
+  }
+
   spin(seconds: number): void {
     if (!this.plan) return;
     for (const drill of this.plan.drills) {
       const bit = this.meshes.get(drill.id)?.getObjectByName("bit");
       if (bit) bit.rotation.y = seconds * 3;
     }
+    this.faceBillboards();
+  }
+
+  /** Canto da caixa de texto, em píxeis do ecrã. */
+  resizeScreen(camera: THREE.Camera, dom: HTMLElement): { x: number; y: number } | null {
+    const rect = dom.getBoundingClientRect();
+    const world = new THREE.Vector3();
+    for (const mesh of this.meshes.values()) {
+      const handle = mesh.getObjectByName("resize");
+      if (!handle) continue;
+      handle.getWorldPosition(world);
+      const clip = world.clone().project(camera);
+      if (clip.z < -1 || clip.z > 1) continue;
+      return {
+        x: rect.left + (clip.x * 0.5 + 0.5) * rect.width,
+        y: rect.top + (-clip.y * 0.5 + 0.5) * rect.height,
+      };
+    }
+    return null;
+  }
+
+  /** Metros de largura e altura que acompanham o arrasto do cursor. */
+  pointerScale(id: string, dx: number, dy: number, camera: THREE.Camera, dom: HTMLElement): { dw: number; dh: number } {
+    const mesh = this.meshes.get(id);
+    const rect = dom.getBoundingClientRect();
+    if (!mesh || rect.width < 2 || rect.height < 2) return { dw: dx * 0.08, dh: -dy * 0.08 };
+    const origin = mesh.localToWorld(new THREE.Vector3());
+    const xTip = mesh.localToWorld(new THREE.Vector3(1, 0, 0));
+    const yTip = mesh.localToWorld(new THREE.Vector3(0, 1, 0));
+    const project = (point: THREE.Vector3) => {
+      const clip = point.clone().project(camera);
+      return new THREE.Vector2(
+        (clip.x * 0.5 + 0.5) * rect.width,
+        (-clip.y * 0.5 + 0.5) * rect.height,
+      );
+    };
+    const start = project(origin);
+    const sx = project(xTip).sub(start);
+    const sy = project(yTip).sub(start);
+    const det = sx.x * sy.y - sx.y * sy.x;
+    if (Math.abs(det) < 6) return { dw: dx * 0.08, dh: -dy * 0.08 };
+    return {
+      dw: (dx * sy.y - dy * sx.y) / det,
+      dh: (sx.x * dy - sy.x * dx) / det,
+    };
   }
 
   sync(plan: SitePlan, view?: SiteView): void {
@@ -137,6 +187,11 @@ export class SitePlanLayer {
       if (!origin) continue;
       const pose = poseOf({ yaw: terrain.rz ?? 0, rz: terrain.rz });
       this.place(terrain.id, terrain.modelId, () => buildTerrain(terrain, origin), origin, pose.rx, pose.ry, pose.rz);
+      const terrainMesh = this.meshes.get(terrain.id);
+      if (terrainMesh) {
+        terrainMesh.userData.kind = "terrain";
+        terrainMesh.userData.fullDepth = Math.max(0.2, terrain.depth);
+      }
       if (terrain.id === this.selectedId) this.handles(terrain.id, terrain.contour, origin, true);
       this.gizmo(terrain.id, "z");
       live.add(terrain.id);
@@ -179,6 +234,7 @@ export class SitePlanLayer {
       this.meshes.delete(id);
     }
     this.applyMotions();
+    this.faceBillboards();
     if (this.applied) this.apply(this.lastBuckets, this.lastPreview);
     else this.paintSelection();
   }
@@ -230,7 +286,7 @@ export class SitePlanLayer {
 
   /** A alça ganha se o cursor está em cima dela, mesmo com a malha do terreno à frente. */
   private grabHandle(camera: THREE.Camera, event: PointerEvent | MouseEvent, rect: DOMRect): SiteHit | null {
-    const best: { dist: number; found: SiteHit | null } = { dist: 36, found: null };
+    const best: { dist: number; found: SiteHit | null } = { dist: Number.POSITIVE_INFINITY, found: null };
     const world = new THREE.Vector3();
     for (const mesh of this.meshes.values()) {
       mesh.traverse((obj) => {
@@ -241,7 +297,8 @@ export class SitePlanLayer {
         const x = rect.left + (clip.x * 0.5 + 0.5) * rect.width;
         const y = rect.top + (-clip.y * 0.5 + 0.5) * rect.height;
         const dist = Math.hypot(event.clientX - x, event.clientY - y);
-        if (dist > best.dist) return;
+        const reach = obj.name === "resize" ? 72 : 52;
+        if (dist > reach || dist >= best.dist) return;
         const found = this.hitFromObject(obj);
         if (!found) return;
         best.dist = dist;
@@ -391,6 +448,10 @@ export class SitePlanLayer {
       if (motion.depth != null) {
         const bit = mesh.getObjectByName("bit");
         if (bit) bit.scale.y = Math.max(0.2, motion.depth);
+        if (mesh.userData.kind === "terrain") {
+          const full = Number(mesh.userData.fullDepth) || motion.depth || 1;
+          mesh.scale.y = Math.max(0.05, motion.depth / full);
+        }
       }
       if (motion.grow != null) scaleSections(mesh, motion.grow, true);
     }
@@ -609,7 +670,7 @@ export class SitePlanLayer {
       const local = new THREE.Vector3(at.x - base.x, at.y - base.y + 0.4, at.z - base.z);
       ring.push(local);
       const sphere = new THREE.Mesh(
-        new THREE.SphereGeometry(0.72, 16, 12),
+        new THREE.SphereGeometry(1.05, 16, 12),
         new THREE.MeshLambertMaterial({ color: edges ? 0x2fd6bf : 0xf8fbfa, depthTest: false }),
       );
       sphere.name = `vertex-${index}`;
@@ -644,17 +705,36 @@ export class SitePlanLayer {
     root.add(group);
   }
 
+  private faceBillboards(): void {
+    const camera = this.viewCamera;
+    if (!camera) return;
+    for (const mesh of this.meshes.values()) {
+      if (!mesh.userData.billboard) continue;
+      const world = new THREE.Vector3();
+      mesh.getWorldPosition(world);
+      const flat = new THREE.Vector3(camera.position.x - world.x, 0, camera.position.z - world.z);
+      if (flat.lengthSq() < 1e-4) continue;
+      flat.normalize();
+      const parentQ = new THREE.Quaternion();
+      mesh.parent?.getWorldQuaternion(parentQ);
+      parentQ.invert();
+      flat.applyQuaternion(parentQ);
+      mesh.rotation.y = Math.atan2(flat.x, flat.z);
+    }
+  }
+
   private resizeHandle(id: string, width: number, height: number): void {
     const root = this.meshes.get(id);
     if (!root) return;
+    const depth = Number(root.userData.cardDepth) || 0.7;
     const handle = new THREE.Mesh(
-      new THREE.BoxGeometry(0.72, 0.72, 0.72),
-      new THREE.MeshLambertMaterial({ color: 0xf8fbfa, depthTest: false }),
+      new THREE.BoxGeometry(1.15, 1.15, 1.15),
+      new THREE.MeshLambertMaterial({ color: 0x2fd6bf, depthTest: false }),
     );
     handle.name = "resize";
     handle.userData.ui = true;
     handle.renderOrder = 6;
-    handle.position.set(width / 2 + 0.2, height + 0.45, 0.15);
+    handle.position.set(width / 2, height + 0.2, depth / 2 + 0.2);
     root.add(handle);
   }
 
@@ -1044,6 +1124,21 @@ function buildPin(text: string, color: string, markup: boolean): THREE.Group {
 
 function buildCard(text: string, color: string, width: number, height: number, balloon: boolean): THREE.Group {
   const group = new THREE.Group();
+  const depth = Math.max(1.4, Math.min(width, height) * 0.28);
+  group.userData.billboard = true;
+  group.userData.cardDepth = depth;
+  const body = new THREE.Mesh(
+    new THREE.BoxGeometry(width, height, depth),
+    new THREE.MeshBasicMaterial({ color }),
+  );
+  body.position.y = height / 2 + 0.08;
+  group.add(body);
+  const edges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(body.geometry),
+    new THREE.LineBasicMaterial({ color: 0xf8fbfa }),
+  );
+  edges.position.copy(body.position);
+  group.add(edges);
   const canvas = document.createElement("canvas");
   canvas.width = 512;
   canvas.height = Math.max(128, Math.round(512 * (height / Math.max(width, 0.2))));
@@ -1060,10 +1155,10 @@ function buildCard(text: string, color: string, width: number, height: number, b
   const map = new THREE.CanvasTexture(canvas);
   map.colorSpace = THREE.SRGBColorSpace;
   const plane = new THREE.Mesh(
-    new THREE.PlaneGeometry(width, height),
+    new THREE.PlaneGeometry(Math.max(0.4, width * 0.92), Math.max(0.3, height * 0.82)),
     new THREE.MeshBasicMaterial({ map, transparent: true, side: THREE.DoubleSide, depthWrite: false }),
   );
-  plane.position.y = height / 2 + 0.2;
+  plane.position.set(0, height / 2 + 0.08, depth / 2 + 0.02);
   group.add(plane);
   if (balloon) {
     const tail = new THREE.Mesh(new THREE.ConeGeometry(0.28, 0.7, 8), new THREE.MeshLambertMaterial({ color }));

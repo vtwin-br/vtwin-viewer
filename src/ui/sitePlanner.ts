@@ -402,7 +402,8 @@ function terrainContext(plan: SitePlan, id: string): string {
     terrain.contour.length < 3
       ? `Clique no chão para o polígono · ${terrain.contour.length} ${terrain.contour.length === 1 ? "vértice" : "vértices"}`
       : `${trim(cutVolume(terrain))} m³`;
-  return `<div class="site-inline">
+  return `<p class="site-read site-volume" data-volume="cut">${volume}</p>
+    <div class="site-inline">
       <button type="button" class="site-chip${cut ? " is-on" : ""}" data-act="cut">Corte</button>
       <button type="button" class="site-chip${cut ? "" : " is-on"}" data-act="fill">Aterro</button>
     </div>
@@ -411,7 +412,6 @@ function terrainContext(plan: SitePlan, id: string): string {
     ${colorField(terrain.color || (cut ? "#9b3a2a" : "#087f72"), "color", "Terreno")}
     ${colorField(terrain.slopeColor || "#c4a882", "slopeColor", "Talude")}
     ${rotFields(0, 0, terrain.rz ?? 0, "z")}
-    <p class="site-read">${volume}</p>
     ${lineFields(plan, terrain.lineId)}
     ${terrain.closed === false ? `<button type="button" class="site-chip" data-act="close">Fechar</button>` : ""}
     <button type="button" class="site-chip" data-act="vertex-pop">Vértice</button>

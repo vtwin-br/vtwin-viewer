@@ -173,6 +173,16 @@ export function motionsAt(
     const fraction = clock?.preview || !mass.grow ? 1 : atTime(mass.lineId);
     poses.push({ id: mass.id, rx: rest.rx, ry: rest.ry, rz: rest.rz, grow: fraction });
   }
+  for (const terrain of plan.terrains) {
+    const fraction = clock?.preview ? 1 : Math.max(0.08, atTime(terrain.lineId));
+    poses.push({
+      id: terrain.id,
+      rx: 0,
+      ry: 0,
+      rz: terrain.rz ?? 0,
+      depth: Math.max(0.2, terrain.depth) * fraction,
+    });
+  }
   for (const fence of plan.fences) {
     const rest = poseOf(fence);
     poses.push({ id: fence.id, rx: rest.rx, ry: rest.ry, rz: rest.rz });

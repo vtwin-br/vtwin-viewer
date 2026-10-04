@@ -48,9 +48,19 @@ export function slopeRun(depth: number, slopeDeg: number): number {
 /** Volume do prisma com talude, em m³. O anel de baixo é o contorno. */
 export function excavationVolume(contour: Plan2[], depth: number, slopeDeg: number): number {
   if (contour.length < 3 || !(depth > 0)) return 0;
+  const run = slopeRun(depth, slopeDeg);
   const inner = Math.abs(signedArea(contour));
-  const outer = Math.abs(signedArea(offsetPolygon(contour, slopeRun(depth, slopeDeg))));
-  return (depth / 3) * (inner + outer + Math.sqrt(Math.max(0, inner * outer)));
+  const outer = Math.abs(signedArea(offsetPolygon(contour, run)));
+  const frustum = (depth / 3) * (inner + outer + Math.sqrt(Math.max(0, inner * outer)));
+  if (frustum > 0.05) return frustum;
+  let length = 0;
+  for (let i = 0; i < contour.length; i++) {
+    const a = contour[i]!;
+    const b = contour[(i + 1) % contour.length]!;
+    length += Math.hypot(b.x - a.x, b.y - a.y);
+  }
+  if (!(length > 0.05)) return 0;
+  return length * Math.max(run, 0.4) * depth;
 }
 
 function unit(x: number, y: number): Plan2 {

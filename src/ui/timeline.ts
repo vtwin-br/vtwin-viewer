@@ -42,6 +42,8 @@ export class TimelineUI {
   private lastEmittedDay = Number.NaN;
   /** Play carregado enquanto o cronograma ainda não chegou. */
   private armPlay = false;
+  /** Impede que um callback do próprio play volte a pôr o botão em reproduzir. */
+  private guardPause = false;
 
   private slider!: HTMLInputElement;
   private playBtn!: HTMLButtonElement;
@@ -109,12 +111,10 @@ export class TimelineUI {
 
   togglePlay(): void {
     if (this.opts.container.classList.contains("is-idle")) {
-      this.armPlay = !this.armPlay;
-      this.playBtn.innerHTML = this.armPlay ? ICON_PAUSE : ICON_PLAY;
-      this.playBtn.title = this.armPlay ? "Pausar" : "Reproduzir";
-      this.playBtn.setAttribute("aria-label", this.playBtn.title);
-      this.playBtn.setAttribute("aria-pressed", this.armPlay ? "true" : "false");
-      return;
+      this.armPlay = true;
+      this.opts.container.classList.remove("is-idle");
+      this.opts.container.setAttribute("aria-disabled", "false");
+      this.slider.disabled = false;
     }
     this.armPlay = false;
     this.isPlaying ? this.pause() : this.play();
@@ -260,12 +260,20 @@ export class TimelineUI {
     if (this.isPlaying) return;
     if (this.currentDay >= this.totalDays) this.currentDay = 0;
     this.isPlaying = true;
-    this.opts.onPlayingChange?.(true);
-    this.emit(true);
-    this.playBtn.innerHTML = ICON_PAUSE;
-    this.playBtn.title = "Pausar";
-    this.playBtn.setAttribute("aria-label", "Pausar");
-    this.playBtn.setAttribute("aria-pressed", "true");
+    this.showPlaying(true);
+    this.guardPause = true;
+    try {
+      this.opts.onPlayingChange?.(true);
+      this.emit(true);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      this.guardPause = false;
+    }
+    if (!this.isPlaying) {
+      this.isPlaying = true;
+      this.showPlaying(true);
+    }
     this.lastTs = performance.now();
     const step = (now: number) => {
       if (!this.isPlaying) return;
@@ -284,14 +292,23 @@ export class TimelineUI {
   }
 
   pause() {
+    if (this.guardPause) return;
     this.isPlaying = false;
-    this.opts.onPlayingChange?.(false);
-    this.playBtn.innerHTML = ICON_PLAY;
-    this.playBtn.title = "Reproduzir";
-    this.playBtn.setAttribute("aria-label", "Reproduzir");
-    this.playBtn.setAttribute("aria-pressed", "false");
+    this.showPlaying(false);
+    try {
+      this.opts.onPlayingChange?.(false);
+    } catch (err) {
+      console.error(err);
+    }
     if (this.rafId != null) cancelAnimationFrame(this.rafId);
     this.rafId = null;
+  }
+
+  private showPlaying(playing: boolean) {
+    this.playBtn.innerHTML = playing ? ICON_PAUSE : ICON_PLAY;
+    this.playBtn.title = playing ? "Pausar" : "Reproduzir";
+    this.playBtn.setAttribute("aria-label", this.playBtn.title);
+    this.playBtn.setAttribute("aria-pressed", playing ? "true" : "false");
   }
 
   seek(day: number) {
@@ -325,7 +342,26 @@ function makeBtn(
   btn.title = title;
   btn.setAttribute("aria-label", title);
   btn.innerHTML = icon;
-  btn.addEventListener("click", onClick);
+  let fromPointer = false;
+  btn.addEventListener("pointerdown", (event) => {
+    event.stopPropagation();
+    if (event.button !== 0) return;
+    fromPointer = true;
+    onClick();
+  });
+  btn.addEventListener("pointerup", () => {
+    queueMicrotask(() => {
+      fromPointer = false;
+    });
+  });
+  btn.addEventListener("click", (event) => {
+    if (fromPointer) {
+      fromPointer = false;
+      event.preventDefault();
+      return;
+    }
+    onClick();
+  });
   return btn;
 }
 

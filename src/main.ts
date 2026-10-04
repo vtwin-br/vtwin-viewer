@@ -39,6 +39,7 @@ import {
   emptySitePlan,
   importLegacyAssets,
   newPlanId,
+  cutVolume,
   overlaySitePlan,
   parseIsoDate,
   planIsEmpty,
@@ -1321,7 +1322,7 @@ async function main() {
       kind: tool === "box" ? "textbox" : tool,
       modelId,
       text: sitePlanner?.noteText() || "",
-      color: tool === "box" ? "#071820" : "#163540",
+      color: tool === "box" ? "#e7eef0" : "#163540",
       ...point,
       width: tool === "balloon" ? 5 : 6,
       height: tool === "balloon" ? 2.2 : 2.4,
@@ -1612,6 +1613,7 @@ async function main() {
     );
     highlighter = new ScheduleHighlighter(viewer.fragments);
     siteLayer = new SitePlanLayer();
+    siteLayer.setViewCamera(viewer.world.camera.three);
     siteLayer.bindGround(viewer.world.scene.three);
     viewerControls = () => viewer.world.camera.controls as unknown as OrbitRig;
     captureSlide = () => {
@@ -1797,6 +1799,20 @@ async function main() {
       while (value < -Math.PI) value += Math.PI * 2;
       return value;
     };
+    const formatMeasure = (value: number) => {
+      const rounded = Math.round(value * 10) / 10;
+      return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+    };
+    const paintCut = (id: string) => {
+      const terrain = sitePlan.terrains.find((item) => item.id === id);
+      if (!terrain || terrain.contour.length < 3) return;
+      const text = `${formatMeasure(cutVolume(terrain))} m³`;
+      document.querySelectorAll("[data-volume='cut']").forEach((node) => {
+        node.textContent = text;
+      });
+      const qty = document.querySelector(`.site-line[data-id="${CSS.escape(id)}"] .site-qty`);
+      if (qty) qty.textContent = `${terrain.operation === "cut" ? "corte" : "aterro"} ${text}`;
+    };
     const syncDrag = () => {
       siteLayer?.sync(sitePlan, {
         markups: sidecar.markups,
@@ -1880,6 +1896,7 @@ async function main() {
           : siteLayer.groundIfc(viewer.world.camera.three, e, siteCanvas(), "ground", emptyExtraTransform());
         const points = pointsOf(hit.id);
         if (point && points && points[hit.index]) points[hit.index] = point;
+        paintCut(hit.id);
       } else if (hit.part === "resize" || hit.part === "scale") {
         const markup = markupOf(hit.id);
         const dx = e.clientX - siteDrag.x;
@@ -1887,8 +1904,13 @@ async function main() {
         siteDrag.x = e.clientX;
         siteDrag.y = e.clientY;
         if (markup && hit.part === "resize") {
-          markup.width = Math.max(0.6, (markup.width ?? 6) + dx * 0.02);
-          markup.height = Math.max(0.4, (markup.height ?? 2.4) - dy * 0.02);
+          const scale = siteLayer.pointerScale(hit.id, dx, dy, viewer.world.camera.three, siteCanvas());
+          markup.width = Math.max(0.8, (markup.width ?? 6) + scale.dw);
+          markup.height = Math.max(0.6, (markup.height ?? 2.4) + scale.dh);
+          const widthInput = document.querySelector<HTMLInputElement>('.site-context [data-field="width"]');
+          const heightInput = document.querySelector<HTMLInputElement>('.site-context [data-field="height"]');
+          if (widthInput) widthInput.value = formatMeasure(markup.width);
+          if (heightInput) heightInput.value = formatMeasure(markup.height);
         }
         if (markup && hit.part === "scale") markup.scale = Math.max(0.2, (markup.scale ?? 1) * (1 + dx * 0.005));
       }
@@ -2487,6 +2509,7 @@ async function main() {
         simHud?.bind(schedule);
         const span = modelScheduleRange(nativeSchedule) ?? { min: schedule.minDate, max: schedule.maxDate };
         timeline.setRange(span.min, span.max);
+        if (models.size) timeline.setIdle(false);
       }
       const coord = models.coordination;
       scheduleNameEl.textContent = models.size ? scheduleTitle(schedule) : "Importe um arquivo IFC";
@@ -3852,6 +3875,9 @@ async function main() {
       if (siteLayer && (shellKind === "site" || shellKind === "schedule" || shellKind === "dashboard")) {
         pushMotion();
         siteLayer.spin(now / 1000);
+        const handle = siteLayer.resizeScreen(viewer.world.camera.three, siteCanvas());
+        if (handle) viewportEl.dataset.resizeHandle = `${Math.round(handle.x)},${Math.round(handle.y)}`;
+        else delete viewportEl.dataset.resizeHandle;
       }
       if (shellKind !== "placeholder" && dirty && !applying && highlighter && scheduleRef && models.visible.length) {
         dirty = false;

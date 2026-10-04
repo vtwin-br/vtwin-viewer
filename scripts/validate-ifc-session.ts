@@ -447,6 +447,26 @@ const span = modelScheduleRange(modelSpan);
 if (!span || span.min.getUTCFullYear() !== 2023 || span.max.getUTCMonth() !== 5) {
   throw new Error("A linha do tempo do modelo inclui tarefas sem geometria.");
 }
+const flatCut = excavationVolume(
+  [
+    { x: 0, y: 0 },
+    { x: 8, y: 0 },
+    { x: 16, y: 0 },
+  ],
+  1.5,
+  45,
+);
+const pulledCut = excavationVolume(
+  [
+    { x: 0, y: 0 },
+    { x: 8, y: 0 },
+    { x: 16, y: 6 },
+  ],
+  1.5,
+  45,
+);
+if (!(flatCut > 0)) throw new Error("O volume de corte ficou em zero.");
+if (!(pulledCut > flatCut)) throw new Error("O volume de corte não mudou com o vértice.");
 if (!(excavationVolume(
   [
     { x: 0, y: 0 },

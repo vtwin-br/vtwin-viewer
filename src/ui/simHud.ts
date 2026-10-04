@@ -89,7 +89,9 @@ export class SimHud {
   }
 
   setIdle(idle: boolean): void {
+    const was = this.opts.root.classList.contains("is-idle");
     this.opts.root.classList.toggle("is-idle", idle);
+    if (was !== idle) requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
   }
 
   setCostPanelOpen(open: boolean): void {

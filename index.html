@@ -185,6 +185,7 @@
             tabindex="0"
           ></div>
           <div id="viewport-wrapper" class="viewport-shell">
+            <div class="view-row">
             <div class="viewport-stage">
                 <div class="viewport-hud" aria-hidden="false">
                 <div class="viewport-toolbar" role="toolbar" aria-label="Visualização">
@@ -280,8 +281,6 @@
                 <div class="walk-crosshair" aria-hidden="true"></div>
                 <p class="walk-hint" id="walk-hint">WASD · Esc · V</p>
               </div>
-              <div id="sim-hud" class="sim-hud is-idle"></div>
-
               <aside id="earth-panel" class="earth-panel is-hidden" aria-label="Posicionar modelo no globo">
                 <div
                   class="split-handle split-handle-start"
@@ -439,6 +438,8 @@
                   <p class="loader-hint" id="loader-hint"></p>
                 </div>
               </div>
+            </div>
+            <aside id="sim-hud" class="sim-hud is-idle" aria-label="Custo 5D"></aside>
             </div>
 
             <div class="timeline-slot" id="timeline-slot">
