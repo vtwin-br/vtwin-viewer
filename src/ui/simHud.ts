@@ -18,7 +18,7 @@ interface ChartRow {
 }
 
 /**
- * HUD 4D/5D sobre o viewport: fases à esquerda e gráfico de custo à direita.
+ * Cartão 4D/5D na coluna Relatório, fora da vista 3D.
  */
 export class SimHud {
   private readonly opts: SimHudOptions;
