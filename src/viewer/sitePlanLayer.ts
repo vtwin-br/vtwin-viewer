@@ -378,6 +378,32 @@ export class SitePlanLayer {
     return null;
   }
 
+  /** Eixo do anel de rotação, no mundo, para o arrasto seguir o anel e não o ecrã. */
+  rotationFrame(id: string, part: "x" | "y" | "z"): { origin: THREE.Vector3; axis: THREE.Vector3 } | null {
+    const mesh = this.meshes.get(id);
+    if (!mesh) return null;
+    const ring = mesh.getObjectByName(part === "x" ? "axis-x" : part === "y" ? "axis-y" : "axis-z") ?? mesh;
+    ring.updateWorldMatrix(true, false);
+    const origin = new THREE.Vector3();
+    mesh.getWorldPosition(origin);
+    const axis = new THREE.Vector3(0, 0, 1).transformDirection(ring.matrixWorld);
+    if (axis.lengthSq() < 1e-8) return null;
+    return { origin, axis: axis.normalize() };
+  }
+
+  /** Centro do elemento no mundo — eixo da órbita ao clicar. */
+  anchor(id: string): THREE.Vector3 | null {
+    const mesh = this.meshes.get(id);
+    if (!mesh) return null;
+    const box = new THREE.Box3().setFromObject(mesh);
+    if (box.isEmpty()) {
+      const point = new THREE.Vector3();
+      mesh.getWorldPosition(point);
+      return point;
+    }
+    return box.getCenter(new THREE.Vector3());
+  }
+
   screenPoint(id: string, camera: THREE.Camera, dom: HTMLElement): { x: number; y: number } | null {
     const mesh = this.meshes.get(id);
     if (!mesh) return null;
@@ -859,11 +885,27 @@ function loadCatalogTemplate(url: string): Promise<THREE.Object3D> {
 }
 
 function applyIfcRotation(object: THREE.Object3D, rx: number, ry: number, rz: number): void {
+  object.quaternion.copy(quaternionFromPose(rx, ry, rz));
+}
+
+function quaternionFromPose(rx: number, ry: number, rz: number): THREE.Quaternion {
   const q = new THREE.Quaternion();
   q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -rz));
   q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, -1), ry));
   q.multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), rx));
-  object.quaternion.copy(q);
+  return q;
+}
+
+/** Roda a pose em volta do eixo do anel e devolve os mesmos rx/ry/rz. */
+export function poseAfterAxisSpin(
+  pose: { rx: number; ry: number; rz: number },
+  axis: THREE.Vector3,
+  delta: number,
+): { rx: number; ry: number; rz: number } {
+  const q = quaternionFromPose(pose.rx, pose.ry, pose.rz);
+  q.premultiply(new THREE.Quaternion().setFromAxisAngle(axis, delta));
+  const euler = new THREE.Euler().setFromQuaternion(q, "YZX");
+  return { rx: euler.x, ry: -euler.z, rz: -euler.y };
 }
 
 function fitTowerCrane(root: THREE.Object3D, mastHeight: number, jibLength: number): void {

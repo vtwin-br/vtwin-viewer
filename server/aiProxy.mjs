@@ -1,7 +1,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 
-const MAX_BODY = 800_000;
+const MAX_BODY = 8_000_000;
 const UPSTREAM_MS = 60_000;
 
 const PROVIDERS = {
@@ -110,12 +110,27 @@ async function readJsonBody(req) {
   }
 }
 
+function isTextPart(part) {
+  return part && part.type === "text" && typeof part.text === "string" && part.text.length <= 200_000;
+}
+
+function isImagePart(part) {
+  const url = part?.image_url?.url;
+  return part?.type === "image_url" && typeof url === "string" && url.startsWith("data:image/") && url.length <= 2_500_000;
+}
+
+function isContent(content) {
+  if (typeof content === "string") return content.length <= 200_000;
+  if (!Array.isArray(content) || content.length === 0 || content.length > 8) return false;
+  return content.every((part) => isTextPart(part) || isImagePart(part));
+}
+
 function isMessage(row) {
   return (
     row &&
     typeof row === "object" &&
     (row.role === "system" || row.role === "user" || row.role === "assistant") &&
-    typeof row.content === "string"
+    isContent(row.content)
   );
 }
 

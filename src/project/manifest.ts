@@ -7,14 +7,26 @@ export const VTWIN_EXTENSION = ".vtwin";
 
 export type VtwinModelRole = "coordination" | "discipline";
 
+export interface VtwinModelRevision {
+  version: number;
+  fileName: string;
+  hash: string;
+  at: string;
+}
+
 export interface VtwinModelEntry {
   id: string;
   fileName: string;
+  /** Nome da disciplina na aba Modelos. O ficheiro pode mudar na revisão. */
+  displayName?: string;
   /** Dono do 4D/5D/logística na federação. */
   role: VtwinModelRole;
   schema: IfcSchemaKind;
   hash: string;
   visible: boolean;
+  revision?: number;
+  revisedAt?: string;
+  history?: VtwinModelRevision[];
   extra?: ModelExtraTransform;
 }
 
@@ -74,9 +86,13 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     }
     if (typeof m.hash !== "string" || !m.hash) throw new Error(`Hash em falta em «${m.fileName}».`);
     const extra = parseExtra(m.extra);
+    const displayName = typeof m.displayName === "string" && m.displayName.trim() ? m.displayName.trim() : undefined;
+    const revision = Number.isFinite(Number(m.revision)) ? Math.max(1, Math.floor(Number(m.revision))) : undefined;
+    const revisedAt = typeof m.revisedAt === "string" && m.revisedAt ? m.revisedAt : undefined;
     return {
       id: m.id,
       fileName: m.fileName,
+      displayName,
       role: isCoordinationEntry(
         { id: m.id, fileName: m.fileName, role: m.role === "coordination" ? "coordination" : "discipline" },
         rootId,
@@ -86,6 +102,9 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
       schema: m.schema,
       hash: m.hash,
       visible: m.visible !== false,
+      revision,
+      revisedAt,
+      history: parseHistory(m.history),
       extra,
     };
   });
@@ -98,6 +117,23 @@ export function parseVtwinManifest(raw: unknown): VtwinManifest {
     meshOnly,
     models,
   };
+}
+
+function parseHistory(raw: unknown): VtwinModelRevision[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: VtwinModelRevision[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Partial<VtwinModelRevision>;
+    if (typeof rec.fileName !== "string" || !rec.fileName) continue;
+    out.push({
+      version: Math.max(1, Math.floor(Number(rec.version) || 1)),
+      fileName: rec.fileName,
+      hash: typeof rec.hash === "string" ? rec.hash : "",
+      at: typeof rec.at === "string" ? rec.at : "",
+    });
+  }
+  return out.length ? out.slice(-12) : undefined;
 }
 
 function parseExtra(raw: VtwinModelEntry["extra"]): ModelExtraTransform | undefined {

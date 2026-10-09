@@ -31,6 +31,16 @@ function selectionMaterial(): FRAGS.MaterialDefinition {
   };
 }
 
+function colorMaterial(hex: string): FRAGS.MaterialDefinition {
+  return {
+    color: new THREE.Color(hex),
+    opacity: 1,
+    transparent: false,
+    renderedFaces: FRAGS.RenderedFaces.TWO,
+    depthWrite: true,
+  };
+}
+
 /** Cinza neutro e quase invisível — o elemento selecionado fica a ler-se sozinho. */
 function ghostMaterial(): FRAGS.MaterialDefinition {
   return {
@@ -60,10 +70,12 @@ interface HighlightLayer {
   currentSelection: Set<number>;
   /** Itens translúcidos pelo isolamento (não 4D). */
   currentGhost: Set<number>;
+  /** Cor aplicada pelo chat do visualizador (localId → hex). */
+  currentPaint: Map<number, string>;
   readyTask?: Promise<void>;
 }
 
-export type GuidHit = ViewportElementRef;
+export type GuidHit = ViewportElementRef & { point?: THREE.Vector3 };
 
 export interface ModelSelection {
   modelId: string;
@@ -113,6 +125,7 @@ export class ScheduleHighlighter {
       currentActive: new Set(),
       currentSelection: new Set(),
       currentGhost: new Set(),
+      currentPaint: new Map(),
     });
     this.lastApplyKey = "";
     await this.ready(modelId);
@@ -580,7 +593,7 @@ export class ScheduleHighlighter {
       if (!guid) continue;
       this.registerGuid(guid, localId, layer.modelId);
       if (!best || dist < best.dist) {
-        best = { hit: { globalId: guid, localId, modelId: layer.modelId }, dist };
+        best = { hit: { globalId: guid, localId, modelId: layer.modelId, point: rec.point?.clone() }, dist };
       }
     }
     return best?.hit ?? null;
@@ -666,6 +679,64 @@ export class ScheduleHighlighter {
     await this.ready();
     await this.ensureGuidsMapped(guids);
     this.lastApplyKey = "";
+  }
+
+  allGuids(): string[] {
+    const out = new Set<string>();
+    for (const layer of this.visibleLayers()) {
+      for (const guid of layer.allGuids) out.add(guid);
+    }
+    return [...out];
+  }
+
+  paintedItems(): ModelSelection[] {
+    return this.visibleLayers()
+      .filter((layer) => layer.currentPaint.size > 0)
+      .map((layer) => ({ modelId: layer.modelId, model: layer.model, localIds: [...layer.currentPaint.keys()] }));
+  }
+
+  async paintGroups(groups: Array<{ guids: string[]; color: string }>, opts: { isolate?: boolean } = {}): Promise<number> {
+    await this.ready();
+    const isolate = !!opts.isolate;
+    const allGuids = [...new Set(groups.flatMap((group) => group.guids))];
+    await this.ensureGuidsMapped(allGuids);
+    this.workingGuids = allGuids;
+    let painted = 0;
+    for (const layer of this.visibleLayers()) {
+      if (layer.currentSelection.size > 0) {
+        const prev = [...layer.currentSelection];
+        await layer.model.resetHighlight(prev);
+        layer.currentSelection.clear();
+      }
+      await this.clearPaintLayer(layer);
+      const keep: number[] = [];
+      for (const group of groups) {
+        const ids = this.guidsToLocals(layer, group.guids);
+        if (!ids.length) continue;
+        await this.forChunks(ids, (slice) => layer.model.highlight(slice, colorMaterial(group.color)));
+        for (const id of ids) layer.currentPaint.set(id, group.color);
+        keep.push(...ids);
+      }
+      painted += keep.length;
+      if (isolate && keep.length) await this.setGhostExcept(layer, keep);
+      else if (layer.currentGhost.size > 0) await this.clearGhostLayer(layer);
+    }
+    await requestFragmentsUpdate(this.fragments);
+    return painted;
+  }
+
+  async clearPaint(): Promise<void> {
+    for (const layer of this.visibleLayers()) await this.clearPaintLayer(layer);
+    await requestFragmentsUpdate(this.fragments);
+  }
+
+  private async clearPaintLayer(layer: HighlightLayer): Promise<void> {
+    if (layer.currentPaint.size === 0) return;
+    const ids = [...layer.currentPaint.keys()];
+    layer.currentPaint.clear();
+    await this.forChunks(ids, (slice) => layer.model.resetHighlight(slice));
+    const stillActive = ids.filter((id) => layer.currentActive.has(id));
+    if (stillActive.length) await layer.model.highlight(stillActive, activeMaterial());
   }
 
   private async ensureGuidsMapped(guids: Iterable<string>): Promise<void> {

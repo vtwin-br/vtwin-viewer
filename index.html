@@ -174,7 +174,18 @@
 
         <section class="center-column">
           <section id="module-placeholder" class="module-placeholder" hidden aria-live="polite"></section>
+          <section id="models-panel" class="models-panel" hidden aria-label="Modelos do projeto"></section>
           <section id="project-workspace" class="project-workspace" aria-label="Planejamento de projeto"></section>
+          <aside id="dashboard-kpis" class="dashboard-kpis" aria-label="Indicadores"></aside>
+          <div
+            class="split-handle split-handle-grid"
+            id="split-dash-kpi"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura dos indicadores"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
           <div
             class="split-handle split-handle-grid"
             id="split-gantt-view"
@@ -241,6 +252,23 @@
                       <path d="M12 8.6v5.2M12 13.8l-3.2 5.2M12 13.8l3.2 5.2M8.6 11.2h6.8" stroke-linecap="round" stroke-linejoin="round" />
                     </svg>
                   </button>
+                  <button
+                    type="button"
+                    class="icon-btn icon-btn-toggle"
+                    id="btn-drone"
+                    title="Drone"
+                    aria-label="Drone"
+                    aria-pressed="false"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+                      <circle cx="5.2" cy="6.6" r="2.15" />
+                      <circle cx="18.8" cy="6.6" r="2.15" />
+                      <circle cx="5.2" cy="17.4" r="2.15" />
+                      <circle cx="18.8" cy="17.4" r="2.15" />
+                      <path d="M7 8.2L10.1 11M17 8.2L13.9 11M7 15.8l3.1-2.8M17 15.8l-3.1-2.8" stroke-linecap="round" />
+                      <rect x="9.3" y="10.2" width="5.4" height="3.6" rx="1" />
+                    </svg>
+                  </button>
                   <div class="viewport-toolbar-split plan-link-tools" role="group" aria-label="Ligar elementos às tarefas">
                     <button
                       type="button"
@@ -288,6 +316,14 @@
               <div id="walk-overlay" class="walk-overlay" hidden>
                 <div class="walk-crosshair" aria-hidden="true"></div>
                 <p class="walk-hint" id="walk-hint">WASD · Esc · V</p>
+              </div>
+              <div id="drone-overlay" class="walk-overlay drone-overlay" hidden>
+                <div class="drone-reticle" aria-hidden="true"></div>
+                <div class="drone-readout">
+                  <span id="drone-alt">+0.0 m</span>
+                  <span id="drone-spd">0.0 m/s</span>
+                </div>
+                <p class="walk-hint" id="drone-hint">WASD · E/Q · H</p>
               </div>
               <aside id="earth-panel" class="earth-panel is-hidden" aria-label="Posicionar modelo no globo">
                 <div
@@ -464,6 +500,16 @@
           </div>
           <div
             class="split-handle split-handle-grid"
+            id="split-dash-chat"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="Largura do chat"
+            title="Arraste para redimensionar. Duplo clique restaura."
+            tabindex="0"
+          ></div>
+          <aside id="dashboard-chat" class="dashboard-chat" aria-label="Consulta ao modelo"></aside>
+          <div
+            class="split-handle split-handle-grid"
             id="split-view-sets"
             role="separator"
             aria-orientation="vertical"
@@ -534,6 +580,8 @@
             <button type="button" class="layout-chip" data-restore="timeline" hidden>Linha do tempo</button>
             <button type="button" class="layout-chip" data-restore="gantt" hidden>Gantt</button>
             <button type="button" class="layout-chip" data-restore="sets" hidden>Árvore IFC</button>
+            <button type="button" class="layout-chip" data-restore="kpis" hidden>Indicadores</button>
+            <button type="button" class="layout-chip" data-restore="chat" hidden>Chat</button>
             <button type="button" class="layout-chip" data-restore="hud" hidden>Gráfico 5D</button>
             <button type="button" class="layout-chip" data-restore="earth" hidden>Posição</button>
           </div>

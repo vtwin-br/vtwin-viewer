@@ -61,7 +61,7 @@ export async function createViewer(container: HTMLElement): Promise<ViewerHandle
   cam.threeOrtho.far = 1e7;
   cam.threeOrtho.near = -1e7;
   cam.threeOrtho.updateProjectionMatrix();
-  configureOrbitNavigation(cam);
+  configureOrbitNavigation(cam, world.renderer?.three.domElement);
 
   // Grid para referencia espacial
   const grids = components.get(OBC.Grids);
@@ -434,34 +434,137 @@ async function lookAtBox(world: OBC.World, box: THREE.Box3, distanceScale: numbe
     center.z,
     true,
   );
+  noteHealthyDistance(cam.controls, cam.controls.distance);
+}
+
+/** O elemento clicado passa a ser o eixo da órbita, sem saltar a câmara. */
+export function orbitCameraAroundPoint(world: OBC.World, point: THREE.Vector3): void {
+  if (![point.x, point.y, point.z].every(Number.isFinite)) return;
+  const cam = world.camera as OBC.OrthoPerspectiveCamera;
+  const controls = cam.controls;
+  cam.three.up.set(0, 1, 0);
+  applyOrbitNavigation(cam);
+  if (!controls.enabled) controls.enabled = true;
+  if (!controls.mouseButtons.left) applyOrbitMouse(cam);
+  controls.stop();
+  controls.update(0);
+  const eye = new THREE.Vector3();
+  controls.getPosition(eye);
+  if (eye.distanceTo(point) < 0.2) return;
+  controls.setOrbitPoint(point.x, point.y, point.z);
+  controls.update(0);
+  noteHealthyDistance(controls, eye.distanceTo(point));
+}
+
+/** Enquadra o eixo da órbita no centro do elemento. Se a caixa falhar, usa o ponto do clique. */
+export async function orbitCameraAroundItems(
+  handles: ViewerHandles,
+  model: FRAGS.FragmentsModel | undefined,
+  localIds: number[],
+  fallback?: THREE.Vector3,
+): Promise<void> {
+  if (model && localIds.length) {
+    const box = await geometryWorldBox(model, localIds);
+    if (box) {
+      orbitCameraAroundPoint(handles.world, box.getCenter(new THREE.Vector3()));
+      return;
+    }
+  }
+  if (fallback) orbitCameraAroundPoint(handles.world, fallback);
 }
 
 /**
- * O OrbitMode do That Open impõe maxDistance=300 e infinityDolly=true.
- * Depois de orbitar / zoom / gizmo, o alvo é empurrado e a órbita fica num
- * raio de ~1 m: o rato quase não mexe e o zoom parece morto.
+ * O zoom-para-o-cursor empurra o alvo até ficar a ~1 m da câmara.
+ * A partir daí cada notch mexe pouco e, no limite, o scroll para.
+ * O alvo fica no modelo (ou no elemento clicado); o scroll só encolhe
+ * essa distância real.
  */
 const ORBIT_MIN_DISTANCE = 0.08;
 const ORBIT_MAX_DISTANCE = 1e7;
+const healthyDistance = new WeakMap<object, number>();
+const zoomGuards = new WeakSet<object>();
 
 type OrbitModePatch = {
   id?: string;
   activateOrbitControls?: () => void;
 };
 
+function noteHealthyDistance(controls: object, distance: number): void {
+  if (Number.isFinite(distance) && distance > 0.5) healthyDistance.set(controls, distance);
+}
+
+/** Órbita: arrastar roda, botão do meio aproxima, direito desloca. */
+function applyOrbitMouse(cam: OBC.OrthoPerspectiveCamera): void {
+  const controls = cam.controls;
+  const dolly = cam.projection.current === "Orthographic" ? 32 : 16;
+  controls.mouseButtons.left = 1;
+  controls.mouseButtons.middle = dolly;
+  controls.mouseButtons.right = 2;
+  controls.mouseButtons.wheel = dolly;
+}
+
+/**
+ * Tira o rato da órbita sem gravar esse estado vazio.
+ * `setUserInput(false)` duas vezes faz a saída restaurar botões a zero.
+ */
+export function freezeOrbitInput(cam: OBC.OrthoPerspectiveCamera): void {
+  const controls = cam.controls;
+  controls.enabled = false;
+  controls.mouseButtons.left = 0;
+  controls.mouseButtons.middle = 0;
+  controls.mouseButtons.right = 0;
+  controls.mouseButtons.wheel = 0;
+}
+
+/** Devolve a órbita depois de caminhar ou voar, com alvo à frente e rato ativo. */
+export function releaseFlightCamera(cam: OBC.OrthoPerspectiveCamera): void {
+  const controls = cam.controls;
+  const three = cam.three;
+  three.up.set(0, 1, 0);
+  const euler = new THREE.Euler().setFromQuaternion(three.quaternion, "YXZ");
+  euler.z = 0;
+  if (!Number.isFinite(euler.x) || !Number.isFinite(euler.y)) euler.set(0, 0, 0);
+  euler.x = THREE.MathUtils.clamp(euler.x, -1.2, 1.2);
+  three.quaternion.setFromEuler(euler);
+  three.updateMatrixWorld(true);
+
+  const forward = new THREE.Vector3();
+  three.getWorldDirection(forward);
+  if (forward.lengthSq() < 1e-6) forward.set(0, 0, -1);
+  forward.normalize();
+
+  const remembered = healthyDistance.get(controls);
+  let dist = controls.distance;
+  if (!Number.isFinite(dist) || dist < 4) dist = remembered && remembered >= 4 ? remembered : 28;
+  if (remembered && remembered > dist * 3 && dist < 8) dist = remembered;
+  dist = THREE.MathUtils.clamp(dist, 4, ORBIT_MAX_DISTANCE);
+
+  const eye = three.position.clone();
+  const target = eye.clone().addScaledVector(forward, dist);
+  applyOrbitNavigation(cam);
+  controls.stop();
+  void controls.setFocalOffset(0, 0, 0, false);
+  void controls.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, false);
+  controls.update(0);
+  noteHealthyDistance(controls, dist);
+  controls.enabled = true;
+  cam.setUserInput(true);
+  applyOrbitMouse(cam);
+}
+
 function applyOrbitNavigation(cam: OBC.OrthoPerspectiveCamera): void {
   const controls = cam.controls;
   controls.minDistance = ORBIT_MIN_DISTANCE;
   controls.maxDistance = ORBIT_MAX_DISTANCE;
   controls.infinityDolly = false;
-  controls.dollyToCursor = true;
+  controls.dollyToCursor = false;
   controls.smoothTime = 0.12;
-  controls.draggingSmoothTime = 0.05;
+  controls.draggingSmoothTime = 0;
   controls.dollySpeed = 1.35;
   controls.truckSpeed = 2;
 }
 
-function configureOrbitNavigation(cam: OBC.OrthoPerspectiveCamera): void {
+function configureOrbitNavigation(cam: OBC.OrthoPerspectiveCamera, dom?: HTMLElement): void {
   applyOrbitNavigation(cam);
   try {
     const orbit = cam.mode as unknown as OrbitModePatch;
@@ -471,4 +574,66 @@ function configureOrbitNavigation(cam: OBC.OrthoPerspectiveCamera): void {
   } catch {
     // câmara ainda sem NavigationMode
   }
+  if (dom) installZoomGuard(cam, dom);
+}
+
+/**
+ * Se a órbita colapsou (alvo colado na câmara) ou o zoom bateu no mínimo,
+ * o scroll volta a aproximar em vez de ser ignorado.
+ */
+function installZoomGuard(cam: OBC.OrthoPerspectiveCamera, dom: HTMLElement): void {
+  const controls = cam.controls;
+  if (zoomGuards.has(controls)) return;
+  zoomGuards.add(controls);
+  noteHealthyDistance(controls, controls.distance);
+
+  dom.addEventListener(
+    "wheel",
+    (event) => {
+      if (!controls.enabled || event.deltaY === 0) return;
+      applyOrbitNavigation(cam);
+      if (cam.projection.current !== "Perspective") return;
+
+      const dist = controls.distance;
+      const remembered = healthyDistance.get(controls) ?? dist;
+      const zoomIn = event.deltaY < 0;
+      const collapsed = dist < 1.25 && remembered > Math.max(dist * 5, 6);
+      const stuckIn = zoomIn && dist <= controls.minDistance * 1.05;
+      if (!collapsed && !stuckIn) {
+        noteHealthyDistance(controls, dist);
+        return;
+      }
+
+      event.preventDefault();
+      event.stopImmediatePropagation();
+
+      const eye = new THREE.Vector3();
+      const target = new THREE.Vector3();
+      controls.getPosition(eye);
+      controls.getTarget(target);
+      const forward = new THREE.Vector3();
+      cam.three.getWorldDirection(forward);
+      const notches = THREE.MathUtils.clamp(Math.abs(event.deltaY) / 100, 0.35, 2.5);
+
+      if (collapsed) {
+        const factor = Math.pow(zoomIn ? 0.8 : 1.25, notches);
+        const focusDist = THREE.MathUtils.clamp(remembered * factor, 0.4, ORBIT_MAX_DISTANCE);
+        const focus = eye.clone().addScaledVector(forward, focusDist);
+        const nextEye = zoomIn
+          ? eye.clone().lerp(focus, 0.22)
+          : eye.clone().addScaledVector(forward, -remembered * 0.18 * notches);
+        const nextTarget = nextEye.clone().addScaledVector(forward, Math.max(focusDist * (zoomIn ? 0.78 : 1), 0.4));
+        void controls.setLookAt(nextEye.x, nextEye.y, nextEye.z, nextTarget.x, nextTarget.y, nextTarget.z, false);
+        controls.setFocalOffset(0, 0, 0, false);
+        noteHealthyDistance(controls, nextEye.distanceTo(nextTarget));
+        return;
+      }
+
+      const fly = Math.max(dist, 0.25) * 0.65 * notches;
+      eye.addScaledVector(forward, fly);
+      target.addScaledVector(forward, fly);
+      void controls.setLookAt(eye.x, eye.y, eye.z, target.x, target.y, target.z, false);
+    },
+    { capture: true, passive: false },
+  );
 }

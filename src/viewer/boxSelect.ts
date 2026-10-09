@@ -10,6 +10,8 @@ export interface BoxSelectOptions {
   camera: { three: THREE.Camera; setUserInput: (on: boolean) => void };
   highlighter: () => ScheduleHighlighter | null;
   onPicked: (guids: string[], mode: BoxSelectMode) => void;
+  /** Caminhada ou drone: o Shift deixa de armar a caixa. */
+  blocked?: () => boolean;
 }
 
 const _corner = new THREE.Vector3();
@@ -23,6 +25,7 @@ export class BoxSelectController {
   private readonly camera: { three: THREE.Camera; setUserInput: (on: boolean) => void };
   private readonly highlighter: () => ScheduleHighlighter | null;
   private readonly onPicked: BoxSelectOptions["onPicked"];
+  private readonly blocked: () => boolean;
   private overlay: HTMLDivElement;
   private toolOn = false;
   /** Clique armado (ferramenta ou Shift). Só vira arrasto depois de 6 px. */
@@ -37,6 +40,7 @@ export class BoxSelectController {
     this.camera = opts.camera;
     this.highlighter = opts.highlighter;
     this.onPicked = opts.onPicked;
+    this.blocked = opts.blocked ?? (() => false);
     this.overlay = document.createElement("div");
     this.overlay.className = "box-select-rect is-window";
     this.overlay.hidden = true;
@@ -73,7 +77,7 @@ export class BoxSelectController {
   }
 
   private onDown = (e: PointerEvent) => {
-    if (e.button !== 0) return;
+    if (e.button !== 0 || this.blocked()) return;
     const useTool = this.toolOn || e.shiftKey;
     if (!useTool) return;
     e.preventDefault();

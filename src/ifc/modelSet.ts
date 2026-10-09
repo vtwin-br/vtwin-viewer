@@ -2,7 +2,7 @@ import type { ScheduleData, Task } from "../schedule/types";
 import { emptySchedule, recomputeProductGuidsByTask, recomputeScheduleRange } from "../schedule/range";
 import type { IfcSession } from "./ifcSession";
 import type { BimModelRecord, BimModelRepository } from "../bim/contracts";
-import type { VtwinModelRole } from "../project/manifest";
+import type { VtwinModelRevision, VtwinModelRole } from "../project/manifest";
 import { COORDINATION_FILE_NAME, COORDINATION_MODEL_ID } from "./coordinationIfc";
 
 /** ExpressIDs nativos cabem abaixo disto; o slot distingue o ficheiro na vista federada. */
@@ -29,6 +29,9 @@ export interface LoadedIfc extends BimModelRecord {
   color: string;
   hash?: string;
   role: VtwinModelRole;
+  revision: number;
+  revisedAt: string;
+  history: VtwinModelRevision[];
 }
 
 export interface NativeRef {
@@ -108,9 +111,13 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
   add(input: {
     id?: string;
     fileName: string;
+    displayName?: string;
     session: IfcSession;
     hash?: string;
     role?: VtwinModelRole;
+    revision?: number;
+    revisedAt?: string;
+    history?: VtwinModelRevision[];
   }): LoadedIfc {
     const slot = this.nextSlot++;
     const id = input.id ?? `ifc-${this.seq++}`;
@@ -120,7 +127,7 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
       slot,
       fileName: input.fileName,
       displayName: uniqueDisplayName(
-        input.fileName,
+        input.displayName?.trim() || input.fileName,
         this.items.map((m) => m.displayName),
       ),
       session: input.session,
@@ -128,6 +135,9 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
       color: MODEL_LAYER_COLORS[(slot - 1) % MODEL_LAYER_COLORS.length]!,
       hash: input.hash,
       role,
+      revision: Math.max(1, Math.floor(input.revision ?? 1)),
+      revisedAt: input.revisedAt || new Date().toISOString(),
+      history: sanitizeHistory(input.history),
     };
     this.items.push(entry);
     if (role !== "coordination" || !this.activeId) this.activeId = id;
@@ -155,6 +165,30 @@ export class IfcModelSet implements BimModelRepository<LoadedIfc> {
 
   setActive(id: string): void {
     if (this.get(id)) this.activeId = id;
+  }
+
+  setDisplayName(id: string, displayName: string): void {
+    const m = this.get(id);
+    const next = displayName.trim();
+    if (!m || !next) return;
+    m.displayName = uniqueDisplayName(
+      next,
+      this.items.filter((x) => x.id !== id).map((x) => x.displayName),
+    );
+  }
+
+  /** Novo IFC da mesma disciplina: sobe a versão e mantém o nome. */
+  bumpRevision(id: string, fileName: string, hash?: string): void {
+    const m = this.get(id);
+    if (!m) return;
+    m.history = sanitizeHistory([
+      ...m.history,
+      { version: m.revision, fileName: m.fileName, hash: m.hash ?? "", at: m.revisedAt },
+    ]);
+    m.revision += 1;
+    m.revisedAt = new Date().toISOString();
+    m.fileName = fileName;
+    if (hash) m.hash = hash;
   }
 
   rename(id: string, fileName: string): void {
@@ -302,6 +336,19 @@ function remapTask(task: Task, slot: number, modelId: string, fileName: string):
     sourceFileName: fileName,
     isFederationRoot: false,
   };
+}
+
+function sanitizeHistory(raw: VtwinModelRevision[] | undefined): VtwinModelRevision[] {
+  if (!raw?.length) return [];
+  return raw
+    .filter((item) => item && typeof item.fileName === "string")
+    .slice(-12)
+    .map((item) => ({
+      version: Math.max(1, Math.floor(item.version) || 1),
+      fileName: item.fileName,
+      hash: typeof item.hash === "string" ? item.hash : "",
+      at: typeof item.at === "string" ? item.at : "",
+    }));
 }
 
 function uniqueDisplayName(fileName: string, taken: string[]): string {

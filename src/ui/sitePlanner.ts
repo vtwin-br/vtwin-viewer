@@ -67,7 +67,9 @@ export class SitePlanner {
     });
     this.root.addEventListener("click", (event) => {
       const target = event.target;
-      if (!(target instanceof HTMLElement)) return;
+      // O ícone de apagar (e os demais) é SVG. SVGElement não é HTMLElement,
+      // então o clique no desenho era descartado e a ação nunca disparava.
+      if (!(target instanceof Element)) return;
       const button = target.closest<HTMLElement>("[data-act]");
       if (!button || button instanceof HTMLInputElement || button instanceof HTMLSelectElement) return;
       this.onClick(button.dataset.act || "", button);

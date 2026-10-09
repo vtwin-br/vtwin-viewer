@@ -3,6 +3,7 @@ import type { OrthoPerspectiveCamera } from "@thatopen/components";
 import type * as FRAGS from "@thatopen/fragments";
 import type { GoogleEarthLayer } from "./earthTiles";
 import { WalkCollider } from "./walkCollision";
+import { freezeOrbitInput, releaseFlightCamera } from "./setupWorld";
 
 /** Altura da pessoa (m) e câmara à cota dos olhos (~10 cm abaixo do topo). */
 const BODY_HEIGHT = 1.8;
@@ -161,8 +162,7 @@ export class FirstPersonController {
     this.syncButton();
     this.syncHint();
     this.opts.onEnabledChange?.(true);
-    cam.setUserInput(false);
-    cam.controls.enabled = false;
+    freezeOrbitInput(cam);
     this.applyCamera();
     void this.opts.domElement.requestPointerLock();
   }
@@ -176,8 +176,7 @@ export class FirstPersonController {
     cam.threePersp.fov = this.prevFov;
     cam.threePersp.near = this.prevNear;
     cam.threePersp.updateProjectionMatrix();
-    cam.controls.enabled = true;
-    cam.setUserInput(true);
+    releaseFlightCamera(cam);
 
     this.opts.earth.setWalkQuality(false);
     this.opts.overlay.hidden = true;

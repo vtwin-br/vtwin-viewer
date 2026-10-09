@@ -17,6 +17,7 @@ import {
   VTWIN_MANIFEST_VERSION,
   type VtwinManifest,
   type VtwinModelEntry,
+  type VtwinModelRevision,
 } from "./manifest";
 
 export interface VtwinPackModel {
@@ -31,6 +32,10 @@ export interface VtwinPackModel {
   schedule: ScheduleData;
   index: StepIndex;
   role?: VtwinModelEntry["role"];
+  displayName?: string;
+  revision?: number;
+  revisedAt?: string;
+  history?: VtwinModelRevision[];
 }
 
 export interface UnpackedVtwinModel {
@@ -88,10 +93,14 @@ export async function packVtwin(
     models: models.map((m) => ({
       id: m.id,
       fileName: m.fileName,
+      displayName: m.displayName,
       role: m.role === "coordination" ? "coordination" : "discipline",
       schema: m.schema,
       hash: m.hash,
       visible: m.visible,
+      revision: m.revision,
+      revisedAt: m.revisedAt,
+      history: m.history,
       extra: m.extra,
     })),
   };

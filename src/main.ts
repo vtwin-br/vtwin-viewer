@@ -1,5 +1,5 @@
 import "./styles.css";
-import { createViewer, loadIfc, loadFragments, exportFragmentsBuffer, unloadIfc, fitCameraToItemSets, fitCameraToVisibleModels, setAllModelsQuality, deviceGraphicsQuality, setWorldGridVisible } from "./viewer/setupWorld";
+import { createViewer, loadIfc, loadFragments, exportFragmentsBuffer, unloadIfc, fitCameraToItemSets, fitCameraToVisibleModels, orbitCameraAroundItems, orbitCameraAroundPoint, setAllModelsQuality, deviceGraphicsQuality, setWorldGridVisible } from "./viewer/setupWorld";
 import { ScheduleHighlighter } from "./viewer/highlight";
 import { parseSchedule } from "./schedule/parseSchedule";
 import { parseScheduleFromFragments } from "./schedule/parseFragmentsSchedule";
@@ -21,6 +21,8 @@ import { buildBimCatalog, compactCatalog, type BimCatalog } from "./projectPlan/
 import { applyLlmPicks, compactTasksForLlm, suggestProductLinks } from "./projectPlan/linkAssist";
 import { refineWithAi } from "./projectPlan/linkAssistLlm";
 import { LogisticsWorkspace } from "./ui/logisticsWorkspace";
+import { ModelsWorkspace } from "./ui/modelsWorkspace";
+import { DashboardWorkspace } from "./ui/dashboardWorkspace";
 import { ModuleWorkspace } from "./ui/moduleWorkspace";
 import { SitePlanner, type PlanFieldEvent, type PlanTool } from "./ui/sitePlanner";
 import {
@@ -58,10 +60,10 @@ import { slidesToPdf, slidesToZip } from "./project/slidesPdf";
 import { formatHexColor } from "./ifc/surfaceStyle";
 import { bytesToBase64 } from "./viewer/pdfSheet";
 import { VISTA4D_SITE_ASSET } from "./site/types";
-import { SitePlanLayer, type SiteHit } from "./viewer/sitePlanLayer";
+import { poseAfterAxisSpin, SitePlanLayer, type SiteHit } from "./viewer/sitePlanLayer";
 import * as THREE from "three";
 import { renderModulePlaceholder } from "./ui/modulePlaceholder";
-import { findToolByWorkspace, workspaceHasEarth, workspaceShell, type WorkspaceId } from "./app/catalog";
+import { findToolByWorkspace, workspaceShell, type WorkspaceId } from "./app/catalog";
 import { IfcSession, type TaskPatch } from "./ifc/ifcSession";
 import { IfcModelSet, encodeIfcRef, scheduleTitle, type LoadedIfc } from "./ifc/modelSet";
 import {
@@ -87,6 +89,7 @@ import {
 import { computeCostProgress, formatMoney } from "./schedule/cost";
 import type { ScheduleData, Task } from "./schedule/types";
 import { FirstPersonController } from "./viewer/firstPerson";
+import { DroneController } from "./viewer/drone";
 import { BoxSelectController } from "./viewer/boxSelect";
 import { SiteOverlay } from "./viewer/siteOverlay";
 import { SiteDrawController } from "./viewer/siteDraw";
@@ -193,6 +196,11 @@ async function main() {
   const btnWalk = document.getElementById("btn-walk") as HTMLButtonElement | null;
   const walkOverlay = document.getElementById("walk-overlay");
   const walkHint = document.getElementById("walk-hint");
+  const btnDrone = document.getElementById("btn-drone") as HTMLButtonElement | null;
+  const droneOverlay = document.getElementById("drone-overlay");
+  const droneHint = document.getElementById("drone-hint");
+  const droneAlt = document.getElementById("drone-alt");
+  const droneSpeed = document.getElementById("drone-spd");
   const btnEarth = document.getElementById("btn-earth") as HTMLButtonElement | null;
   const btnEarthSettings = document.getElementById("btn-earth-settings") as HTMLButtonElement | null;
   const btnHudCost = document.getElementById("btn-hud-cost") as HTMLButtonElement | null;
@@ -302,14 +310,18 @@ async function main() {
   let shell: ReturnType<typeof initAppShell> | null = null;
   let openEarthPanel = (_open: boolean) => {};
 
-  type LayoutPanel = "schedule" | "inspector" | "timeline" | "gantt" | "sets";
+  type LayoutPanel = "schedule" | "inspector" | "timeline" | "gantt" | "sets" | "kpis" | "chat";
   const PANEL_LS: Record<LayoutPanel, string> = {
     schedule: "vista4d.scheduleCollapsed",
     inspector: "vista4d.inspectorCollapsed",
     timeline: "vista4d.timelineCollapsed",
     gantt: "vista4d.ganttCollapsed",
     sets: "vista4d.setsCollapsed",
+    kpis: "vista4d.dashKpiCollapsed",
+    chat: "vista4d.dashChatCollapsed",
   };
+  let modelsWs: ModelsWorkspace | null = null;
+  let dashboardWs: DashboardWorkspace | null = null;
 
   const readCollapsed = (key: string, fallback = false): boolean => {
     try {
@@ -362,6 +374,8 @@ async function main() {
       "sets",
       ws === "project-plan" && grid.classList.contains("model-open") && grid.classList.contains("sets-collapsed"),
     );
+    setChip("kpis", ws === "viewer" && grid.classList.contains("kpis-collapsed"));
+    setChip("chat", ws === "viewer" && grid.classList.contains("chat-collapsed"));
     const hudIdle = document.getElementById("sim-hud")?.classList.contains("is-idle");
     setChip("hud", ws === "schedule-4d" && !hudIdle && !!simHud && !simHud.chartVisible);
     const earthEl = document.getElementById("earth-panel");
@@ -484,6 +498,7 @@ async function main() {
   let pauseTimeline = () => {};
   let disablePlanVizTools = () => {};
   let restorePlanVizTools = () => {};
+  let onViewportVisibility = () => {};
   let onLogisticsWorkspace = () => {};
   let highlightPlanTask: (task: { linkedIfcTaskId?: number } | null) => void = () => {};
   let focusGuidsInView = async (_guids: Iterable<string>, _opts?: { fit?: boolean }) => {};
@@ -501,7 +516,13 @@ async function main() {
   let planDirty = false;
   let pendingPdf: { name: string; pdf: string } | null = null;
   let pdfAlign: { id: string; pair: 0 | 1; phase: "sheet" | "ground" } | null = null;
-  let siteDrag: { hit: SiteHit; last: number; x: number; y: number } | null = null;
+  let siteDrag: {
+    hit: SiteHit;
+    last: number;
+    x: number;
+    y: number;
+    spin?: { origin: THREE.Vector3; axis: THREE.Vector3; basisX: THREE.Vector3; basisY: THREE.Vector3 };
+  } | null = null;
   let planDraft: { kind: "path" | "terrain" | "hatch" | "polygon"; id: string; ownerId?: string } | null = null;
   let sitePlanner: SitePlanner | null = null;
   let tripSeconds = 0;
@@ -538,7 +559,6 @@ async function main() {
   let refitVisibleModels = () => {};
   let showPlaceHint: (text: string | null) => void = () => {};
   let syncSiteAssist: () => void = () => {};
-  let ensureSiteMap = () => {};
   let hasMapTilesKey = false;
   const pdfStepName = (): "" | "d1" | "g1" | "d2" | "g2" => {
     if (!pdfAlign) return "";
@@ -588,9 +608,10 @@ async function main() {
     const logisticsPanel = document.getElementById("logistics-panel");
     const panelTitle = document.querySelector("#sidebar .panel-title");
     if (logisticsPanel) logisticsPanel.hidden = shellKind !== "logistics";
+    const modelsPanel = document.getElementById("models-panel");
+    if (modelsPanel) modelsPanel.hidden = shellKind !== "models";
     const toolShell =
       shellKind === "dashboard" ||
-      shellKind === "viewer" ||
       shellKind === "docs" ||
       shellKind === "editor" ||
       shellKind === "coordination";
@@ -615,13 +636,10 @@ async function main() {
                       : "4D";
     }
     if (toolShell) setPanelOpen("schedule", true, false);
-    if (shellKind !== "schedule" && shellKind !== "logistics" && shellKind !== "site") {
-      pauseTimeline();
-      disablePlanVizTools();
-    } else {
-      if (shellKind !== "schedule") pauseTimeline();
-      restorePlanVizTools();
-    }
+    if (shellKind !== "schedule") pauseTimeline();
+    if (shellKind === "models" || shellKind === "placeholder") disablePlanVizTools();
+    else restorePlanVizTools();
+    onViewportVisibility();
     if (shellKind === "plan") {
       dirty = false;
       void highlighter?.revealAll();
@@ -635,32 +653,45 @@ async function main() {
       dirty = true;
       if (simKicker) simKicker.textContent = "Simulação 4D";
       currentDateEl.textContent = formatDateLabel(lastDate);
-      ensureSiteMap();
       if (toggleSchedule) {
         toggleSchedule.title = "Ocultar";
         toggleSchedule.setAttribute("aria-label", "Ocultar");
       }
-      void highlighter?.clearIsolation().then(() => {
+      void (async () => {
+        await highlighter?.clearPaint();
+        await highlighter?.clearIsolation();
         dirty = true;
         refitVisibleModels();
-      });
+      })();
     } else if (shellKind === "site") {
       setPlanModelOpen(false);
       dirty = true;
+      void highlighter?.clearPaint();
       if (simKicker) simKicker.textContent = "Logística";
       currentDateEl.textContent = formatDateLabel(lastDate);
-      ensureSiteMap();
       if (grid?.classList.contains("schedule-collapsed")) setPanelOpen("schedule", true);
     } else if (shellKind === "dashboard") {
       setPlanModelOpen(false);
       dirty = true;
       if (simKicker) simKicker.textContent = "Dashboard";
       currentDateEl.textContent = formatDateLabel(lastDate);
+    } else if (shellKind === "models") {
+      setPlanModelOpen(false);
+      dirty = false;
+      if (simKicker) simKicker.textContent = "Modelos";
+      currentDateEl.textContent = models.size ? models.label() : "Sem disciplinas";
+      modelsWs?.refresh();
     } else if (shellKind === "viewer") {
       setPlanModelOpen(false);
-      dirty = true;
+      dirty = false;
       if (simKicker) simKicker.textContent = "Visualizador";
-      currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
+      currentDateEl.textContent = formatDateLabel(lastDate);
+      void (async () => {
+        await highlighter?.clearPaint();
+        await highlighter?.clearIsolation();
+        await highlighter?.clearSelection();
+        await highlighter?.revealAll();
+      })();
     } else if (shellKind === "logistics") {
       setPlanModelOpen(false);
       dirty = true;
@@ -678,6 +709,7 @@ async function main() {
       currentDateEl.textContent = models.size ? models.label() : "Sem modelo IFC";
     }
     projectWs?.setActive(shellKind === "plan");
+    dashboardWs?.setActive(shellKind === "viewer");
     inspector.setReadOnly(shellKind !== "plan");
     renderModulePlaceholder(id);
     refreshModuleWorkspace(id);
@@ -700,6 +732,8 @@ async function main() {
   if (readCollapsed(PANEL_LS.timeline)) setPanelOpen("timeline", false, false);
   if (readCollapsed(PANEL_LS.gantt)) setPanelOpen("gantt", false, false);
   if (readCollapsed(PANEL_LS.sets)) setPanelOpen("sets", false, false);
+  if (readCollapsed(PANEL_LS.kpis)) setPanelOpen("kpis", false, false);
+  if (readCollapsed(PANEL_LS.chat)) setPanelOpen("chat", false, false);
 
   const navEl = document.getElementById("module-nav");
   if (grid && navEl) {
@@ -946,9 +980,13 @@ async function main() {
           packed.push({
             id: entry.id,
             fileName: entry.fileName,
+            displayName: entry.displayName,
             schema: entry.session.ifcSchema,
             hash,
             visible: entry.visible,
+            revision: entry.revision,
+            revisedAt: entry.revisedAt,
+            history: entry.history,
             extra,
             ifc,
             frag,
@@ -1045,8 +1083,13 @@ async function main() {
     schedule: placeholder,
     onDateChange: (date) => {
       lastDate = date;
-      dirty = true;
       const shellNow = workspaceShell(nav.getWorkspace());
+      if (shellNow === "viewer") {
+        currentDateEl.textContent = formatDateLabel(date);
+        dashboardWs?.refreshKpis();
+        return;
+      }
+      dirty = true;
       if (shellNow === "schedule" || shellNow === "site" || shellNow === "dashboard") {
         currentDateEl.textContent = formatDateLabel(date);
       }
@@ -1789,7 +1832,18 @@ async function main() {
     };
     let modelGizmo: ModelGizmo | null = null;
     let walk: FirstPersonController | null = null;
+    let drone: DroneController | null = null;
     let lastWalkFragUpdate = 0;
+    const piloting = () => !!(walk?.enabled || drone?.enabled);
+    const viewerLive = () => {
+      const shell = workspaceShell(nav.getWorkspace());
+      if (shell === "models" || shell === "placeholder") return false;
+      if (shell === "plan") return !!grid?.classList.contains("model-open");
+      return true;
+    };
+    const tileQualityForFlight = () => {
+      earth.setWalkQuality(piloting());
+    };
     let boxSelect: BoxSelectController | null = null;
     let renderSets = () => {};
     let bindSpatialTree = () => {};
@@ -1810,6 +1864,7 @@ async function main() {
       if (setsEl) setsEl.hidden = !(open && nav.getWorkspace() === "project-plan");
       if (open) {
         pauseTimeline();
+        restorePlanVizTools();
         void highlighter?.revealAll().then(() => {
           highlightPlanTask(projectWs?.getSelected() ?? null);
           requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
@@ -1818,6 +1873,7 @@ async function main() {
         boxSelect?.setToolEnabled(false);
         btnBoxSelect?.classList.remove("is-active");
         btnBoxSelect?.setAttribute("aria-pressed", "false");
+        onViewportVisibility();
       }
       constrainPanelWidths();
       refreshLayoutRestore();
@@ -1847,6 +1903,10 @@ async function main() {
     };
 
     fitCurrentView = () => {
+      if (drone?.enabled) {
+        drone.respawn();
+        return;
+      }
       if (walk?.enabled) {
         walk.respawn();
         return;
@@ -1941,6 +2001,33 @@ async function main() {
       if (!center) return 0;
       return Math.atan2(y - center.y, x - center.x);
     };
+    const spinRay = new THREE.Raycaster();
+    const spinNdc = new THREE.Vector2();
+    const spinHit = new THREE.Vector3();
+    const spinPlane = new THREE.Plane();
+    const captureSpin = (id: string, part: "x" | "y" | "z") => {
+      const frame = siteLayer?.rotationFrame(id, part);
+      if (!frame) return null;
+      const helper = new THREE.Vector3(0, 1, 0);
+      if (Math.abs(frame.axis.dot(helper)) > 0.85) helper.set(1, 0, 0);
+      const basisX = new THREE.Vector3().crossVectors(helper, frame.axis).normalize();
+      const basisY = new THREE.Vector3().crossVectors(frame.axis, basisX).normalize();
+      return { origin: frame.origin, axis: frame.axis, basisX, basisY };
+    };
+    const angleOnSpin = (
+      spin: { origin: THREE.Vector3; axis: THREE.Vector3; basisX: THREE.Vector3; basisY: THREE.Vector3 },
+      clientX: number,
+      clientY: number,
+    ) => {
+      const rect = siteCanvas().getBoundingClientRect();
+      if (rect.width < 1 || rect.height < 1) return null;
+      spinNdc.set(((clientX - rect.left) / rect.width) * 2 - 1, -((clientY - rect.top) / rect.height) * 2 + 1);
+      spinRay.setFromCamera(spinNdc, viewer.world.camera.three);
+      spinPlane.setFromNormalAndCoplanarPoint(spin.axis, spin.origin);
+      if (!spinRay.ray.intersectPlane(spinPlane, spinHit)) return null;
+      spinHit.sub(spin.origin);
+      return Math.atan2(spinHit.dot(spin.basisY), spinHit.dot(spin.basisX));
+    };
     const wrapAngle = (delta: number) => {
       let value = delta;
       while (value > Math.PI) value -= Math.PI * 2;
@@ -1980,7 +2067,9 @@ async function main() {
         points.splice(index + 1, 0, { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 });
         hit = { ...hit, part: "vertex", index: index + 1 };
       }
-      siteDrag = { hit, last: dragAngle(hit.id, event.clientX, event.clientY), x: event.clientX, y: event.clientY };
+      const spin = hit.part === "x" || hit.part === "y" || hit.part === "z" ? captureSpin(hit.id, hit.part) : null;
+      const last = spin ? angleOnSpin(spin, event.clientX, event.clientY) ?? 0 : dragAngle(hit.id, event.clientX, event.clientY);
+      siteDrag = { hit, last, x: event.clientX, y: event.clientY, spin: spin ?? undefined };
       const controls = orbit();
       if (controls) controls.enabled = false;
       viewportEl.setPointerCapture(event.pointerId);
@@ -1992,7 +2081,7 @@ async function main() {
       (e) => {
         if (e.button !== 0) return;
         pickDown = { x: e.clientX, y: e.clientY };
-        if (nav.getWorkspace() !== "site-plan" || !siteLayer || walk?.enabled) return;
+        if (nav.getWorkspace() !== "site-plan" || !siteLayer || piloting()) return;
         const canvas = siteCanvas();
         const hit = siteLayer.hit(viewer.world.camera.three, e, canvas);
         const handle =
@@ -2027,12 +2116,21 @@ async function main() {
         sitePlan.drills.find((entry) => entry.id === hit.id) ||
         sitePlan.masses.find((entry) => entry.id === hit.id);
       if ((hit.part === "x" || hit.part === "y" || hit.part === "z") && (item || sitePlan.terrains.some((entry) => entry.id === hit.id) || sitePlan.fences.some((entry) => entry.id === hit.id))) {
-        const angle = dragAngle(hit.id, e.clientX, e.clientY);
+        const angle = siteDrag.spin ? angleOnSpin(siteDrag.spin, e.clientX, e.clientY) : dragAngle(hit.id, e.clientX, e.clientY);
+        if (angle == null) return;
         const delta = wrapAngle(angle - siteDrag.last);
         siteDrag.last = angle;
         const terrain = sitePlan.terrains.find((entry) => entry.id === hit.id);
         const fence = sitePlan.fences.find((entry) => entry.id === hit.id);
-        if (item && (hit.part === "x" || hit.part === "y" || hit.part === "z")) setAxis(item, hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz", poseOf(item)[hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz"] + delta);
+        if (item && siteDrag.spin) {
+          const next = poseAfterAxisSpin(poseOf(item), siteDrag.spin.axis, delta);
+          item.rx = next.rx;
+          item.ry = next.ry;
+          item.rz = next.rz;
+          item.yaw = next.rz;
+        } else if (item && (hit.part === "x" || hit.part === "y" || hit.part === "z")) {
+          setAxis(item, hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz", poseOf(item)[hit.part === "x" ? "rx" : hit.part === "y" ? "ry" : "rz"] + delta);
+        }
         if (terrain && hit.part === "z") terrain.rz = (terrain.rz ?? 0) + delta;
         if (fence && hit.part === "z") {
           fence.rz = (fence.rz ?? fence.yaw) + delta;
@@ -2135,6 +2233,8 @@ async function main() {
         if (picked && picked.part === "body" && !drawing) {
           siteLayer.select(picked.id);
           sitePlanner.setSelected(picked.id);
+          const anchor = siteLayer.anchor(picked.id);
+          if (anchor) orbitCameraAroundPoint(viewer.world, anchor);
           return;
         }
       }
@@ -2142,7 +2242,7 @@ async function main() {
     });
 
     const pickTaskFromModel = async (e: PointerEvent) => {
-      if (walk?.enabled) return;
+      if (piloting()) return;
       if (modelGizmo?.isDragging()) return;
       if (!highlighter) return;
       const renderer = viewer.world.renderer;
@@ -2159,6 +2259,7 @@ async function main() {
       if (e.ctrlKey || e.metaKey) await highlighter.toggleWorkingGuid(guid);
       else await highlighter.setWorkingSelection([guid]);
       refreshWorkingUi();
+      void orbitCameraAroundItems(viewer, viewer.fragments.list.get(hit.modelId), [hit.localId], hit.point);
     };
 
     const ifcTreeEl = document.getElementById("ifc-tree");
@@ -2495,6 +2596,7 @@ async function main() {
       viewport: viewportEl,
       camera: viewer.world.camera as unknown as { three: import("three").Camera; setUserInput: (on: boolean) => void },
       highlighter: () => highlighter,
+      blocked: () => piloting(),
       onPicked: (guids, mode) => {
         if (!highlighter) return;
         const run =
@@ -2685,6 +2787,9 @@ async function main() {
       if (models.visible.length) tree.update(lastDate);
       refreshSiteVisual();
       refreshModuleWorkspace(nav.getWorkspace());
+      modelsWs?.refresh();
+      if (structure) dashboardWs?.invalidateCatalog();
+      else dashboardWs?.refreshKpis();
       refreshSitePlanner();
       requestAnimationFrame(() => window.dispatchEvent(new Event("resize")));
     };
@@ -2816,14 +2921,14 @@ async function main() {
       : null;
 
     const syncGizmo = () => {
-      const allow = workspaceHasEarth(nav.getWorkspace()) && !walk?.enabled;
+      const allow = viewerLive() && !piloting();
       gizmo.setAllowed(allow);
       if (!allow) earthPanel?.setMode(null);
       if (btnEarthSettings) btnEarthSettings.hidden = !allow;
     };
 
     const toggleGizmoMode = (mode: GizmoMode) => {
-      if (!workspaceHasEarth(nav.getWorkspace()) || walk?.enabled) return;
+      if (!viewerLive() || piloting()) return;
       const next = gizmo.getMode() === mode ? null : mode;
       gizmo.setMode(next);
       earthPanel?.setMode(next);
@@ -2835,30 +2940,11 @@ async function main() {
       if (btnEarth) btnEarth.title = enabled ? "Ocultar contexto Google Earth" : "Mostrar contexto Google Earth";
       earthPanelRoot?.classList.toggle("is-earth-on", enabled);
       syncGizmo();
-      if (enabled && openPanel && !walk?.enabled) setEarthPanelOpen(true);
+      if (enabled && openPanel && !piloting()) setEarthPanelOpen(true);
       const q = deviceGraphicsQuality();
       setAllModelsQuality(viewer.fragments, enabled ? Math.min(q, 0.45) : q);
       setWorldGridVisible(viewer.world, !enabled);
       refreshSiteVisual();
-    };
-    ensureSiteMap = () => {
-      const shell = workspaceShell(nav.getWorkspace());
-      if (shell !== "site" && shell !== "schedule") return;
-      if (!apiKey) return;
-      if (earth.enabled) {
-        setEarthEnabledUi(true, false);
-        return;
-      }
-      earthWanted = true;
-      void earth.setEnabled(true)
-        .then(() => {
-          const now = workspaceShell(nav.getWorkspace());
-          if (now !== "site" && now !== "schedule") return;
-          setEarthEnabledUi(earth.enabled, false);
-        })
-        .catch(() => {
-          setWorldGridVisible(viewer.world, true);
-        });
     };
     syncGizmo();
 
@@ -2871,10 +2957,12 @@ async function main() {
         hint: walkHint,
         button: btnWalk,
         earth,
-        canEnable: () => workspaceHasEarth(nav.getWorkspace()),
+        canEnable: () => viewerLive(),
         onEnabledChange: (on) => {
+          if (on) drone?.disable();
           syncGizmo();
           if (on) setEarthPanelOpen(false);
+          tileQualityForFlight();
         },
         onCameraMove: () => {
           const t = performance.now();
@@ -2885,6 +2973,32 @@ async function main() {
       });
       walk?.allowSiteFloor(true);
       walk?.collider.setSiteGround(siteLayer?.walkObject() ?? null);
+    }
+
+    if (btnDrone && droneOverlay && droneHint && droneAlt && droneSpeed) {
+      drone = new DroneController({
+        camera: viewer.world.camera as import("@thatopen/components").OrthoPerspectiveCamera,
+        domElement: canvas,
+        overlay: droneOverlay,
+        hint: droneHint,
+        alt: droneAlt,
+        speed: droneSpeed,
+        button: btnDrone,
+        earth,
+        canEnable: () => viewerLive(),
+        onEnabledChange: (on) => {
+          if (on && walk?.enabled) walk.disable();
+          syncGizmo();
+          if (on) setEarthPanelOpen(false);
+          tileQualityForFlight();
+        },
+        onCameraMove: () => {
+          const t = performance.now();
+          if (t - lastWalkFragUpdate < 48) return;
+          lastWalkFragUpdate = t;
+          void requestFragmentsUpdate(viewer.fragments);
+        },
+      });
     }
 
     const paintIfcColors = async () => {
@@ -3031,6 +3145,7 @@ async function main() {
       viewport: document.getElementById("viewport") ?? canvas,
       camera: viewer.world.camera as import("@thatopen/components").OrthoPerspectiveCamera,
       earth,
+      blocked: () => piloting(),
       onDraft: (pts) => {
         logisticsWs?.setDraftCount(pts.length);
         refreshSiteVisualNow(pts);
@@ -3155,6 +3270,7 @@ async function main() {
 
     disablePlanVizTools = () => {
       if (walk?.enabled) walk.disable();
+      if (drone?.enabled) drone.disable();
       syncGizmo();
       setEarthPanelOpen(false);
       showEarthStatus(null);
@@ -3162,10 +3278,15 @@ async function main() {
         void earth.setEnabled(false).then(() => setEarthEnabledUi(false));
       }
     };
+    onViewportVisibility = () => {
+      if (viewerLive()) return;
+      if (walk?.enabled) walk.disable();
+      if (drone?.enabled) drone.disable();
+    };
     restorePlanVizTools = () => {
       syncGizmo();
       if (!earthWanted || !apiKey || earth.enabled) return;
-      if (!workspaceHasEarth(nav.getWorkspace())) return;
+      if (!viewerLive()) return;
       void earth.setEnabled(true).then((how) => {
         setEarthEnabledUi(earth.enabled);
         if (earth.enabled) {
@@ -3178,7 +3299,7 @@ async function main() {
     };
 
     btnEarthSettings?.addEventListener("click", () => {
-      if (!workspaceHasEarth(nav.getWorkspace())) return;
+      if (!viewerLive()) return;
       setEarthPanelOpen(!earthPanel?.isVisible());
     });
 
@@ -3188,7 +3309,7 @@ async function main() {
         sitePlanner?.arm(sitePlanner.tool() === "terrain" ? "" : "terrain");
         return;
       }
-      if (!workspaceHasEarth(nav.getWorkspace())) return;
+      if (!viewerLive()) return;
       const next = !earth.enabled;
       earthWanted = next;
       try {
@@ -3200,7 +3321,7 @@ async function main() {
         } else {
           showEarthStatus(null);
         }
-        if (walk?.enabled) earth.setWalkQuality(true);
+        if (piloting()) earth.setWalkQuality(true);
       } catch (err) {
         console.error("Falha a (des)ativar Google Earth:", err);
         const message = (err as Error).message;
@@ -3467,15 +3588,26 @@ async function main() {
 
     const finishLoadedModel = async (
       ingested: NonNullable<Awaited<ReturnType<typeof ingestIfc>>>,
-      opts?: { extra?: import("./ifc/georef").ModelExtraTransform; skipFit?: boolean },
+      opts?: {
+        extra?: import("./ifc/georef").ModelExtraTransform;
+        skipFit?: boolean;
+        displayName?: string;
+        revision?: number;
+        revisedAt?: string;
+        history?: import("./project/manifest").VtwinModelRevision[];
+      },
     ) => {
       if (opts?.extra) ingested.session.hydrateExtraTransform(opts.extra);
       const entry = models.add({
         id: ingested.modelId,
         fileName: ingested.fileName,
+        displayName: opts?.displayName,
         session: ingested.session,
         hash: ingested.hash,
         role: "discipline",
+        revision: opts?.revision,
+        revisedAt: opts?.revisedAt,
+        history: opts?.history,
       });
       viewportModels.attach(entry.id, ingested.model);
       applyExtraToObject(ingested.model.object, ingested.session.getExtraTransform());
@@ -3543,7 +3675,17 @@ async function main() {
     };
 
     const finishCoordinationModel = async (member: {
-      entry: { id: string; fileName: string; schema: import("./ifc/stepText").IfcSchemaKind; hash: string; extra?: import("./ifc/georef").ModelExtraTransform };
+      entry: {
+        id: string;
+        fileName: string;
+        displayName?: string;
+        schema: import("./ifc/stepText").IfcSchemaKind;
+        hash: string;
+        extra?: import("./ifc/georef").ModelExtraTransform;
+        revision?: number;
+        revisedAt?: string;
+        history?: import("./project/manifest").VtwinModelRevision[];
+      };
       ifc: Uint8Array;
       schedule: ScheduleData | null;
       index: import("./ifc/stepIndex").StepIndex | null;
@@ -3572,9 +3714,13 @@ async function main() {
       models.add({
         id: member.entry.id,
         fileName: member.entry.fileName,
+        displayName: member.entry.displayName,
         session,
         hash,
         role: "coordination",
+        revision: member.entry.revision,
+        revisedAt: member.entry.revisedAt,
+        history: member.entry.history,
       });
     };
 
@@ -3651,6 +3797,10 @@ async function main() {
             {
               extra: member.entry.extra,
               skipFit: index < members.length - 1,
+              displayName: member.entry.displayName,
+              revision: member.entry.revision,
+              revisedAt: member.entry.revisedAt,
+              history: member.entry.history,
             },
           );
           const meshEntry = models.get(member.entry.id);
@@ -3684,6 +3834,10 @@ async function main() {
         await finishLoadedModel(ingested, {
           extra: member.entry.extra,
           skipFit: index < members.length - 1,
+          displayName: member.entry.displayName,
+          revision: member.entry.revision,
+          revisedAt: member.entry.revisedAt,
+          history: member.entry.history,
         });
         const entry = models.get(ingested.modelId);
         if (entry && !member.entry.visible) {
@@ -3727,44 +3881,144 @@ async function main() {
     const replaceMemberIfc = async (id: string, buffer: Uint8Array, fileName: string) => {
       const entry = models.get(id);
       if (!entry) return;
-      setLoading(true, "A substituir IFC");
-      const previous = entry.session.schedule;
-      const extra = entry.session.getExtraTransform();
-      await highlighter?.removeModel(id);
-      siteLayer?.unbind(id);
-      await unloadIfc(viewer, id);
-      viewportModels.detach(id);
-      const ingested = await ingestIfc(buffer, fileName, { modelId: id, skipDuplicateCheck: true });
-      if (!ingested) {
-        setLoading(false);
-        window.alert("Não foi possível substituir o IFC.");
+      const nextHash = await hashIfcBytes(buffer);
+      if (entry.hash && entry.hash === nextHash) {
+        modelsWs?.setNotice(id, "Este IFC já é a versão atual desta disciplina.");
         return;
       }
-      const report = ingested.session.adoptPlanningFrom(previous);
-      ingested.session.hydrateExtraTransform(extra);
-      entry.session = ingested.session;
-      entry.hash = ingested.hash;
-      models.rename(id, fileName);
-      ingested.session.fileName = entry.fileName;
-      viewportModels.attach(id, ingested.model);
-      siteLayer?.bind(id, ingested.model.object);
-      if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
-      await highlighter.addModel(id, ingested.model, collectAllGuids(models.mergedSchedule()));
-      models.setActive(id);
-      attachGizmoToActive(false);
-      if (!extraIsIdentity(extra)) gizmo.apply(extra);
-      syncWalkModels();
-      refreshFederatedView({ structure: true });
-      dirty = true;
-      tree.update(lastDate);
-      refreshInspector();
-      refreshCost5d();
-      setLoading(false);
-      void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
-      window.alert(listOrphanSummary(report, entry.displayName));
+      const nextVer = entry.revision + 1;
+      modelsWs?.setNotice(id, null);
+      modelsWs?.setBusy(id, `A converter o IFC para Fragments (v${entry.revision} → v${nextVer}).`);
+      setLoading(true, "A substituir IFC");
+      try {
+        const previous = entry.session.schedule;
+        const extra = entry.session.getExtraTransform();
+        await highlighter?.removeModel(id);
+        siteLayer?.unbind(id);
+        await unloadIfc(viewer, id);
+        viewportModels.detach(id);
+        const ingested = await ingestIfc(buffer, fileName, { modelId: id, skipDuplicateCheck: true });
+        if (!ingested) {
+          window.alert("Não foi possível substituir o IFC.");
+          return;
+        }
+        const report = ingested.session.adoptPlanningFrom(previous);
+        ingested.session.hydrateExtraTransform(extra);
+        entry.session = ingested.session;
+        models.bumpRevision(id, fileName, ingested.hash);
+        ingested.session.fileName = entry.fileName;
+        viewportModels.attach(id, ingested.model);
+        siteLayer?.bind(id, ingested.model.object);
+        if (!highlighter) highlighter = new ScheduleHighlighter(viewer.fragments);
+        await highlighter.addModel(id, ingested.model, collectAllGuids(models.mergedSchedule()));
+        models.setActive(id);
+        attachGizmoToActive(false);
+        if (!extraIsIdentity(extra)) gizmo.apply(extra);
+        syncWalkModels();
+        refreshFederatedView({ structure: true });
+        dirty = nav.getWorkspace() !== "viewer" && nav.getWorkspace() !== "models";
+        tree.update(lastDate);
+        refreshInspector();
+        refreshCost5d();
+        void fitCameraToVisibleModels(viewer, { skipModelIds: skipFitIds() });
+        const summary = listOrphanSummary(report, entry.displayName);
+        if (nav.getWorkspace() === "models") modelsWs?.setNotice(id, summary);
+        else window.alert(summary);
+      } finally {
+        modelsWs?.setBusy(null);
+        setLoading(false);
+      }
     };
 
     const pickIfcFile = () => fileInput?.click();
+
+    const modelsRoot = document.getElementById("models-panel");
+    if (modelsRoot) {
+      modelsWs = new ModelsWorkspace(modelsRoot, {
+        models: () => models.disciplines,
+        onAdd: () => pickIfcFile(),
+        onUpdateVersion: (id) => pickReplaceIfc(id),
+        onRemove: (id) => void removeLoadedModel(id),
+        onRename: (id, displayName) => {
+          models.setDisplayName(id, displayName);
+          planDirty = true;
+          renderModelLayers();
+          modelsWs?.refresh();
+          syncFileChrome();
+        },
+      });
+      if (nav.getWorkspace() === "models") modelsWs.refresh();
+    }
+
+    const dashKpisRoot = document.getElementById("dashboard-kpis");
+    const dashChatRoot = document.getElementById("dashboard-chat");
+    if (dashKpisRoot && dashChatRoot) {
+      dashboardWs = new DashboardWorkspace(dashKpisRoot, dashChatRoot, {
+        getSchedule: () => scheduleRef,
+        getDate: () => lastDate,
+        getModels: () => models.all.map((m) => ({ id: m.id, name: m.displayName, visible: m.visible })),
+        getProjectName: () => projectName ?? models.label(),
+        getProductCount: () => {
+          if (!highlighter) return 0;
+          let n = 0;
+          for (const m of models.visible) n += highlighter.geomIdsOf(m.id)?.length ?? 0;
+          return n;
+        },
+        getSelectedGuids: () => highlighter?.getWorkingGuids() ?? [],
+        loadCatalog: async () => {
+          if (!highlighter) return null;
+          const entries = models.visible
+            .filter((m) => m.role !== "coordination")
+            .map((m) => {
+              const model = viewportModels.get(m.id);
+              return model ? { model, modelId: m.id, label: m.displayName } : null;
+            })
+            .filter((item): item is { model: NonNullable<ReturnType<typeof viewportModels.get>>; modelId: string; label: string } => !!item);
+          if (!entries.length) return null;
+          return buildBimCatalog(entries, highlighter);
+        },
+        onDateChange: (date) => {
+          lastDate = date;
+          if (nav.getWorkspace() === "viewer") currentDateEl.textContent = formatDateLabel(lastDate);
+          refreshCost5d();
+        },
+        onFocusGuids: (guids) => {
+          void focusGuidsInView(guids);
+        },
+        onPaintModel: (plan) => {
+          void (async () => {
+            if (!highlighter) return;
+            if (plan.clear) {
+              await highlighter.clearPaint();
+              await highlighter.clearIsolation();
+              await highlighter.clearSelection();
+              await highlighter.revealAll();
+              refreshWorkingUi();
+              return;
+            }
+            const n = await highlighter.paintGroups(plan.groups, { isolate: plan.isolate });
+            refreshWorkingUi();
+            if (!n) return;
+            const sets = highlighter.paintedItems();
+            if (sets.length) await fitCameraToItemSets(viewer, sets, { skipModelIds: skipFitIds() });
+          })();
+        },
+        getAllGuids: () => highlighter?.allGuids() ?? [],
+        onRevealAll: () => {
+          void (async () => {
+            if (!highlighter) return;
+            await highlighter.clearPaint();
+            await highlighter.clearIsolation();
+            await highlighter.clearSelection();
+            await highlighter.revealAll();
+            refreshWorkingUi();
+          })();
+        },
+        onHideKpis: () => setPanelOpen("kpis", false),
+        onHideChat: () => setPanelOpen("chat", false),
+      });
+      if (nav.getWorkspace() === "viewer") dashboardWs.setActive(true);
+    }
 
     const resetEmptyWorkspace = () => {
       selectedTask = null;
@@ -3780,6 +4034,8 @@ async function main() {
       if (scheduleCountEl) scheduleCountEl.textContent = "0";
       refreshInspector();
       refreshCost5d();
+      dashboardWs?.invalidateCatalog();
+      modelsWs?.refresh();
       setImportVisible(true);
       projectName = null;
       resetSitePackage();
@@ -3795,6 +4051,8 @@ async function main() {
         return;
       }
       loading = true;
+      const onModels = nav.getWorkspace() === "models";
+      if (onModels) modelsWs?.setPageBusy(true, "A converter o IFC para Fragments.");
       try {
         if (vtwin) {
           const buffer = new Uint8Array(await vtwin.arrayBuffer());
@@ -3813,6 +4071,8 @@ async function main() {
         setLoading(false);
       } finally {
         loading = false;
+        modelsWs?.setPageBusy(false);
+        modelsWs?.refresh();
         if (fileInput) fileInput.value = "";
       }
     };
@@ -3975,15 +4235,21 @@ async function main() {
         }
         return;
       }
-      if (e.code === "KeyV" && workspaceHasEarth(nav.getWorkspace())) {
+      if (e.code === "KeyH" && viewerLive()) {
+        e.preventDefault();
+        void drone?.toggle();
+        return;
+      }
+      if (e.code === "KeyV" && viewerLive()) {
         e.preventDefault();
         void walk?.toggle();
         return;
       }
-      if (walk?.wantsExclusiveKeys()) {
+      if (walk?.wantsExclusiveKeys() || drone?.wantsExclusiveKeys()) {
         if (e.code === "KeyF") {
           e.preventDefault();
-          walk.respawn();
+          if (drone?.enabled) drone.respawn();
+          else walk?.respawn();
         }
         return;
       }
@@ -4091,6 +4357,7 @@ async function main() {
     let tripStamp = performance.now();
     const tick = async () => {
       walk?.update();
+      drone?.update();
       const now = performance.now();
       const dt = Math.min(0.05, (now - tripStamp) / 1000 || 0.016);
       tripStamp = now;
@@ -4105,14 +4372,22 @@ async function main() {
         if (handle) viewportEl.dataset.resizeHandle = `${Math.round(handle.x)},${Math.round(handle.y)}`;
         else delete viewportEl.dataset.resizeHandle;
       }
-      if (shellKind !== "placeholder" && dirty && !applying && highlighter && scheduleRef && models.visible.length) {
+      if (
+        shellKind !== "placeholder" &&
+        shellKind !== "viewer" &&
+        shellKind !== "models" &&
+        dirty &&
+        !applying &&
+        highlighter &&
+        scheduleRef &&
+        models.visible.length
+      ) {
         dirty = false;
         applying = true;
         try {
           if (
             shellKind === "plan" ||
             shellKind === "logistics" ||
-            shellKind === "viewer" ||
             shellKind === "docs" ||
             shellKind === "editor" ||
             shellKind === "coordination"

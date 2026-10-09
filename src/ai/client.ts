@@ -4,10 +4,35 @@ export interface AiStatus {
   model: string;
 }
 
+export type AiThinking = "low" | "medium" | "high";
+
+export type AiContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+export interface AiChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string | AiContentPart[];
+}
+
+export interface AiStreamEvent {
+  thinking?: string;
+  content?: string;
+}
+
 export interface AiChatInput {
-  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>;
+  messages: AiChatMessage[];
   temperature?: number;
   json?: boolean;
+  stream?: boolean;
+  thinking?: AiThinking;
+  signal?: AbortSignal;
+  onEvent?: (event: AiStreamEvent) => void;
+}
+
+export interface AiChatResult {
+  content: string;
+  thinking: string;
 }
 
 const LEGACY_LS = "vtwin.linkAssist.openai";
@@ -42,21 +67,69 @@ async function readError(res: Response): Promise<string> {
   return `IA recusou o pedido (${res.status})`;
 }
 
-export async function aiChat(input: AiChatInput): Promise<string> {
+export async function aiChat(input: AiChatInput): Promise<AiChatResult> {
   const res = await fetch("/api/ai/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", Accept: input.stream ? "text/event-stream" : "application/json" },
     body: JSON.stringify({
       messages: input.messages,
       temperature: input.temperature ?? 0,
       json: Boolean(input.json),
+      stream: Boolean(input.stream && !input.json),
+      thinking: input.thinking ?? "low",
     }),
+    signal: input.signal,
   });
   if (!res.ok) throw new Error(await readError(res));
-  const json = (await res.json()) as { content?: string };
+  const ctype = res.headers.get("content-type") ?? "";
+  if (input.stream && !input.json && ctype.includes("text/event-stream") && res.body) {
+    return readSse(res.body, input.onEvent);
+  }
+  const json = (await res.json()) as { content?: string; thinking?: string };
   const content = json.content?.trim() ?? "";
+  const thinking = json.thinking?.trim() ?? "";
   if (!content) throw new Error("A IA não devolveu conteúdo utilizável.");
-  return content;
+  if (thinking) input.onEvent?.({ thinking });
+  if (content) input.onEvent?.({ content });
+  return { content, thinking };
+}
+
+async function readSse(body: ReadableStream<Uint8Array>, onEvent?: (event: AiStreamEvent) => void): Promise<AiChatResult> {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let content = "";
+  let thinking = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    const lines = buf.split("\n");
+    buf = lines.pop() ?? "";
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) continue;
+      const data = trimmed.slice(5).trim();
+      if (!data || data === "[DONE]") continue;
+      let json: { thinking?: string; content?: string; error?: string };
+      try {
+        json = JSON.parse(data) as { thinking?: string; content?: string; error?: string };
+      } catch {
+        continue;
+      }
+      if (json.error) throw new Error(json.error);
+      if (typeof json.thinking === "string" && json.thinking) {
+        thinking += json.thinking;
+        onEvent?.({ thinking });
+      }
+      if (typeof json.content === "string" && json.content) {
+        content += json.content;
+        onEvent?.({ content });
+      }
+    }
+  }
+  if (!content.trim()) throw new Error("A IA não devolveu conteúdo utilizável.");
+  return { content, thinking };
 }
 
 export function parseJsonContent<T>(content: string): T {
@@ -71,6 +144,15 @@ export function parseJsonContent<T>(content: string): T {
   }
 }
 
+export function tryParseJsonContent<T>(content: string): T | null {
+  try {
+    return parseJsonContent<T>(content);
+  } catch {
+    return null;
+  }
+}
+
 export async function aiChatJson<T>(input: AiChatInput): Promise<T> {
-  return parseJsonContent<T>(await aiChat({ ...input, json: true }));
+  const result = await aiChat({ ...input, json: true, stream: false });
+  return parseJsonContent<T>(result.content);
 }

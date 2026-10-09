@@ -10,6 +10,7 @@
 
 export type WorkspaceId =
   | "dashboard"
+  | "models"
   | "viewer"
   | "docs"
   | "schedule-4d"
@@ -24,6 +25,7 @@ export type WorkspaceShell =
   | "plan"
   | "logistics"
   | "site"
+  | "models"
   | "dashboard"
   | "viewer"
   | "docs"
@@ -34,6 +36,7 @@ export type WorkspaceShell =
 export type NavIconId =
   | "dashboard"
   | "viewer"
+  | "models"
   | "docs"
   | "planning"
   | "schedule4d"
@@ -70,6 +73,38 @@ export interface AppModule {
 }
 
 export const APP_MODULES: AppModule[] = [
+  {
+    id: "models",
+    label: "Modelos",
+    description: "Disciplinas IFC, versões e malha",
+    icon: "models",
+    tools: [
+      {
+        id: "models",
+        label: "Modelos",
+        hint: "Disciplinas e versões",
+        description: "Listagem das disciplinas IFC e atualização de versão",
+        workspace: "models",
+        icon: "models",
+      },
+    ],
+  },
+  {
+    id: "viewer",
+    label: "Visualizador",
+    description: "Vista 3D, indicadores e chat para consultar o modelo",
+    icon: "viewer",
+    tools: [
+      {
+        id: "viewer",
+        label: "Visualizador",
+        hint: "3D e chat",
+        description: "Vista 3D, indicadores 4D/5D e chat para consultar e colorir o modelo",
+        workspace: "viewer",
+        icon: "viewer",
+      },
+    ],
+  },
   {
     id: "planning",
     label: "Planejamento",
@@ -132,22 +167,6 @@ export const APP_MODULES: AppModule[] = [
         description: "Indicadores calculados sobre o cronograma, o custo e as ligações 3D",
         workspace: "dashboard",
         icon: "dashboard",
-      },
-    ],
-  },
-  {
-    id: "viewer",
-    label: "Visualizador",
-    description: "Vista 3D do viewport já aberto",
-    icon: "viewer",
-    nav: false,
-    tools: [
-      {
-        id: "viewer",
-        label: "Visualizador",
-        description: "Vista 3D do modelo IFC já aberto",
-        workspace: "viewer",
-        icon: "viewer",
       },
     ],
   },
@@ -223,6 +242,7 @@ export function workspaceShell(id: WorkspaceId): WorkspaceShell {
   if (id === "project-plan") return "plan";
   if (id === "logistics") return "logistics";
   if (id === "site-plan") return "site";
+  if (id === "models") return "models";
   if (
     id === "dashboard" ||
     id === "viewer" ||
@@ -235,9 +255,14 @@ export function workspaceShell(id: WorkspaceId): WorkspaceShell {
   return "placeholder";
 }
 
-export function workspaceHasEarth(id: WorkspaceId): boolean {
+/** Ecrãs em que o canvas 3D existe. No Gantt ele só aparece com o modelo aberto. */
+export function workspaceHasViewport(id: WorkspaceId): boolean {
   const shell = workspaceShell(id);
-  return shell === "schedule" || shell === "logistics" || shell === "site";
+  return shell !== "models" && shell !== "placeholder";
+}
+
+export function workspaceHasEarth(id: WorkspaceId): boolean {
+  return workspaceHasViewport(id);
 }
 
 export function findTool(toolId: string): AppTool | undefined {

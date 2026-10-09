@@ -10,6 +10,8 @@ export interface SiteDrawOptions {
   onDraft: (points: THREE.Vector3[]) => void;
   onComplete: (points: THREE.Vector3[]) => void;
   onCancel: () => void;
+  /** Caminhada ou drone: o clique não marca vértices. */
+  blocked?: () => boolean;
 }
 
 /**
@@ -18,6 +20,7 @@ export interface SiteDrawOptions {
  */
 export class SiteDrawController {
   private opts: SiteDrawOptions;
+  private readonly blocked: () => boolean;
   private enabled = false;
   private points: THREE.Vector3[] = [];
   private armed = false;
@@ -31,6 +34,7 @@ export class SiteDrawController {
 
   constructor(opts: SiteDrawOptions) {
     this.opts = opts;
+    this.blocked = opts.blocked ?? (() => false);
     opts.viewport.addEventListener("pointerdown", this.onDown);
     window.addEventListener("pointermove", this.onMove);
     window.addEventListener("pointerup", this.onUp);
@@ -82,14 +86,14 @@ export class SiteDrawController {
   }
 
   private onDown = (e: PointerEvent) => {
-    if (!this.enabled || e.button !== 0) return;
+    if (!this.enabled || e.button !== 0 || this.blocked()) return;
     this.armed = true;
     this.start.x = e.clientX;
     this.start.y = e.clientY;
   };
 
   private onMove = (e: PointerEvent) => {
-    if (!this.enabled) return;
+    if (!this.enabled || this.blocked()) return;
     const hit = this.pick(e);
     if (!hit) return;
     this.hover.copy(hit);
@@ -113,13 +117,13 @@ export class SiteDrawController {
   };
 
   private onDbl = (e: MouseEvent) => {
-    if (!this.enabled) return;
+    if (!this.enabled || this.blocked()) return;
     e.preventDefault();
     this.finish();
   };
 
   private onKey = (e: KeyboardEvent) => {
-    if (!this.enabled) return;
+    if (!this.enabled || this.blocked()) return;
     const tag = (e.target as HTMLElement | null)?.tagName;
     if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
     if (e.code === "Escape") {

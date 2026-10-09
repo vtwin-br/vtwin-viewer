@@ -6,6 +6,8 @@ const KEY = {
   timeline: "vista4d.timelineH",
   planGantt: "vista4d.planGanttW",
   planSets: "vista4d.planSetsW",
+  dashKpi: "vista4d.dashKpiW",
+  dashChat: "vista4d.dashChatW",
   earthW: "vista4d.earthW",
   earthH: "vista4d.earthH",
 } as const;
@@ -16,6 +18,8 @@ const DEFAULTS = {
   timeline: 88,
   planGantt: 560,
   planSets: 280,
+  dashKpi: 280,
+  dashChat: 360,
   earthW: 320,
   earthH: 560,
 };
@@ -170,6 +174,24 @@ export function initPanelSplitters(): void {
     axis: "x",
     edge: "start",
   });
+  attach("split-dash-kpi", {
+    key: KEY.dashKpi,
+    cssVar: "--dash-kpi-w",
+    min: 220,
+    max: 480,
+    fallback: DEFAULTS.dashKpi,
+    axis: "x",
+    edge: "end",
+  });
+  attach("split-dash-chat", {
+    key: KEY.dashChat,
+    cssVar: "--dash-chat-w",
+    min: 280,
+    max: 560,
+    fallback: DEFAULTS.dashChat,
+    axis: "x",
+    edge: "start",
+  });
   attach("split-earth", {
     key: KEY.earthW,
     cssVar: "--earth-panel-w",
@@ -201,10 +223,11 @@ export function constrainPanelWidths(): void {
   if (layout === "compact" || layout === "narrow") return;
 
   constrainPlanColumns(grid);
+  constrainDashColumns(grid);
 
   const wsAttr = grid.getAttribute("data-workspace");
   const shellKind = workspaceShell(isWorkspaceId(wsAttr) ? wsAttr : DEFAULT_WORKSPACE);
-  if (shellKind === "placeholder") return;
+  if (shellKind === "placeholder" || shellKind === "viewer" || shellKind === "models") return;
 
   if (grid.classList.contains("schedule-collapsed") && grid.classList.contains("inspector-collapsed")) return;
 
@@ -249,4 +272,27 @@ function constrainPlanColumns(grid: HTMLElement): void {
   if (still > 0 && ganttOpen) {
     applyVar("--plan-gantt-w", clamp(g - still, 280, 900));
   }
+}
+
+function constrainDashColumns(grid: HTMLElement): void {
+  const ws = grid.getAttribute("data-workspace");
+  if (workspaceShell(isWorkspaceId(ws) ? ws : DEFAULT_WORKSPACE) !== "viewer") return;
+  const center = grid.querySelector(".center-column") as HTMLElement | null;
+  if (!center) return;
+  const avail = center.clientWidth;
+  const minView = 240;
+  const wide = grid.getAttribute("data-dash-layout") === "wide";
+  const kpiOpen = !wide && !grid.classList.contains("kpis-collapsed");
+  const chatOpen = !grid.classList.contains("chat-collapsed");
+  let k = kpiOpen ? currentVar("--dash-kpi-w", DEFAULTS.dashKpi) : 0;
+  let c = chatOpen ? currentVar("--dash-chat-w", DEFAULTS.dashChat) : 0;
+  const overflow = k + c + minView + 12 - avail;
+  if (overflow <= 0) return;
+  if (chatOpen) {
+    const next = clamp(c - overflow, 280, 560);
+    applyVar("--dash-chat-w", next);
+    c = next;
+  }
+  const still = k + c + minView + 12 - avail;
+  if (still > 0 && kpiOpen) applyVar("--dash-kpi-w", clamp(k - still, 220, 480));
 }
